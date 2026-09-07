@@ -56,6 +56,50 @@ class LauncherTests(unittest.TestCase):
                         process.kill()
                     process.communicate()
 
+    def test_build_identity_and_remote_warnings(self):
+        with tempfile.TemporaryDirectory(prefix="pr0former version ") as directory:
+            root = Path(directory) / "checkout"
+            root.mkdir()
+            remote = Path(directory) / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(root), *args], stderr=subprocess.DEVNULL, text=True).strip()
+            git("init", "-b", "main")
+            git("config", "user.name", "Launcher test")
+            git("config", "user.email", "test@example.invalid")
+            (root / ".gitignore").write_text("init.sh\ntarget/\n.local/\nstarted\n")
+            (root / "source").write_text("first")
+            git("add", ".")
+            git("commit", "-m", "first")
+            git("remote", "add", "origin", str(remote))
+            git("push", "-u", "origin", "main")
+            old = git("rev-parse", "HEAD")
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "init.sh", root / "init.sh")
+            server = root / "target/release/pr0-server"
+            server.parent.mkdir(parents=True)
+            def binary(hash, dirty="false"):
+                server.write_text(f'#!/bin/bash\nif [ "${{1-}}" = --build-info ]; then echo "pr0former-build-info-v1 {hash} {dirty} 123"; exit; fi\necho started > started\n')
+                server.chmod(0o700)
+            def start():
+                return subprocess.run(["/bin/bash", str(root / "init.sh"), "--start"], capture_output=True, text=True, timeout=12)
+            binary(old)
+            self.assertIn("matches the latest remote commit", start().stdout)
+            (root / "source").write_text("second")
+            git("add", "source"); git("commit", "-m", "second"); git("push")
+            result = start()
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("\x1b[31mWARNING", result.stderr)
+            self.assertIn("does not match this checkout", result.stderr)
+            self.assertIn("Remote tip is", result.stderr)
+            binary(git("rev-parse", "HEAD"), "true")
+            self.assertIn("compiled with uncommitted changes", start().stderr)
+            git("remote", "set-url", "origin", str(remote) + "-missing")
+            self.assertIn("could not be verified", start().stderr)
+            server.write_text('#!/bin/bash\nif [ "$#" -ne 0 ]; then exit 99; fi\necho started > started\n')
+            result = start()
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("no Git build identity", result.stderr)
+
     def test_bind_flags(self):
         with tempfile.TemporaryDirectory(prefix="pr0former bind ") as directory:
             root = Path(directory)

@@ -6,8 +6,9 @@ import { Handle, Position } from '@vue-flow/core'
 import { Settings2 } from 'lucide-vue-next'
 import type { Descriptor, GraphNode, Telemetry } from '../types'
 import { formatValue } from '../api'
+import GraphControl from './GraphControl.vue'
 import DataVisualizer from './DataVisualizer.vue'
-const props = defineProps<NodeProps<{ node: GraphNode; descriptor: Descriptor; values?: Record<string, number>; edit: (id:string)=>void; open: (id: string) => void; connectPort: (id: string, port: string, direction: string) => void; toggleSelection:(id:string)=>void; contextMenu: (id: string, event: MouseEvent) => void }>>()
+const props = defineProps<NodeProps<{ active:boolean;editable:boolean;driven:boolean;setControl:(id:string,value:number|string)=>void;bang:(id:string)=>void;node: GraphNode; descriptor: Descriptor; values?: Record<string, number>; edit: (id:string)=>void; open: (id: string) => void; connectPort: (id: string, port: string, direction: string) => void; toggleSelection:(id:string)=>void; contextMenu: (id: string, event: MouseEvent) => void }>>()
 const telemetry = inject<ShallowRef<Telemetry | null>>('telemetry')
 const telemetryStale=inject<ComputedRef<boolean>>('telemetryStale')
 const values = computed(() => telemetry?.value?.values[props.id])
@@ -16,7 +17,7 @@ const visualization=computed(()=>telemetry?.value?.visualizations?.[props.id])
 const isMath = computed(() => props.data.descriptor.category === 'Math')
 const signal = computed(() => props.data.descriptor.outputs[0]?.signal || props.data.descriptor.inputs[0]?.signal || 'control')
 const inputs = computed(() => [...props.data.descriptor.inputs, ...props.data.descriptor.parameters.filter(p => !p.structural).map(p => ({ id: p.id, label: p.label, signal: 'control' as const }))])
-const height = computed(() => visualizer.value ? props.data.node.kind==='control_visualizer'?190:150+Math.ceil(props.data.node.channels/2)*(props.data.node.kind==='spectral_visualizer'?148:104) : Math.max(isMath.value ? 124 : 156, (props.data.node.kind === 'subgraph' ? 112 : 72) + Math.max(inputs.value.length, props.data.descriptor.outputs.length) * 30))
+const height = computed(() => props.data.node.kind === 'control_input' ? 260 : visualizer.value ? props.data.node.kind==='control_visualizer'?190:150+Math.ceil(props.data.node.channels/2)*(props.data.node.kind==='spectral_visualizer'?148:104) : Math.max(isMath.value ? 124 : 156, (props.data.node.kind === 'subgraph' ? 112 : 72) + Math.max(inputs.value.length, props.data.descriptor.outputs.length) * 30))
 function controlSelect(event: MouseEvent) {
   if (event.ctrlKey && event.button === 0 && !(event.target instanceof Element && event.target.closest('button,.vue-flow__handle'))) {
     event.preventDefault();event.stopPropagation();props.data.toggleSelection(props.id)
@@ -37,6 +38,7 @@ function controlSelect(event: MouseEvent) {
     <div v-for="(port, index) in data.descriptor.outputs" :key="`out-${port.id}`" class="port-row output-port" :style="{ top: `${65 + index * 30}px` }">
       <span>{{ port.label }}</span><Handle :id="port.id" type="source" :position="Position.Right" :class="port.signal" @click.stop="data.connectPort(id, port.id, 'source')" />
     </div>
+    <GraphControl v-if="data.node.kind==='control_input'" :node="data.node" :connected="data.driven" :data="visualization" :stale="telemetryStale??true" :active="data.active" :editable="data.editable" @value="value=>data.setControl(id,value)" @bang="data.bang(id)" />
     <DataVisualizer v-if="visualizer" :kind="data.node.kind" :data="visualization" :sample-rate="telemetry?.sample_rate || 48000" :block-size="telemetry?.block_size || 128" :stale="telemetryStale??true" compact />
     <button v-if="data.node.kind==='subgraph'" class="button small nodrag nopan" style="position:absolute;bottom:26px;left:12px" :aria-label="`Open ${data.node.label}`" @click.stop="data.open(id)">Open subgraph</button><div class="node-foot"><span>{{ signal === 'control' ? 'CONTROL' : `${data.node.channels} CH` }}</span><span class="node-readout">{{visualizer ? 'PASS THROUGH' : values ? formatValue(values._out) : '—'}}</span></div>
   </div>

@@ -4,7 +4,7 @@ import { VueFlow, useVueFlow, SelectionMode } from '@vue-flow/core'
 import type { Connection, Node as FlowNode, Edge as FlowEdge } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
-import { Activity, AudioLines, ChevronDown, ChevronRight, CircleHelp, Disc3, FolderOpen, Headphones, LayoutGrid, LogOut, Maximize, Music2, Network, Pause, Play, Plus, Radio, Search, Settings, Settings2, Square, Users, X, Download, Upload, Undo2 } from 'lucide-vue-next'
+import { Activity, AudioLines, ChevronDown, ChevronRight, Disc3, FolderOpen, Headphones, LayoutGrid, LogOut, Maximize, Music2, Network, Pause, Play, Plus, Radio, Search, Settings, Settings2, Square, Users, X, Download, Upload, Undo2 } from 'lucide-vue-next'
 import SubgraphLibrary from './components/SubgraphLibrary.vue'
 import SaveSubgraphDialog from './components/SaveSubgraphDialog.vue'
 import PatchNode from './components/PatchNode.vue'
@@ -26,7 +26,7 @@ async function toggleEngine(){if(!project.value)return;await api(`/projects/${pr
 
 const stage = ref(false), stageMonitor = ref(false)
 import { api } from './api'
-import { nodeDescriptor, descendants, duplicateNodes } from './subgraphs'
+import { nodeDescriptor, descendants, duplicateNodes, makeSubgraph } from './subgraphs'
 import { importMusicXML, exportMusicXML } from './musicxml'
 import type { Descriptor, GraphEdge, GraphNode, Member, Mode, Part, Project, Summary, Telemetry } from './types'
 
@@ -35,6 +35,7 @@ const bootstrap = ref(false), registering = ref(false), username = ref(''), pass
 const busy = ref(false), error = ref(''), notice = ref('')
 const summaries = ref<Summary[]>([]), project = ref<Project | null>(null), role = ref('performer')
 const descriptors = ref<Descriptor[]>([]), members = ref<Member[]>([])
+const nodeLibraryOpen = ref(true)
 const tab = ref('graph'), library = ref(true), search = ref(''), category = ref('All nodes')
 const selectedNode = ref<string | null>(null), selectedPart = ref(''), projectPicker = ref(false), creating = ref(false)
 const newName = ref('Untitled performance'), newMode = ref<Mode>('conducted')
@@ -43,7 +44,7 @@ const tempoSource = computed(() => project.value?.graph.edges.find(e => e.target
 const activeId = ref<string | null>(null), bpmDraft = ref(120), saving = ref(false), fullscreen = ref(false)
 const devices = ref<any>(null), inviteLink = ref(''), inviteRole = ref('performer')
 const libraryPanel = ref<InstanceType<typeof SubgraphLibrary>>(), savingSubgraph = ref<string | null>(null)
-const nodeMenu = ref<{ id: string; x: number; y: number } | null>(null)
+const nodeMenu = ref<{ id: string; ids: string[]; x: number; y: number } | null>(null)
 let menuOrigin: HTMLElement | null = null
 const undo = ref<Project[]>([]), selectedEdges = ref<string[]>([])
 const nodeTypes = { instrument: markRaw(PatchNode) }, edgeTypes = { signal: markRaw(SignalEdge) }
@@ -111,7 +112,7 @@ const partStatus = computed(() => {
 })
 const categories = computed(() => ['All nodes', ...new Set(descriptors.value.map(d => d.category))])
 const catalog = computed(() => descriptors.value.filter(d => (!d.kind.startsWith('subgraph_') || !!graphParent.value) && (category.value === 'All nodes' || d.category === category.value) && `${d.label} ${d.kind} ${d.aliases.join(' ')}`.toLowerCase().includes(search.value.toLowerCase())))
-const flowNodes = computed<FlowNode[]>(() => visibleNodes.value.map(n => ({ id: n.id, type: 'instrument', position: { x: n.x, y: n.y }, draggable: graphEditable.value, data: { node: n, descriptor: nodeDescriptor(n, project.value!.graph.nodes, descriptors.value), open: openNode, edit: (id: string) => selectedNode.value = id, connectPort, toggleSelection, contextMenu: openNodeMenu } })))
+const flowNodes = computed<FlowNode[]>(() => visibleNodes.value.map(n => ({ id: n.id, type: 'instrument', position: { x: n.x, y: n.y }, draggable: graphEditable.value, data: { active:active.value,editable:editable.value&&!progress.value,driven:project.value!.graph.edges.some(e=>e.target===n.id&&e.target_port==='in'),setControl:graphControl,bang:bangControl,node: n, descriptor: nodeDescriptor(n, project.value!.graph.nodes, descriptors.value), open: openNode, edit: (id: string) => selectedNode.value = id, connectPort, toggleSelection, contextMenu: openNodeMenu } })))
 const flowEdges = computed<FlowEdge[]>(() => visibleEdges.value.map(e => {
   const source = project.value!.graph.nodes.find(n => n.id === e.source)
   const d = source ? nodeDescriptor(source, project.value!.graph.nodes, descriptors.value) : undefined
@@ -225,6 +226,7 @@ function libraryDrop(event: DragEvent) {
 }
 async function librarySaved(reference: {id:string;version:number}) {
   const node=savingSubgraph.value;savingSubgraph.value=null
+  nodeLibraryOpen.value=false
   await libraryPanel.value?.refresh()
   if(project.value&&node&&graphEditable.value){const next=clone(project.value),target=next.graph.nodes.find(n=>n.id===node);if(target){target.library=reference;await saveProject(next)}}
 }
@@ -250,7 +252,12 @@ function editParameter(key: string, value: number) {
   if (selectedDescriptor.value?.parameters.find(p => p.id === key)?.structural) {
     if (!graphEditable.value) return
     const next = clone(project.value)
-    next.graph.nodes.find(n => n.id === selected.value!.id)!.parameters[key] = value
+    const node=next.graph.nodes.find(n => n.id === selected.value!.id)!
+    node.parameters[key] = value
+    if(node.kind==='control_input') {
+      const mode=node.parameters.mode??2,min=node.parameters.min??-100000,max=node.parameters.max??100000
+      node.control_value=mode===4?(typeof node.control_value==='string'?node.control_value:''):mode===0?0:Math.max(min,Math.min(max,mode===1?Math.round(Number(node.control_value)||0):Number(node.control_value)||0))
+    }
     void task(() => saveProject(next))
     return
   }
@@ -293,6 +300,24 @@ function removeEdges(ids: string[], nodeIds: string[] = []) {
 }
 function disconnect(edge: GraphEdge) { removeEdges([edge.id]) }
 async function uploadSample(file: File) { if (!project.value || !selected.value) return; const form = new FormData(); form.append('sample', file); const response = await fetch(`/api/projects/${project.value.id}/samples`, { method: 'POST', headers: { 'X-Pr0former': '1' }, body: form }); const result = await response.json(); if (!response.ok) throw new Error(result.error); const next = clone(project.value); const node = next.graph.nodes.find(n => n.id === selected.value!.id)!; node.parameters.asset = result.asset; node.channels = result.channels; await saveProject(next) }
+const pendingControls=new Map<string,number|string>()
+let controlsBusy=false
+function graphControl(id:string,value:number|string){if(!editable.value)return;pendingControls.set(id,value);void flushControls()}
+async function flushControls(){
+  if(controlsBusy||saving.value||!project.value||!pendingControls.size)return
+  controlsBusy=true;parameterPending.value=true;remember()
+  try {
+    while(pendingControls.size&&project.value){
+      const [node,value]=pendingControls.entries().next().value!;pendingControls.delete(node)
+      saving.value=true
+      const saved:Project=await api<Project>(`/projects/${project.value.id}/control`,'PUT',{node,value,revision:project.value.revision})
+      if(project.value?.id===saved.id&&saved.revision>=project.value.revision)project.value=saved
+    }
+  }catch(e){pendingControls.clear();report(e)}finally{saving.value=false;parameterPending.value=false;controlsBusy=false}
+}
+watch(saving,value=>{if(!value)void flushControls()})
+watch(()=>project.value?.id,()=>pendingControls.clear())
+async function bangControl(node:string){if(!project.value||!editable.value||!active.value||saving.value)return;await task(async()=>{await api(`/projects/${project.value!.id}/control`,'PUT',{node,revision:project.value!.revision})})}
 function controlValue(value:number|string){if(!project.value||!selected.value||!graphEditable.value)return;const next=clone(project.value);next.graph.nodes.find(n=>n.id===selected.value!.id)!.control_value=value;void task(()=>saveProject(next))}
 function editCurve(parameters: Record<string, number>) {
   if (!project.value || !selected.value || !graphEditable.value) return
@@ -308,8 +333,10 @@ function renameNode(label: string) {
 }
 async function duplicateNode(id: string) {
   if (!project.value || !graphEditable.value) return
+  const selectedIds=nodeMenu.value?.ids || getSelectedNodes.value.map(n=>n.id)
+  const ids=selectedIds.includes(id)?selectedIds:[id]
   nodeMenu.value = null
-  const next = clone(project.value), copy = duplicateNodes(next.graph.nodes, next.graph.edges, id)
+  const next = clone(project.value), copy = duplicateNodes(next.graph.nodes, next.graph.edges, ids)
   next.graph.nodes.push(...copy.nodes); next.graph.edges.push(...copy.edges)
   await saveProject(next); await nextTick()
   document.querySelector<HTMLElement>(`.vue-flow__node[data-id="${copy.id}"] .patch-node`)?.focus()
@@ -320,10 +347,22 @@ function toggleSelection(id: string) {
   const node=findNode(id);if(!node)return
   if(node.selected)removeSelectedNodes([node]);else addSelectedNodes([...getSelectedNodes.value,node])
 }
+async function groupSelection(ids: string[]) {
+  if(!project.value||!graphEditable.value)return
+  nodeMenu.value=null
+  const next=clone(project.value);makeSubgraph(next.graph.nodes,next.graph.edges,ids,descriptors.value)
+  await saveProject(next)
+}
+function deleteSelection(ids:string[]){nodeMenu.value=null;removeEdges([],ids)}
+function groupMenu({event,nodes}:{event:MouseEvent;nodes:FlowNode[]}) {
+  event.preventDefault();event.stopPropagation()
+  if(nodes[0])void openNodeMenu(nodes[0].id,event)
+}
 async function openNodeMenu(id: string, event: MouseEvent) {
   menuOrigin = event.currentTarget as HTMLElement
   const rect = menuOrigin.getBoundingClientRect()
-  nodeMenu.value = { id, x: Math.max(8, Math.min(event.clientX || rect.left + 20, innerWidth - 188)), y: Math.max(8, Math.min(event.clientY || rect.top + 20, innerHeight - 200)) }
+  const selection=getSelectedNodes.value.map(n=>n.id)
+  nodeMenu.value = { id, ids:selection.includes(id)?selection:[id], x: Math.max(8, Math.min(event.clientX || rect.left + 20, innerWidth - 188)), y: Math.max(8, Math.min(event.clientY || rect.top + 20, innerHeight - 200)) }
   await nextTick()
   document.querySelector<HTMLElement>('.node-context-menu button')?.focus()
 }
@@ -411,8 +450,8 @@ onBeforeUnmount(() => { cancelAnimationFrame(frame); clearInterval(ping); clearT
       <div v-if="project" v-show="!stage" class="workspace-tabs"><nav><button :class="{ active: tab === 'graph' }" @click="tab = 'graph'"><Network :size="16" /> Signal graph</button><button :class="{ active: tab === 'score' }" @click="tab = 'score'"><Music2 :size="16" /> Score & parts</button><button :class="{ active: tab === 'ensemble' }" @click="tab = 'ensemble'"><Users :size="16" /> Ensemble</button><button :class="{ active: tab === 'monitor' }" @click="tab = 'monitor'"><Headphones :size="16" /> Monitor</button></nav><div class="graph-legend"><span><i class="legend-audio"></i>Audio</span><span><i class="legend-control"></i>Control</span><span><i class="legend-spectral"></i>Spectral</span></div></div>
       <StageView v-if="project && stage" :project="project" :part="part" :beat="partBeat" :meter-beat="meterBeat" :bpm="active && telemetry ? telemetry.bpm : project.bpm" :active="active" :stale="stale" :running="running" :status="partStatus" :can-launch="canLaunchPart" :monitor-open="stageMonitor" @select="selectedPart = $event" @launch="playing => task(() => launchPart(playing))" @exit="stage = false; fullscreen = false" @fullscreen="task(toggleFullscreen)" @monitor="stageMonitor = !stageMonitor" />
       <div v-else-if="project && tab === 'graph'" class="graph-workspace">
-        <aside v-if="library" class="node-library"><div class="library-heading"><h3>Node library</h3><button class="icon-button" aria-label="Hide node library" @click="library = false"><LayoutGrid :size="15" /></button></div><label class="search-box"><Search :size="15" /><input v-model="search" placeholder="Find a node…" aria-label="Search nodes"><kbd>/</kbd></label><select v-model="category" aria-label="Node category"><option v-for="c in categories" :key="c">{{ c }}</option></select><div class="library-list"><button v-for="d in catalog" :key="d.kind" class="library-node" :disabled="!graphEditable" :title="d.description" :draggable="graphEditable" @dragstart="libraryDrag($event,d.kind)" @click="addNode(d)"><span class="library-glyph" :class="d.outputs[0]?.signal || 'audio'">{{ d.symbol }}</span><span>{{ d.label }}<small>{{ d.category }}</small></span><Plus :size="13" class="add-sign" /></button></div><div class="library-footer"><CircleHelp :size="15" /><span>Click to add. Connect to explore.<br>Space: play/pause · Ctrl/Cmd+Z: undo<br>D: duplicate · Delete/Backspace: remove<br>Drag box / Ctrl-click: select · Right-drag: pan</span></div><SubgraphLibrary ref="libraryPanel" :editable="graphEditable" @insert="(id,version)=>task(()=>importSubgraph(id,version))" /></aside>
-        <div class="graph-canvas" @dragover.prevent @drop.prevent="libraryDrop"><VueFlow :key="graphParent || 'root'" :nodes="flowNodes" :edges="flowEdges" :node-types="nodeTypes" :edge-types="edgeTypes" :min-zoom="0.2" :max-zoom="2" :nodes-connectable="graphEditable" :delete-key-code="null" :pan-activation-key-code="null" :selection-key-code="true" :multi-selection-key-code="['Control','Meta']" :selection-mode="SelectionMode.Partial" :pan-on-drag="[1,2]" fit-view-on-init @connect="onConnect" @node-drag-stop="nodeDrag" @selection-drag-stop="nodeDrag" @edge-click="({ edge }) => selectedEdges = [edge.id]" @node-click="selectedEdges = []" @pane-click="selectedEdges = []"><Background :gap="24" :size="1" pattern-color="#394043" /><Controls position="bottom-left" :show-interactive="false" /></VueFlow><div class="canvas-top"><button v-if="!library" class="button small" @click="library = true"><LayoutGrid :size="14" /> Library</button><nav class="graph-breadcrumbs" aria-label="Graph path"><button class="text-button" @click="navigateGraph(null)">Root graph</button><template v-for="n in breadcrumbs" :key="n.id"><span> / </span><button class="text-button" @click="navigateGraph(n.id)">{{n.label}}</button></template></nav><span class="canvas-caption">{{ visibleNodes.length }} NODES <span>/</span> {{ visibleEdges.length }} CONNECTIONS</span><div class="canvas-tools"><button class="icon-button" :disabled="!undo.length || !graphEditable" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" @click="task(undoEdit)"><Undo2 :size="16" /></button><button class="icon-button" aria-label="Export project" @click="exportProject"><Download :size="16" /></button><label class="icon-button import-button" title="Import project JSON"><Upload :size="16" /><input type="file" accept=".json" :disabled="active || !editable" @change="importProject"></label></div></div><div v-if="pendingPort" class="connection-hint">Choose a {{ pendingPort.direction === 'source' ? 'target input' : 'source output' }} · Esc to cancel</div><div class="canvas-bottom-note"><span class="tiny-dot"></span>{{ active ? 'SHOW ACTIVE · EDIT NODES AND CONNECTIONS LIVE' : 'PATCH YOUR PERFORMANCE' }}</div></div>
+        <aside v-if="library" class="node-library"><div class="library-heading"><button class="library-accordion-title" :aria-expanded="nodeLibraryOpen" aria-controls="node-library-content" @click="nodeLibraryOpen=!nodeLibraryOpen"><ChevronDown :size="14" :class="{collapsed:!nodeLibraryOpen}" /> Node library</button><button class="icon-button" aria-label="Hide node library" @click="library = false"><LayoutGrid :size="15" /></button></div><div v-show="nodeLibraryOpen" id="node-library-content" class="node-library-content"><label class="search-box"><Search :size="15" /><input v-model="search" placeholder="Find a node…" aria-label="Search nodes"><kbd>/</kbd></label><select v-model="category" aria-label="Node category"><option v-for="c in categories" :key="c">{{ c }}</option></select><div class="library-list"><button v-for="d in catalog" :key="d.kind" class="library-node" :disabled="!graphEditable" :title="d.description" :draggable="graphEditable" @dragstart="libraryDrag($event,d.kind)" @click="addNode(d)"><span class="library-glyph" :class="d.outputs[0]?.signal || 'audio'">{{ d.symbol }}</span><span>{{ d.label }}<small>{{ d.category }}</small></span><Plus :size="13" class="add-sign" /></button></div></div><SubgraphLibrary :open="!nodeLibraryOpen" @toggle="nodeLibraryOpen=!nodeLibraryOpen" ref="libraryPanel" :editable="graphEditable" @insert="(id,version)=>task(()=>importSubgraph(id,version))" /></aside>
+        <div class="graph-canvas" @dragover.prevent @drop.prevent="libraryDrop"><VueFlow :key="graphParent || 'root'" :nodes="flowNodes" :edges="flowEdges" :node-types="nodeTypes" :edge-types="edgeTypes" :min-zoom="0.2" :max-zoom="2" :nodes-connectable="graphEditable" :delete-key-code="null" :pan-activation-key-code="null" :selection-key-code="true" :multi-selection-key-code="['Control','Meta']" :selection-mode="SelectionMode.Partial" :pan-on-drag="[1,2]" fit-view-on-init @connect="onConnect" @node-drag-stop="nodeDrag" @selection-drag-stop="nodeDrag" @selection-context-menu="groupMenu" @edge-click="({ edge }) => selectedEdges = [edge.id]" @node-click="selectedEdges = []" @pane-click="selectedEdges = []"><Background :gap="24" :size="1" pattern-color="#394043" /><Controls position="bottom-left" :show-interactive="false" /></VueFlow><div class="canvas-top"><button v-if="!library" class="button small" @click="library = true"><LayoutGrid :size="14" /> Library</button><nav class="graph-breadcrumbs" aria-label="Graph path"><button class="text-button" @click="navigateGraph(null)">Root graph</button><template v-for="n in breadcrumbs" :key="n.id"><span> / </span><button class="text-button" @click="navigateGraph(n.id)">{{n.label}}</button></template></nav><span class="canvas-caption">{{ visibleNodes.length }} NODES <span>/</span> {{ visibleEdges.length }} CONNECTIONS</span><div class="canvas-tools"><button class="icon-button" :disabled="!undo.length || !graphEditable" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" @click="task(undoEdit)"><Undo2 :size="16" /></button><button class="icon-button" aria-label="Export project" @click="exportProject"><Download :size="16" /></button><label class="icon-button import-button" title="Import project JSON"><Upload :size="16" /><input type="file" accept=".json" :disabled="active || !editable" @change="importProject"></label></div></div><div v-if="pendingPort" class="connection-hint">Choose a {{ pendingPort.direction === 'source' ? 'target input' : 'source output' }} · Esc to cancel</div><div class="canvas-bottom-note"><span class="tiny-dot"></span>{{ active ? 'SHOW ACTIVE · EDIT NODES AND CONNECTIONS LIVE' : 'PATCH YOUR PERFORMANCE' }}</div></div>
       </div>
       <div v-else-if="project && tab === 'score'" class="content-pane"><div class="part-tabs"><button v-for="p in project.parts" :key="p.id" :class="{ active: part?.id === p.id }" @click="selectedPart = p.id"><Music2 :size="15" />{{ p.name }}</button><button v-if="editable" :disabled="active || saving || project.parts.length >= 32" @click="addPart"><Plus :size="14" /> Add part</button></div><div class="score-actions"><button class="button small" @click="downloadXML"><Download :size="14" /> MusicXML</button><label class="button small">Import MusicXML<input type="file" accept=".xml,.musicxml" style="display:none" :disabled="active || !editable" @change="uploadXML"></label><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(true))"><Play :size="14" /> Launch part</button><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(false))"><Square :size="14" /> Stop part</button><output class="mode-pill" aria-label="Part playback status">{{ partStatus }}</output></div><div v-if="part && editable" class="part-routing"><label>Performer<select :value="part.performer || ''" :disabled="active" @change="updatePart({ ...part!, performer: ($event.target as HTMLSelectElement).value || null })"><option value="">Unassigned</option><option v-for="m in members" :key="m.id" :value="m.id">{{ m.username }}</option></select></label><label>Instrument / input<select :value="part.instrument_node || ''" :disabled="active" @change="updatePart({ ...part!, instrument_node: ($event.target as HTMLSelectElement).value || null })"><option value="">Acoustic / external only</option><option v-for="n in project.graph.nodes.filter(n => ['synth', 'browser_input', 'input'].includes(n.kind))" :key="n.id" :value="n.id">{{ n.label }}</option></select></label><label>OSC IP:port<input :value="part.osc_destination || ''" placeholder="192.168.1.10:9000" :disabled="active" @change="updatePart({ ...part!, osc_destination: ($event.target as HTMLInputElement).value || null })"></label><label>OSC address<input :value="part.osc_address" placeholder="/pr0former/note" :disabled="active || saving" @change="updatePart({ ...part!, osc_address: ($event.target as HTMLInputElement).value })"></label><label>MIDI channel<select aria-label="MIDI channel" :value="part.midi_channel || 1" :disabled="active || saving" @change="updatePart({ ...part!, midi_channel: Number(($event.target as HTMLSelectElement).value) })"><option v-for="channel in 16" :key="channel" :value="channel">{{ channel }}</option></select></label><label>MIDI port name<input :value="part.midi_port || ''" placeholder="From Audio setup" :disabled="active" @change="updatePart({ ...part!, midi_port: ($event.target as HTMLInputElement).value || null })"></label></div><ScoreEditor v-if="part" :part="part" :beat="partBeat" :editable="editable && !active && !saving" :beats-per-bar="project.beats_per_bar" :beat-unit="project.beat_unit || 4" @update="updatePart" @meter="updateMeter" /><p class="feature-note">Notation and piano roll edit the same notes. MusicXML import reports unsupported notation before replacing the score. Advanced engraving remains in development.</p></div>
       <div v-else-if="project && tab === 'ensemble'" class="content-pane"><div class="section-heading"><div><div class="eyebrow">PEOPLE IN THE PERFORMANCE</div><h2>Your ensemble</h2></div><span class="mode-pill">{{ members.length }} / 32 PLAYERS</span></div><div class="member-grid"><article v-for="m in members" :key="m.id" class="member-card"><span class="avatar">{{ m.username.slice(0, 2).toUpperCase() }}</span><div><h3>{{ m.username }}</h3><span>{{ m.role }}</span></div></article></div><section v-if="role === 'owner'" class="invite-panel"><h3>Invite a collaborator</h3><p>Create a single-use link valid for seven days.</p><div class="invite-controls"><select v-model="inviteRole"><option value="performer">Performer</option><option value="editor">Editor</option><option value="conductor">Conductor</option></select><button class="button primary" @click="task(invite)"><Plus :size="15" /> Create invitation</button></div><input v-if="inviteLink" :value="inviteLink" readonly aria-label="Invitation link" @focus="($event.target as HTMLInputElement).select()"></section></div>
@@ -422,11 +461,18 @@ onBeforeUnmount(() => { cancelAnimationFrame(frame); clearInterval(ping); clearT
       <footer v-if="project" class="transport-bar"><div class="transport-controls"><button class="icon-button stop-button" :disabled="!active || !conductor" aria-label="Stop" @click="task(() => transport('stop'))"><Square :size="16" fill="currentColor" /></button><button class="play-button" :disabled="!conductor || transportBusy || !!progress" :aria-label="running ? 'Pause' : 'Play'" title="Space: activate and play / pause" @click="task(togglePlayback)"><Pause v-if="running" :size="19" fill="currentColor" /><Play v-else :size="19" fill="currentColor" /></button><div class="position-display"><strong>{{ String(Math.floor(meterBeat / project.beats_per_bar) + 1).padStart(3, '0') }}<span>:</span>{{ String(Math.floor(meterBeat % project.beats_per_bar) + 1).padStart(2, '0') }}</strong><small>BAR · BEAT</small></div></div><div class="tempo-control"><label for="tempo">TEMPO</label><input id="tempo" v-model.number="bpmDraft" type="number" min="1" max="400" :disabled="!active || !conductor || !!tempoSource" :title="tempoSource ? 'Driven by ' + (project.graph.nodes.find(n=>n.id===tempoSource?.source)?.label || tempoSource.source) : 'Project tempo'" @change="task(() => transport('tempo'))"><span title="Quarter notes per minute">♩ BPM</span><div class="beat-lights"><i v-for="b in project.beats_per_bar" :key="b" :class="{ lit: running && Math.floor(meterBeat % project.beats_per_bar) === b - 1 }"></i></div></div><div class="transport-right"><span class="engine-label"><span class="status-dot" :class="{ live: active && !stale }"></span>{{ active ? stale ? 'ENGINE STALE' : 'ENGINE RUNNING' : 'ENGINE IDLE' }}<small>{{ audioSettings.sample_rate / 1000 }} kHz · {{ audioSettings.block_size }}-frame DSP blocks</small></span><button class="button" :disabled="!conductor||active||!!progress" @click="task(toggleEngine)">{{ engineEnabled ? 'Audio engine enabled' : 'Enable audio engine' }}</button><button class="button" :class="{ primary: !active }" :disabled="!conductor||!!progress" @click="task(() => transport(active ? 'deactivate' : 'activate'))">{{ active ? 'Deactivate show' : 'Activate show' }}</button></div></footer>
     </template>
     <div v-if="nodeMenu" class="node-context-menu" role="menu" aria-label="Node actions" :style="{ left: `${nodeMenu.x}px`, top: `${nodeMenu.y}px` }" @keydown="nodeMenuKey">
+      <template v-if="nodeMenu.ids.length>1">
+        <button role="menuitem" :disabled="!graphEditable" @click="task(()=>groupSelection(nodeMenu!.ids))">Make subgraph</button>
+        <button role="menuitem" :disabled="!graphEditable" @click="task(()=>duplicateNode(nodeMenu!.id))">Duplicate</button>
+        <button role="menuitem" class="danger" :disabled="!graphEditable" @click="deleteSelection(nodeMenu.ids)">Delete</button>
+      </template>
+      <template v-else>
       <button role="menuitem" @click="selectedNode = nodeMenu.id; nodeMenu = null">Edit node</button>
       <button v-if="project?.graph.nodes.find(n=>n.id===nodeMenu?.id)?.kind==='subgraph'" role="menuitem" @click="navigateGraph(nodeMenu.id)">Open subgraph</button>
       <button v-if="project?.graph.nodes.find(n=>n.id===nodeMenu?.id)?.kind==='subgraph'" role="menuitem" :disabled="!graphEditable" @click="savingSubgraph=nodeMenu.id;nodeMenu=null">Save to subgraph library</button>
       <button role="menuitem" :disabled="!graphEditable" @click="task(()=>duplicateNode(nodeMenu!.id))">Duplicate node <kbd>D</kbd></button>
       <button role="menuitem" class="danger" :disabled="!graphEditable" @click="deleteNode(nodeMenu.id)">Delete node</button>
+      </template>
     </div>
     <SaveSubgraphDialog v-if="savingSubgraph && project" :project-id="project.id" :revision="project.revision" :node="project.graph.nodes.find(n=>n.id===savingSubgraph)!" @close="savingSubgraph=null" @saved="reference=>task(()=>librarySaved(reference))" />
     <SystemSettings v-if="systemOpen && project" :project-id="project.id" :editable="role==='owner'" :active="!!activeId" @close="systemOpen=false" @saved="task(refreshAudio)" />

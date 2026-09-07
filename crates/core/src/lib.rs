@@ -458,6 +458,30 @@ pub fn catalog() -> Vec<Descriptor> {
         &["spigot"],
     );
     add(
+        "control_input",
+        "Graphical control",
+        "▤",
+        "Control",
+        "Interactive graph control. A connected input is read-only and passes through unchanged. Unconnected Bang emits one engine-sample pulse; other modes use the stored literal.",
+        vec![port("in", Control)],
+        vec![port("out", Control)],
+        vec![
+            Parameter {
+                structural: true,
+                ..param("mode", "Control type", "", 0., 4., 2.)
+            },
+            Parameter {
+                structural: true,
+                ..param("min", "Minimum", "", -100000., 100000., -100000.)
+            },
+            Parameter {
+                structural: true,
+                ..param("max", "Maximum", "", -100000., 100000., 100000.)
+            },
+        ],
+        &[],
+    );
+    add(
         "value",
         "Value",
         "ƒ",
@@ -1222,8 +1246,10 @@ impl Graph {
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
             if let Some(value) = &n.control_value {
-                if n.kind != "control_visualizer" {
-                    return Err("Input literals belong to control visualizers".into());
+                if !matches!(n.kind.as_str(), "control_visualizer" | "control_input") {
+                    return Err(
+                        "Input literals belong to graphical controls or control visualizers".into(),
+                    );
                 }
                 match value {
                     ControlValue::Number(v) if !v.is_finite() => {
@@ -1231,6 +1257,35 @@ impl Graph {
                     }
                     ControlValue::Text(v) if v.len() > MAX_CONTROL_TEXT_BYTES => {
                         return Err("Control strings must be at most 256 UTF-8 bytes".into());
+                    }
+                    _ => {}
+                }
+            }
+            if n.kind == "control_input" {
+                let mode = n.parameters.get("mode").copied().unwrap_or(2.);
+                let min = n.parameters.get("min").copied().unwrap_or(-100000.);
+                let max = n.parameters.get("max").copied().unwrap_or(100000.);
+                if mode.fract() != 0.
+                    || min > max
+                    || (mode == 1. && (min.fract() != 0. || max.fract() != 0.))
+                {
+                    return Err("Choose a control type and valid minimum/maximum (whole numbers for Integer)".into());
+                }
+                match &n.control_value {
+                    Some(ControlValue::Text(_)) if mode != 4. => {
+                        return Err("Only Text mode accepts a text literal".into());
+                    }
+                    Some(ControlValue::Number(v))
+                        if mode == 4.
+                            || (mode != 0.
+                                && (*v < min || *v > max || (mode == 1. && v.fract() != 0.))) =>
+                    {
+                        return Err(
+                            "Manual control value must match its type and minimum/maximum".into(),
+                        );
+                    }
+                    None if mode != 0. && mode != 4. && !(min..=max).contains(&0.) => {
+                        return Err("Set a manual value inside the selected range".into());
                     }
                     _ => {}
                 }
@@ -1394,9 +1449,11 @@ impl Graph {
         }
         let mut text = vec![false; self.nodes.len()];
         for &i in &order {
-            if self.nodes[i].kind == "control_visualizer"
-                || (self.nodes[i].kind.starts_with("subgraph_")
-                    && self.nodes[i].kind.ends_with("_control"))
+            if matches!(
+                self.nodes[i].kind.as_str(),
+                "control_visualizer" | "control_input"
+            ) || (self.nodes[i].kind.starts_with("subgraph_")
+                && self.nodes[i].kind.ends_with("_control"))
             {
                 text[i] = if let Some(edge) = self
                     .edges
@@ -1406,6 +1463,8 @@ impl Graph {
                     text[*ids.get(&edge.source).unwrap()]
                 } else {
                     matches!(self.nodes[i].control_value, Some(ControlValue::Text(_)))
+                        || (self.nodes[i].kind == "control_input"
+                            && self.nodes[i].parameters.get("mode") == Some(&4.))
                 };
             }
         }
@@ -1413,7 +1472,10 @@ impl Graph {
             let source = *ids.get(&edge.source).unwrap();
             let target = *ids.get(&edge.target).unwrap();
             if text[source]
-                && self.nodes[target].kind != "control_visualizer"
+                && !matches!(
+                    self.nodes[target].kind.as_str(),
+                    "control_visualizer" | "control_input"
+                )
                 && !(self.nodes[target].kind.starts_with("subgraph_")
                     && self.nodes[target].kind.ends_with("_control"))
             {

@@ -138,3 +138,16 @@ The library APIs are `GET /api/subgraphs`, `GET /api/subgraphs/:id/versions/:ver
 Insertion generates new IDs for every node/edge and rewrites internal port references, preserving the chosen version as optional `library: { id, version }` provenance on its root. The graph snapshot is embedded in the project, so playback, local editing, exports, and existing dependencies never follow a mutable latest-version pointer. Nested library references are provenance too; all nested graph contents and samples are snapshotted. Saving an edited imported subgraph creates a new version for its library owner or a new entry for another user.
 
 The subgraph library sits below the node library and hides with it. Both support click-to-add and HTML drag/drop mapped through the canvas transform. Empty-canvas dragging selects a rectangle; Control-click (including macOS's native context-click behavior) and Command-click toggle individual selections. Multi-node drags persist all moved positions in one project revision, and deletion/undo apply to the selected subtrees. Right/middle drag pans the canvas; Space remains transport control.
+
+
+## Graphical controls and editor grouping
+
+`control_input` provides Bang, Integer, Float, Slider, and Text widgets in the graph. Type and numeric minimum/maximum are structural modal parameters. The manual literal is stored in `control_value`; Integer requires whole-number limits and values. Connected input passes through unchanged and shows read-only engine telemetry, including incoming text independent of the widget mode. Disconnected Text defaults to an empty string. Strings retain the 256-byte UTF-8 contract.
+
+`PUT /api/projects/:id/control` validates role, revision, type/range, and flattened connectivity. Manual value changes save a revision and send a small prepared-value command to the orchestration worker without recompiling the graph. Bang requires an active show, emits a single engine-sample pulse, and is not persisted. Telemetry remains outside revisions and undo history. Browser edits queue the latest pending value during a save.
+
+D duplicates the whole selection and its internal wires, including nested subgraphs. Right-clicking multiple selected nodes offers Make subgraph, Duplicate, and Delete. Grouping creates typed, named boundaries for crossing connections and preserves existing outer boundary connections through proxies when selected boundary nodes move inward. The server validates the resulting graph through the normal revision endpoint. Node and subgraph libraries share a single-open accordion; the open library fills the sidebar.
+
+## Compiled version identity
+
+The server build script embeds Git HEAD, worktree dirty state, and build time. Git metadata and tracked source changes invalidate the stamp. Direct startup, `--version`, and `/api/status` expose it. Manual `init.sh --start` additionally compares the binary with the checkout and tracked remote tip, using a bounded read-only remote query. Missing upstream, unavailable network, dirty builds, or outdated binaries produce red warnings; launch continues. Rebuild after committing to stamp a clean revision. Startup services print the binary identity but do not run the manual launcher's remote check.

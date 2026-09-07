@@ -1,5 +1,6 @@
 mod audio;
 mod bind;
+mod build_info;
 mod media;
 mod output_buffer;
 mod performance;
@@ -312,7 +313,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
         .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
         .unwrap_or(1);
     Json(
-        json!({"bootstrap":count==0,"version":env!("CARGO_PKG_VERSION"),"active_project":*app.active.lock().unwrap(),"monitor_transport":"webrtc_opus"}),
+        json!({"bootstrap":count==0,"version":env!("CARGO_PKG_VERSION"),"build":build_info::json(),"active_project":*app.active.lock().unwrap(),"monitor_transport":"webrtc_opus"}),
     )
 }
 async fn list_projects(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
@@ -441,7 +442,7 @@ async fn update_project(
     let previous = load(&app, &id)?;
     settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
     for node in &p.graph.nodes {
-        if node.kind == "control_visualizer"
+        if matches!(node.kind.as_str(), "control_visualizer" | "control_input")
             && previous
                 .graph
                 .nodes
@@ -485,6 +486,69 @@ async fn update_project(
         )?;
     }
     publish(&app, &p);
+    Ok(Json(p))
+}
+#[derive(Deserialize)]
+struct ControlEdit {
+    node: String,
+    revision: u64,
+    value: Option<pr0_core::ControlValue>,
+}
+async fn control_input(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(c): Json<ControlEdit>,
+) -> Api<Json<Project>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    can_edit(&role(&app, &id, &u)?)?;
+    let _guard = app.setup.lock().await;
+    let mut p = load(&app, &id)?;
+    if p.revision != c.revision {
+        return Err(Failure(StatusCode::CONFLICT, "Stale control edit".into()));
+    }
+    if p.graph
+        .flatten()
+        .map_err(bad)?
+        .edges
+        .iter()
+        .any(|e| e.target == c.node && e.target_port == "in")
+    {
+        return Err(bad("Connected graphical controls are read-only"));
+    }
+    let node = p
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == c.node && n.kind == "control_input")
+        .ok_or_else(|| bad("Graphical control missing"))?;
+    let active = app.active.lock().unwrap().as_deref() == Some(&id);
+    if node.parameters.get("mode") == Some(&0.) {
+        if c.value.is_some() {
+            return Err(bad("Use a Bang trigger, not a stored value"));
+        }
+        if !active {
+            return Err(bad("Activate the show before triggering Bang"));
+        }
+        send(&app, audio::Command::Bang(c.node))?;
+    } else {
+        let value = c.value.ok_or_else(|| bad("Control value required"))?;
+        node.control_value = Some(value.clone());
+        p.validate().map_err(bad)?;
+        save_revision(&app, &mut p)?;
+        if active {
+            send(
+                &app,
+                audio::Command::Control {
+                    node: c.node,
+                    value,
+                    revision: p.revision,
+                },
+            )?;
+        }
+        publish(&app, &p);
+    }
     Ok(Json(p))
 }
 #[derive(Deserialize)]
@@ -1018,6 +1082,23 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String) {
 
 #[tokio::main]
 async fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V") => {
+            println!("{}", build_info::display());
+            return;
+        }
+        Some("--build-info") => {
+            println!(
+                "pr0former-build-info-v1 {} {} {}",
+                build_info::GIT,
+                build_info::DIRTY,
+                build_info::BUILT
+            );
+            return;
+        }
+        _ => {}
+    }
+    println!("{}", build_info::display());
     let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -1057,6 +1138,7 @@ async fn main() {
         )
         .route("/api/projects/{id}/logs", get(settings::logs))
         .route("/api/projects/{id}/preview", get(preview))
+        .route("/api/projects/{id}/control", put(control_input))
         .route("/api/subgraphs", get(subgraphs::list))
         .route(
             "/api/subgraphs/{id}/versions/{version}",

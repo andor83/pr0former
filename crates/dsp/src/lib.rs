@@ -141,6 +141,7 @@ struct RuntimeNode {
     voices: [Voice; 64],
     external: [f32; MAX_CHANNELS],
     external_set: bool,
+    bang: bool,
     phase: f64,
     previous: f64,
     count: f64,
@@ -181,11 +182,16 @@ impl RuntimeNode {
                 self.control_text = self.input_text;
             }
             "audio_to_control" => scalar = input[0] * self.p("scale") + self.p("offset"),
-            "control_visualizer" => {
+            "control_visualizer" | "control_input" => {
                 if self.bindings.is_empty() {
-                    match self.fallback {
-                        visualizer::Datum::Number(value) => scalar = value,
-                        visualizer::Datum::Text(value) => self.control_text = Some(value),
+                    if self.kind == "control_input" && self.p("mode") == 0. {
+                        scalar = self.bang as u8 as f64;
+                        self.bang = false;
+                    } else {
+                        match self.fallback {
+                            visualizer::Datum::Number(value) => scalar = value,
+                            visualizer::Datum::Text(value) => self.control_text = Some(value),
+                        }
                     }
                 } else {
                     scalar = input[0];
@@ -720,7 +726,14 @@ impl Engine {
                 control: [0.; 3],
                 control_text: None,
                 input_text: None,
-                fallback: visualizer::Datum::prepare(n.control_value.as_ref()),
+                fallback: if n.kind == "control_input"
+                    && n.parameters.get("mode") == Some(&4.)
+                    && n.control_value.is_none()
+                {
+                    visualizer::Datum::prepare(Some(&pr0_core::ControlValue::Text(String::new())))
+                } else {
+                    visualizer::Datum::prepare(n.control_value.as_ref())
+                },
                 analyzer: if matches!(n.kind.as_str(), "audio_visualizer" | "spectral_visualizer") {
                     Some(Box::new(visualizer::Analyzer::new(
                         n.parameters.get("size").copied().unwrap_or(1024.) as usize,
@@ -732,6 +745,7 @@ impl Engine {
                 voices: [Voice::default(); 64],
                 external: [0.; MAX_CHANNELS],
                 external_set: false,
+                bang: false,
                 phase: 0.,
                 previous: -1.,
                 count: 0.,
@@ -1019,6 +1033,22 @@ impl Engine {
             n.external_set = true;
         }
     }
+    pub fn control(&mut self, id: &str, value: &pr0_core::ControlValue) {
+        if let Some(node) = self
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id && n.kind == "control_input" && n.bindings.is_empty())
+        {
+            node.fallback = visualizer::Datum::prepare(Some(value));
+        }
+    }
+    pub fn bang(&mut self, id: &str) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| {
+            n.id == id && n.kind == "control_input" && n.bindings.is_empty() && n.p("mode") == 0.
+        }) {
+            node.bang = true;
+        }
+    }
     pub fn parameter(&mut self, node: &str, key: &str, value: f64) -> Result<(), String> {
         let n = self
             .nodes
@@ -1141,7 +1171,7 @@ impl Engine {
             .iter()
             .filter_map(|node| {
                 let value = match node.kind.as_str() {
-                    "control_visualizer" => Visualization::Control {
+                    "control_visualizer" | "control_input" => Visualization::Control {
                         value: node
                             .control_text
                             .map(|t| ControlValue::Text(t.as_str().to_owned()))
@@ -1260,6 +1290,57 @@ impl Fourier {
 mod tests {
     use super::*;
     use pr0_core::{Mode, demo_project};
+    #[test]
+    fn graphical_control_bang_is_one_sample_and_input_overrides_manual_value() {
+        let mut node = visual_node("gui", "control_input", 1);
+        node.parameters.insert("mode".into(), 0.);
+        let mut e = Engine::prepare(
+            Graph {
+                nodes: vec![node.clone()],
+                edges: vec![],
+            },
+            48000.,
+        )
+        .unwrap();
+        e.bang("gui");
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert_eq!(e.telemetry()["gui"]["_out"], 1.);
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert_eq!(e.telemetry()["gui"]["_out"], 0.);
+        node.parameters.insert("mode".into(), 2.);
+        node.control_value = Some(pr0_core::ControlValue::Number(3.));
+        let mut e = Engine::prepare(
+            Graph {
+                nodes: vec![node.clone()],
+                edges: vec![],
+            },
+            48000.,
+        )
+        .unwrap();
+        e.control("gui", &pr0_core::ControlValue::Number(8.5));
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert_eq!(e.telemetry()["gui"]["_out"], 8.5);
+        let mut source = visual_node("text", "control_input", 1);
+        source.parameters.insert("mode".into(), 4.);
+        source.control_value = Some(pr0_core::ControlValue::Text("test".into()));
+        let graph = Graph {
+            nodes: vec![node, source],
+            edges: vec![pr0_core::Edge {
+                id: "wire".into(),
+                source: "text".into(),
+                source_port: "out".into(),
+                target: "gui".into(),
+                target_port: "in".into(),
+            }],
+        };
+        let mut e = Engine::prepare(graph, 48000.).unwrap();
+        e.control("gui", &pr0_core::ControlValue::Number(99.));
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert!(
+            matches!(&e.visualizations()["gui"],pr0_core::Visualization::Control{value:pr0_core::ControlValue::Text(s)} if s=="test")
+        );
+    }
+
     #[test]
     fn subgraph_boundaries_preserve_audio_control_and_spectral_signals() {
         for signal in ["audio", "control", "spectral"] {

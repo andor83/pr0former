@@ -67,7 +67,16 @@ This repository is a **development alpha**. The complete agreed performance-plat
 10. **SDK/contracts:** built-ins still require an explicit dispatcher branch. Automatic Rust-to-TypeScript generation, declarative plugin registration, full typed parameter metadata, sandboxing, and dynamic loading are not present.
 11. **UI telemetry:** no server-side per-modal subscription filtering, min/max audio-rate summaries, robust clock drift regression, per-edge event pulses, or correct undo grouping across an arbitrarily long slider gesture yet.
 
+## Production checkpoint scope (2026-09-07)
+
+Graphical controls now support inline Bang/Integer/Float/Slider/Text input, with modal numeric limits and read-only connected passthrough. Multiple-node duplication, group context menus and Make subgraph are implemented. The libraries use one accordion without the hint footer. Compiled Git identity is printed on startup and exposed through status; manual startup checks the tracked remote and warns in red when stale or unverifiable.
+
+MIDI/OSC System Settings tabs and OSC receiving are **not included** in this checkpoint. Ableton Link has been researched, not implemented. See HANDOFF.md for the accepted next scope and migration instructions.
+
 ## Validation record
+
+- Editor/control/startup checkpoint (2026-09-07): 77 Rust tests (9 core, 43 DSP, 25 server), nine frontend unit tests, ten Chromium/API integration tests, and the frontend production build passed. Tests cover one-sample Bang, numeric/text passthrough, connected edit rejection, numeric limits and integer validation, live widget edits, multi-node D duplication and undo, the three-item group context menu, live grouping with retained control output, typed boundary formats and nested boundary proxies, and library accordion visibility. Bash 3.2 syntax/help and isolated launcher tests passed, including build identity, stale/dirty/offline warnings and unchanged startup settings. Hardware listening and timing remain manual/unverified.
+
 
 - Input selection, clock control, nested graphs and libraries (2026-09-07): all 76 Rust tests (9 core, 42 DSP, 25 server), six frontend tests, nine Chromium/API integration tests, and frontend/release builds passed. Tests cover separate native input frames and offsets, native route enablement and legacy settings, phase-preserving connected tempo, typed audio/control/spectral boundaries at 1/2/8 channels, and 200 nesting levels with containment-cycle rejection. Browser tests exercise live nested edits, port renaming, independent subtree duplication, deletion/undo, both library drag/drop paths, exact placement, Control-click on macOS, box selection, and moving/deleting multiple nodes. Library API tests verify private access, immutable old versions, irreversible publication, private forks, owner checks, and byte-identical bundled WAV originals copied into a consumer project. Browser device discovery/denial tests use mocks; the existing synthetic WebRTC cancellation regression also passes. Nested-graph and library screenshots were inspected. Physical inputs, real browser permission prompts/microphones, independent device drift and high-load/endurance remain manual/unverified. No startup services or user project data were changed.
 

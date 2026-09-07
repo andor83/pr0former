@@ -58,6 +58,8 @@ test('library panel save, version selection, drag placement and multiple-node se
   p=await(await page.request.put(`/api/projects/${p.id}`,{headers,data:p})).json()
   const load=async()=>(await(await page.request.get(`/api/projects/${p.id}`)).json()).project
   await page.goto('/')
+  await expect(page.getByText('Click to add. Connect to explore.',{exact:false})).toHaveCount(0)
+  await expect(page.getByRole('button',{name:'Node library',exact:true})).toHaveAttribute('aria-expanded','true')
   await page.locator('.vue-flow__node[data-id="Group"] .patch-node').click({button:'right'})
   await page.getByRole('menuitem',{name:'Save to subgraph library',exact:true}).click()
   await page.getByLabel('Library name').fill('UI reusable')
@@ -79,8 +81,10 @@ test('library panel save, version selection, drag placement and multiple-node se
   await expect.poll(async()=>(await load()).graph.nodes.length).toBe(4)
   const copy=(await load()).graph.nodes.find((n:any)=>n.kind==='subgraph'&&n.id!=='Group')
   expect(copy.library.version).toBe(1)
+  await page.getByRole('button',{name:'Node library',exact:true}).click()
+  await expect(page.getByRole('button',{name:'Subgraph library',exact:true})).toHaveAttribute('aria-expanded','false')
   await page.getByLabel('Search nodes').fill('Value')
-  await page.locator('.node-library>.library-list .library-node').filter({hasText:'Value'}).first().dragTo(canvas,{targetPosition:{x:rect.width*0.3,y:rect.height*0.93}})
+  await page.locator('.node-library-content>.library-list .library-node').filter({hasText:'Value'}).first().dragTo(canvas,{targetPosition:{x:rect.width*0.3,y:rect.height*0.93}})
   await expect.poll(async()=>(await load()).graph.nodes.length).toBe(5)
   const placed=(await load()).graph.nodes.find((n:any)=>n.kind==='value'&&!n.parent)
   // Both drops use graph coordinates derived from the requested canvas location.

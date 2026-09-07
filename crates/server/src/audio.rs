@@ -50,6 +50,12 @@ pub enum Command {
     },
     Transport(String),
     Tempo(f64),
+    Control {
+        node: String,
+        value: pr0_core::ControlValue,
+        revision: u64,
+    },
+    Bang(String),
     Devices(oneshot::Sender<Value>),
     Hardware(bool),
     Capture(bool),
@@ -304,6 +310,26 @@ fn run(
                                 n.parameters.insert(key, value);
                             }
                         }
+                    }
+                }
+                Command::Control {
+                    node,
+                    value,
+                    revision,
+                } => {
+                    if let Some(e) = engine.as_mut() {
+                        e.control(&node, &value);
+                    }
+                    if let Some(p) = project.as_mut() {
+                        p.revision = revision;
+                        if let Some(n) = p.graph.nodes.iter_mut().find(|n| n.id == node) {
+                            n.control_value = Some(value);
+                        }
+                    }
+                }
+                Command::Bang(node) => {
+                    if let Some(e) = engine.as_mut() {
+                        e.bang(&node);
                     }
                 }
                 Command::Transport(action) => {

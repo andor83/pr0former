@@ -30,6 +30,9 @@ macOS: startup uses a LaunchAgent for the current user, at login.
 Linux: startup uses a systemd user service, at login.
 The script asks before installing dependencies or changing startup services.
 No administrator account or password is created; bootstrap in the web interface.
+--start prints the compiled Git revision and checks the tracked remote branch (up to 8 seconds).
+Red warnings identify stale/dirty builds or an unverifiable version; startup still continues.
+No source is pulled or rebuilt automatically.
 --start reuses .local/start-pr0former.sh when present, otherwise uses PR0_ environment settings.
 --host and --port override only the specified part of that address for this launch.
 --update requires installed build tools; it does not pull source or restart servers.
@@ -127,12 +130,71 @@ if [ "$STOP_ONLY" = true ]; then
   exit 0
 fi
 
+version_warning() {
+  printf '\033[31mWARNING: %s\033[0m\n' "$1" >&2
+}
+check_start_version() {
+  local binary="$PROJECT_DIR/target/release/pr0-server"
+  local stamp hash dirty built head branch remote ref latest pid watchdog result
+  hash=unknown; dirty=unknown; built=unknown
+  # Older servers ignore CLI arguments and would start a second server here.
+  # Probe only binaries that explicitly contain the build-info protocol marker.
+  if LC_ALL=C grep -a -q 'pr0former-build-info-v1' "$binary"; then
+    if stamp="$("$binary" --build-info)"; then
+      read -r stamp hash dirty built <<< "$stamp"
+    fi
+  fi
+  printf '\nRelease binary: git %s · built at Unix %s\n' "$hash" "$built"
+  if [ "$hash" = unknown ]; then version_warning 'This binary has no Git build identity. Run ./init.sh --update.'; fi
+  if [ "$dirty" = true ]; then version_warning 'This binary was compiled with uncommitted changes; it is not an exact Git revision.'; fi
+  if ! command -v git >/dev/null 2>&1 || ! head="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null)"; then
+    version_warning 'Cannot check Git: this checkout or Git is unavailable.'; return
+  fi
+  printf 'Local checkout: git %s\n' "$head"
+  if [ "$hash" != unknown ] && [ "$hash" != "$head" ]; then
+    version_warning 'The release binary does not match this checkout. Run ./init.sh --update before using the new code.'
+  fi
+  if [ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+    version_warning 'The checkout has uncommitted changes; rebuild with ./init.sh --update to include source edits.'
+  fi
+  branch="$(git -C "$PROJECT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  remote="$(git -C "$PROJECT_DIR" config --get "branch.$branch.remote" || true)"
+  ref="$(git -C "$PROJECT_DIR" config --get "branch.$branch.merge" || true)"
+  if [ -z "$branch" ] || [ -z "$remote" ] || [ -z "$ref" ]; then
+    version_warning 'No tracked upstream branch; cannot verify the latest remote version.'; return
+  fi
+  printf 'Checking latest %s/%s…\n' "$remote" "${ref#refs/heads/}"
+  # Query the remote without fetching, changing refs, or prompting for credentials.
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/pr0former-version.XXXXXX")"
+  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=5' \
+    git -C "$PROJECT_DIR" -c credential.interactive=false ls-remote --exit-code "$remote" "$ref" > "$output" 2>/dev/null &
+  pid=$!
+  (sleep 8; kill -TERM "$pid" 2>/dev/null || true) </dev/null >/dev/null 2>&1 &
+  watchdog=$!
+  result=0; wait "$pid" || result=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  latest="$(awk 'NR==1 {print $1}' "$output")"
+  rm -f "$output"
+  if [ "$result" -ne 0 ] || [ -z "$latest" ]; then
+    version_warning 'Remote check failed or timed out; the latest version could not be verified. Continuing offline.'
+  elif [ "$latest" = "$hash" ] && [ "$dirty" = false ]; then
+    printf 'Release binary matches the latest remote commit (%s).\n' "$latest"
+  elif [ "$hash" != unknown ] && git -C "$PROJECT_DIR" merge-base --is-ancestor "$latest" "$hash" 2>/dev/null; then
+    printf 'Binary revision includes remote tip %s.\n' "$latest"
+  else
+    version_warning "Remote tip is $latest; this binary is not verified to include it. Update your checkout, then run ./init.sh --update."
+  fi
+}
+
 if [ "$START_ONLY" = true ]; then
   if [ ! -x "$PROJECT_DIR/target/release/pr0-server" ]; then
     printf 'A release build is required. Run ./init.sh first (or cargo build --release).\n' >&2
     exit 1
   fi
   cd -- "$PROJECT_DIR"
+  check_start_version
   # These component overrides take precedence over PR0_BIND in saved scripts.
   if [ -n "$START_HOST" ]; then export PR0_HOST="$START_HOST"; fi
   if [ -n "$START_PORT" ]; then export PR0_PORT="$START_PORT"; fi

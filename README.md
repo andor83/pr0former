@@ -20,6 +20,8 @@ After changing or pulling source, rebuild with `./init.sh --update`. This nonint
 ./init.sh --start
 ```
 
+Startup prints the compiled Git commit and build time. `--start` checks the tracked remote branch without pulling, with an eight-second timeout; red warnings identify stale/dirty builds or an unavailable remote check. Startup continues when offline. `target/release/pr0-server --version` and `/api/status` also expose the compiled identity.
+
 Starts the built release server in the foreground; press Ctrl-C to stop. If `.local/start-pr0former.sh` exists, its saved bind address and TLS settings are used. Otherwise, the server uses the current `PR0_` environment settings and listens on `0.0.0.0:4000` (all IPv4 interfaces) by default. Open http://127.0.0.1:4000 locally or use the server's LAN address from another device. This command skips setup and does not require an interactive terminal.
 
 ```sh
@@ -41,6 +43,8 @@ Stops servers launched with `--start` from this project, including from another 
 This opens the startup menu directly: enable startup, disable startup and stop the service, generate only a launch script, or leave configuration unchanged. macOS uses a per-user LaunchAgent; Linux uses a systemd user service. Services start at login, not before login. No startup service is installed merely by cloning the project or running tests.
 
 The script is stored under `.local/start-pr0former.sh`. Service configuration uses absolute paths, so rerun `--startup` after moving the repository. Application data stays in `data/`; disabling startup preserves it.
+
+For moving to another server or continuing development in a new session, see [the migration and development handoff](docs/HANDOFF.md).
 
 ## Manual development
 
