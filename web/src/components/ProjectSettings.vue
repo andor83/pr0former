@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { X } from 'lucide-vue-next'
+import { X } from '@lucide/vue'
 import { api } from '../api'
 import type { Project } from '../types'
 const props = defineProps<{ project: Project; active: boolean; editable: boolean }>()

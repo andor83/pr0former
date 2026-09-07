@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { X, Link2, ArrowUpRight, Unplug, RotateCcw, Activity } from 'lucide-vue-next'
+import { X, Link2, ArrowUpRight, Unplug, RotateCcw, Activity } from '@lucide/vue'
 import type { Descriptor, GraphNode, GraphEdge, Parameter } from '../types'
 import { finiteInput, formatValue } from '../api'
 import BrowserInputPicker from './BrowserInputPicker.vue'

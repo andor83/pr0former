@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { X, ExternalLink } from 'lucide-vue-next'
+import { X, ExternalLink } from '@lucide/vue'
 import { api } from '../api'
 const props=defineProps<{ projectId:string; standalone?:boolean }>()
 const emit=defineEmits<{close:[]}>()

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { Renderer, Stave, StaveNote, Voice, Formatter, Accidental, Dot, StaveTie } from 'vexflow'
-import { Plus, Trash2 } from 'lucide-vue-next'
+import { Plus, Trash2 } from '@lucide/vue'
 import type { Part, Note } from '../types'
 import { durationGlyphs } from '../notation'
 const props = defineProps<{ part: Part; beat: number; editable: boolean; performance?: boolean; beatsPerBar: number; beatUnit: number }>()

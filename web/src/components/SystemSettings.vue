@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { X, AudioLines } from 'lucide-vue-next'
+import { X, AudioLines } from '@lucide/vue'
 import { api } from '../api'
 import TaskProgress from './TaskProgress.vue'
 import ExternalSettings from './ExternalSettings.vue'

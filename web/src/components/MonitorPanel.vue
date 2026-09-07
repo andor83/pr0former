@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { Headphones, Mic, Radio, Square } from 'lucide-vue-next'
+import { Headphones, Mic, Radio, Square } from '@lucide/vue'
 import BrowserInputPicker from './BrowserInputPicker.vue'
 import { browserInputChoices, browserInputBusy, captureError, refreshBrowserInputs } from '../browserInputs'
 import { api } from '../api'
