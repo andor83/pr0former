@@ -1,0 +1,10 @@
+/target
+/web/node_modules
+/web/dist
+/data
+*.log
+.DS_Store
+/.local
+/web/test-results
+/web/playwright-report
+*.tsbuildinfo

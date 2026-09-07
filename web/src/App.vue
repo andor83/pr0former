@@ -1,0 +1,250 @@
+<script setup lang="ts">
+import { defineAsyncComponent, computed, markRaw, onBeforeUnmount, onMounted, ref, shallowRef, provide } from 'vue'
+import { VueFlow, useVueFlow } from '@vue-flow/core'
+import type { Connection, Node as FlowNode, Edge as FlowEdge } from '@vue-flow/core'
+import { Background } from '@vue-flow/background'
+import { Controls } from '@vue-flow/controls'
+import { Activity, AudioLines, ChevronDown, ChevronRight, CircleHelp, Disc3, FolderOpen, Headphones, LayoutGrid, LogOut, Maximize, Music2, Network, Pause, Play, Plus, Radio, Search, Settings2, Square, Users, X, Download, Upload, Undo2 } from 'lucide-vue-next'
+import PatchNode from './components/PatchNode.vue'
+import SignalEdge from './components/SignalEdge.vue'
+import NodeModal from './components/NodeModal.vue'
+const ScoreEditor = defineAsyncComponent(() => import('./components/ScoreEditor.vue'))
+import MonitorPanel from './components/MonitorPanel.vue'
+import StageView from './components/StageView.vue'
+import ProjectSettings from './components/ProjectSettings.vue'
+const settingsOpen = ref(false)
+const stage = ref(false), stageMonitor = ref(false)
+import { api } from './api'
+import { importMusicXML, exportMusicXML } from './musicxml'
+import type { Descriptor, GraphEdge, GraphNode, Member, Mode, Part, Project, Summary, Telemetry } from './types'
+
+const user = ref<{ id: string; username: string } | null>(null)
+const bootstrap = ref(false), registering = ref(false), username = ref(''), password = ref('')
+const busy = ref(false), error = ref(''), notice = ref('')
+const summaries = ref<Summary[]>([]), project = ref<Project | null>(null), role = ref('performer')
+const descriptors = ref<Descriptor[]>([]), members = ref<Member[]>([])
+const tab = ref('graph'), library = ref(true), search = ref(''), category = ref('All nodes')
+const selectedNode = ref<string | null>(null), selectedPart = ref(''), projectPicker = ref(false), creating = ref(false)
+const newName = ref('Untitled performance'), newMode = ref<Mode>('conducted')
+const telemetry = shallowRef<Telemetry | null>(null), receivedAt = ref(0), now = ref(performance.now()), connected = ref(false)
+const activeId = ref<string | null>(null), bpmDraft = ref(120), saving = ref(false), fullscreen = ref(false)
+const devices = ref<any>(null), showDevices = ref(false), inviteLink = ref(''), inviteRole = ref('performer')
+const undo = ref<Project[]>([]), selectedEdges = ref<string[]>([])
+const nodeTypes = { instrument: markRaw(PatchNode) }, edgeTypes = { signal: markRaw(SignalEdge) }
+const { fitView, screenToFlowCoordinate } = useVueFlow()
+let socket: WebSocket | null = null, reconnect: ReturnType<typeof setTimeout> | undefined, ping: ReturnType<typeof setInterval> | undefined
+let lastEngineStatus = -Infinity
+let frame = 0, lastSequence = -1, lastEpoch = '', offset = 0, bestRtt = Infinity
+let saveTimer: ReturnType<typeof setTimeout> | undefined
+let queuedParameters = new Map<string, { node: string; parameter: string; value: number }>()
+let parameterFlush = false
+const invitation = new URLSearchParams(location.search).get('invite')
+const editable = computed(() => ['owner', 'editor', 'conductor'].includes(role.value))
+const conductor = computed(() => ['owner', 'conductor'].includes(role.value))
+const active = computed(() => !!project.value && activeId.value === project.value.id)
+const stale = computed(() => !connected.value || now.value - receivedAt.value > 500)
+const running = computed(() => active.value && !!telemetry.value?.running && !stale.value)
+const beat = computed(() => {
+  const t = telemetry.value
+  if (!active.value || !t) return 0
+  if (stale.value || !t.running) return t.beat
+  const elapsed = Math.max(0, Math.min(500, now.value + offset - t.server_time))
+  return t.beat + elapsed / 60000 * t.bpm
+})
+const meterBeat = computed(() => beat.value * (project.value?.beat_unit || 4) / 4)
+const selected = computed(() => project.value?.graph.nodes.find(n => n.id === selectedNode.value))
+const selectedDescriptor = computed(() => descriptors.value.find(d => d.kind === selected.value?.kind))
+const part = computed(() => project.value?.parts.find(p => p.id === selectedPart.value) || project.value?.parts[0])
+const partPlayback = computed(() => active.value ? telemetry.value?.parts?.find(p => p.id === part.value?.id) : undefined)
+const partBeat = computed(() => {
+  const state = partPlayback.value
+  if (!state || !part.value) return 0
+  if (stale.value) return state.position
+  const pending = state.pending
+  const applied = pending && beat.value >= pending[0]
+  const playing = applied ? pending[1] : state.playing
+  const start = applied ? pending[0] : state.start
+  return playing ? Math.max(0, beat.value - start) % part.value.loop_beats : 0
+})
+const canLaunchPart = computed(() => conductor.value || (project.value?.mode === 'freeform' && part.value?.performer === user.value?.id))
+const partStatus = computed(() => {
+  const state = partPlayback.value
+  if (!active.value || !state) return 'Part idle'
+  if (stale.value) return 'Part timing unavailable'
+  if (state.pending) return `${state.pending[1] ? 'Launch' : 'Stop'} queued · beat ${state.pending[0] + 1}`
+  return state.playing ? (running.value ? 'Part playing' : 'Part armed / paused') : 'Part idle'
+})
+const categories = computed(() => ['All nodes', ...new Set(descriptors.value.map(d => d.category))])
+const catalog = computed(() => descriptors.value.filter(d => (category.value === 'All nodes' || d.category === category.value) && `${d.label} ${d.kind} ${d.aliases.join(' ')}`.toLowerCase().includes(search.value.toLowerCase())))
+const flowNodes = computed<FlowNode[]>(() => (project.value?.graph.nodes || []).map(n => ({ id: n.id, type: 'instrument', position: { x: n.x, y: n.y }, draggable: editable.value && !active.value, data: { node: n, descriptor: descriptors.value.find(d => d.kind === n.kind)!, open: (id: string) => selectedNode.value = id, connectPort } })))
+const flowEdges = computed<FlowEdge[]>(() => (project.value?.graph.edges || []).map(e => {
+  const source = project.value!.graph.nodes.find(n => n.id === e.source)
+  const d = descriptors.value.find(d => d.kind === source?.kind)
+  return { id: e.id, source: e.source, target: e.target, sourceHandle: e.source_port, targetHandle: e.target_port, type: 'signal', data: { signal: d?.outputs.find(p => p.id === e.source_port)?.signal || 'control', channels: d?.outputs.find(p => p.id === e.source_port)?.fixed_channels || source?.channels || 1, active: running.value } }
+}))
+provide('telemetry', telemetry)
+const pendingPort = ref<{ node: string; port: string; direction: string } | null>(null)
+
+function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) }
+function report(e: unknown) { error.value = e instanceof Error ? e.message : String(e) }
+async function task(fn: () => Promise<void>) { error.value = ''; try { await fn() } catch (e) { report(e) } }
+async function refresh() { summaries.value = await api<Summary[]>('/projects') }
+async function authenticate() {
+  busy.value = true
+  await task(async () => {
+    user.value = await api('/' + (bootstrap.value || registering.value ? 'register' : 'login'), 'POST', { username: username.value, password: password.value, invite: invitation })
+    password.value = ''
+    if (invitation) { const joined = await api<{ project_id: string }>('/join', 'POST', { token: invitation }); await refresh(); await openProject(joined.project_id); history.replaceState({}, '', '/') }
+    else { await refresh(); if (summaries.value[0]) await openProject(summaries.value[0].id); else creating.value = true }
+  }); busy.value = false
+}
+async function openProject(id: string) {
+  const result = await api<{ project: Project; role: string }>(`/projects/${id}`)
+  project.value = result.project; role.value = result.role; bpmDraft.value = result.project.bpm
+  settingsOpen.value = false; stage.value = false; selectedPart.value = result.project.parts.find(p => p.performer === user.value?.id)?.id || result.project.parts[0]?.id || ''; selectedNode.value = null; projectPicker.value = false; telemetry.value = null; receivedAt.value = 0; undo.value = []
+  members.value = await api<Member[]>(`/projects/${id}/members`); connect(id)
+  setTimeout(() => fitView({ padding: 0.18, duration: 300 }), 100)
+}
+function offline() { connected.value = false; clearInterval(ping); clearTimeout(reconnect); socket?.close() }
+function online() { if (user.value && project.value) connect(project.value.id) }
+function connect(id: string) {
+  if (socket) { socket.onclose = null; socket.close() }
+  clearTimeout(reconnect); clearInterval(ping); connected.value = false; lastEngineStatus = -Infinity; lastSequence = -1; bestRtt = Infinity
+  const currentSocket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/projects/${id}/events`)
+  socket = currentSocket
+  currentSocket.onopen = () => { if (socket !== currentSocket) return; connected.value = true; ping = setInterval(() => socket?.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: 'ping', client_time: performance.now() })), 1000) }
+  currentSocket.onmessage = event => {
+    if (socket !== currentSocket || project.value?.id !== id) return
+    const message = JSON.parse(event.data)
+    if (message.type === 'pong') { const rtt = performance.now() - message.client_time; if (rtt < bestRtt) { bestRtt = rtt; offset = message.server_time - (message.client_time + rtt / 2) } }
+    if (message.type === 'engine_status' && message.server_time >= lastEngineStatus) {
+      lastEngineStatus = message.server_time
+      activeId.value = message.active_project
+      if (message.active_project !== id) { telemetry.value = null; receivedAt.value = 0 }
+    }
+    if (message.type === 'telemetry') {
+      if (activeId.value !== id) return
+      if (message.epoch === lastEpoch && message.sequence <= lastSequence) return
+      lastEpoch = message.epoch; lastSequence = message.sequence
+      if (message.revision < (project.value?.revision || 0)) return
+      telemetry.value = message; receivedAt.value = performance.now()
+      if (bestRtt === Infinity) offset = message.server_time - performance.now()
+      bpmDraft.value = message.bpm
+    }
+    if (message.type === 'project' && message.project.revision > (project.value?.revision || 0)) project.value = message.project
+    if (message.type === 'resync_required') void task(async () => {
+      const latest = await api<{ project: Project }>(`/projects/${id}`)
+      if (project.value?.id === id && latest.project.revision > project.value.revision) project.value = latest.project
+    })
+  }
+  currentSocket.onclose = () => { if (socket !== currentSocket) return; connected.value = false; clearInterval(ping); reconnect = setTimeout(() => { if (navigator.onLine && user.value && project.value?.id === id) connect(id) }, 1500) }
+}
+async function createProject() { busy.value = true; await task(async () => { const p = await api<Project>('/projects', 'POST', { name: newName.value, mode: newMode.value }); creating.value = false; await refresh(); await openProject(p.id) }); busy.value = false }
+function remember() { if (project.value) undo.value = [...undo.value.slice(-49), clone(project.value)] }
+async function saveProject(next: Project, record = true) {
+  if (!project.value) return
+  if (record) remember()
+  saving.value = true
+  try { const saved = await api<Project>(`/projects/${next.id}`, 'PUT', next); if (project.value?.id === saved.id && saved.revision >= project.value.revision) project.value = saved }
+  catch (e) { report(e); const latest = await api<{ project: Project }>(`/projects/${next.id}`); if (project.value?.id === latest.project.id && latest.project.revision >= project.value.revision) project.value = latest.project }
+  finally { saving.value = false }
+}
+function addNode(d: Descriptor) {
+  if (!project.value || !editable.value || active.value) return
+  const rect = document.querySelector('.graph-canvas')?.getBoundingClientRect()
+  const pos = screenToFlowCoordinate({ x: (rect?.left || 0) + (rect?.width || 900) / 2, y: (rect?.top || 0) + (rect?.height || 600) / 2 })
+  const n: GraphNode = { id: crypto.randomUUID(), kind: d.kind, label: d.label, x: pos.x, y: pos.y, channels: 2, parameters: Object.fromEntries(d.parameters.map(p => [p.id, p.default])) }
+  const next = clone(project.value); next.graph.nodes.push(n); void task(() => saveProject(next))
+}
+function onConnect(c: Connection) {
+  if (!project.value || !editable.value || active.value) return
+  const next = clone(project.value); next.graph.edges.push({ id: crypto.randomUUID(), source: c.source, source_port: c.sourceHandle || 'out', target: c.target, target_port: c.targetHandle || 'in' }); void task(() => saveProject(next)); pendingPort.value = null
+}
+function connectPort(node: string, port: string, direction: string) {
+  if (!editable.value || active.value) return
+  const p = pendingPort.value
+  if (!p || p.direction === direction) { pendingPort.value = { node, port, direction }; return }
+  const source = direction === 'source' ? { node, port } : p, target = direction === 'target' ? { node, port } : p
+  onConnect({ source: source.node, sourceHandle: source.port, target: target.node, targetHandle: target.port })
+}
+function nodeDrag({ node }: { node: FlowNode }) { if (!project.value || active.value) return; const next = clone(project.value); const n = next.graph.nodes.find(n => n.id === node.id); if (n) { n.x = node.position.x; n.y = node.position.y; void task(() => saveProject(next)) } }
+function editParameter(key: string, value: number) {
+  if (!selected.value || !project.value) return
+  if (!queuedParameters.size && !parameterFlush) remember()
+  queuedParameters.set(`${selected.value.id}/${key}`, { node: selected.value.id, parameter: key, value })
+  clearTimeout(saveTimer); saveTimer = setTimeout(flushParameters, 60)
+}
+async function flushParameters() {
+  if (parameterFlush || !project.value) return
+  parameterFlush = true; saving.value = true
+  try { while (queuedParameters.size && project.value) { const [id, value] = queuedParameters.entries().next().value!; queuedParameters.delete(id); project.value = await api<Project>(`/projects/${project.value.id}/parameter`, 'PUT', { ...value, revision: project.value.revision }) } }
+  catch (e) { queuedParameters.clear(); report(e); if (project.value) { const p = await api<{ project: Project }>(`/projects/${project.value.id}`); project.value = p.project } }
+  finally { parameterFlush = false; saving.value = false }
+}
+async function undoEdit() {
+  const previous = undo.value.pop(); if (!previous || !project.value) return
+  if (active.value) {
+    const current = project.value
+    for (const n of previous.graph.nodes) { const currentNode = current.graph.nodes.find(x => x.id === n.id); if (!currentNode) continue; for (const [key, value] of Object.entries(n.parameters)) if (currentNode.parameters[key] !== value) queuedParameters.set(`${n.id}/${key}`, { node: n.id, parameter: key, value }) }
+    await flushParameters()
+  } else { previous.revision = project.value.revision; await saveProject(previous, false) }
+}
+function disconnect(edge: GraphEdge) { if (!project.value) return; const next = clone(project.value); const value = telemetry.value?.values[edge.target]?.[edge.target_port]; const n = next.graph.nodes.find(n => n.id === edge.target); if (n && value !== undefined) n.parameters[edge.target_port] = value; next.graph.edges = next.graph.edges.filter(e => e.id !== edge.id); void task(() => saveProject(next)) }
+async function uploadSample(file: File) { if (!project.value || !selected.value) return; const form = new FormData(); form.append('sample', file); const response = await fetch(`/api/projects/${project.value.id}/samples`, { method: 'POST', headers: { 'X-Pr0former': '1' }, body: form }); const result = await response.json(); if (!response.ok) throw new Error(result.error); const next = clone(project.value); const node = next.graph.nodes.find(n => n.id === selected.value!.id)!; node.parameters.asset = result.asset; node.channels = result.channels; await saveProject(next) }
+function nodeChannels(width: number) { if (!project.value || !selected.value) return; const next = clone(project.value); next.graph.nodes.find(n => n.id === selected.value!.id)!.channels = width; void task(() => saveProject(next)) }
+function removeNode() { if (!project.value || !selected.value) return; const next = clone(project.value), id = selected.value.id; next.graph.nodes = next.graph.nodes.filter(n => n.id !== id); next.graph.edges = next.graph.edges.filter(e => e.source !== id && e.target !== id); selectedNode.value = null; void task(() => saveProject(next)) }
+async function transport(action: string) { if (!project.value) return; await api(`/projects/${project.value.id}/transport`, 'POST', { action, bpm: bpmDraft.value }) }
+async function launchPart(playing: boolean) { if (project.value && part.value) await api(`/projects/${project.value.id}/clip`, 'POST', { part: part.value.id, playing }) }
+function addPart() { if (!project.value) return; const next = clone(project.value); next.parts.push({ id: crypto.randomUUID(), name: `Player ${next.parts.length + 1}`, performer: null, view: 'notation', clef: 'treble', notes: [], loop_beats: 8, instrument_node: null, midi_port: null, osc_destination: null, osc_address: '/pr0former/note' }); void task(() => saveProject(next)) }
+function downloadXML() { if (!part.value || !project.value) return; const url = URL.createObjectURL(new Blob([exportMusicXML(part.value, project.value.beats_per_bar, project.value.beat_unit || 4)], { type: 'application/xml' })); const link = document.createElement('a'); link.href = url; link.download = `${part.value.name}.musicxml`; link.click(); URL.revokeObjectURL(url) }
+async function uploadXML(event: Event) { const input = event.target as HTMLInputElement; const file = input.files?.[0]; if (!file || !project.value) return; await task(async () => { const result = importMusicXML(await file.text()); if (result.warnings.length && !window.confirm(`Import with these limitations?\n${result.warnings.join('\n')}`)) return; const next = clone(project.value!); next.parts = result.parts; next.beats_per_bar = result.beatsPerBar; next.beat_unit = result.beatUnit; await saveProject(next) }); input.value = '' }
+function updateMeter(beats: number, unit: number) { if (!project.value) return; const next = clone(project.value); next.beats_per_bar = beats; next.beat_unit = unit; void task(() => saveProject(next)) }
+function updatePart(p: Part) { if (!project.value) return; const next = clone(project.value); next.parts = next.parts.map(x => x.id === p.id ? p : x); void task(() => saveProject(next)) }
+function exportProject() { if (!project.value) return; const url = URL.createObjectURL(new Blob([JSON.stringify(project.value, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = `${project.value.name}.pr0.json`; a.click(); URL.revokeObjectURL(url) }
+async function importProject(event: Event) { const input = event.target as HTMLInputElement; const file = input.files?.[0]; if (!file || !project.value) return; await task(async () => { const imported = JSON.parse(await file.text()) as Project; imported.id = project.value!.id; imported.revision = project.value!.revision; await saveProject(imported) }); input.value = '' }
+async function loadDevices() { showDevices.value = true; devices.value = await api('/devices') }
+async function hardware(input = false) { if (!project.value) return; await api(`/projects/${project.value.id}/audio`, 'POST', { enabled: input ? !devices.value?.input_enabled : !telemetry.value?.hardware_enabled, input }); setTimeout(() => void task(loadDevices), 300) }
+async function invite() { if (!project.value) return; const result = await api<{ path: string }>(`/projects/${project.value.id}/invite`, 'POST', { role: inviteRole.value }); inviteLink.value = location.origin + result.path }
+function settingsSaved(saved: Project) {
+  if (project.value?.id === saved.id && saved.revision >= project.value.revision) { project.value = saved; bpmDraft.value = saved.bpm }
+  settingsOpen.value = false
+  void task(refresh)
+}
+function enterStage() { stage.value = true; selectedNode.value = null; projectPicker.value = false; pendingPort.value = null; selectedEdges.value = [] }
+async function toggleFullscreen() { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else fullscreen.value = !fullscreen.value }
+async function signOut() { await api('/logout', 'POST'); stage.value = false; user.value = null; project.value = null; socket?.close(); clearTimeout(reconnect) }
+function keydown(event: KeyboardEvent) { if (event.key === 'Escape') pendingPort.value = null; if ((event.key === 'Delete' || event.key === 'Backspace') && !(event.target instanceof HTMLInputElement) && selectedEdges.value.length && project.value && !active.value && !selectedNode.value) { const next = clone(project.value); next.graph.edges = next.graph.edges.filter(e => !selectedEdges.value.includes(e.id)); void task(() => saveProject(next)) } }
+onMounted(async () => {
+  const tick = () => { now.value = performance.now(); frame = requestAnimationFrame(tick) }; frame = requestAnimationFrame(tick); window.addEventListener('keydown', keydown); window.addEventListener('offline', offline); window.addEventListener('online', online)
+  await task(async () => { descriptors.value = await api<Descriptor[]>('/catalog'); const status = await api<{ bootstrap: boolean; active_project: string | null }>('/status'); bootstrap.value = status.bootstrap; activeId.value = status.active_project; try { user.value = await api('/me') } catch { return }; await refresh(); if (invitation) { const result = await api<{ project_id: string }>('/join', 'POST', { token: invitation }); await refresh(); await openProject(result.project_id); history.replaceState({}, '', '/') } else if (summaries.value[0]) await openProject(summaries.value[0].id); else creating.value = true })
+})
+onBeforeUnmount(() => { cancelAnimationFrame(frame); clearInterval(ping); clearTimeout(reconnect); clearTimeout(saveTimer); socket?.close(); window.removeEventListener('keydown', keydown); window.removeEventListener('offline', offline); window.removeEventListener('online', online) })
+</script>
+
+<template>
+  <div class="app-shell" :class="{ 'fullscreen-fallback': fullscreen, 'performance-mode': stage }">
+    <header v-show="!stage" class="topbar"><a class="brand" href="/" aria-label="pr0former home"><span class="brand-mark">p<span>0</span></span><strong>pr<span>0</span>former</strong><sup>ALPHA</sup></a><div class="topbar-center"><span class="tiny-dot"></span> ELECTROACOUSTIC PERFORMANCE WORKSPACE</div><div class="topbar-right"><span class="server-indicator"><span class="status-dot" :class="{ live: connected }"></span>{{ user ? connected ? 'Server connected' : 'Connecting' : 'Local performance server' }}</span><button class="icon-button" aria-label="Fullscreen" @click="task(toggleFullscreen)"><Maximize :size="17" /></button><button v-if="user" class="avatar" :title="`Sign out ${user.username}`" @click="task(signOut)">{{ user.username.slice(0, 2).toUpperCase() }}</button></div></header>
+    <div v-if="error" class="error-banner" role="alert">{{ error }}<button class="icon-button" aria-label="Dismiss error" @click="error = ''"><X :size="16" /></button></div>
+    <main v-if="!user" class="welcome"><div class="welcome-copy"><div class="eyebrow"><span class="tiny-dot"></span> A SHARED SPACE FOR SOUND</div><h1>Compose the system.<br><em>Perform the unexpected.</em></h1><p>Scores, signals, and people.<br>One connected performance instrument.</p><div class="welcome-patch"><div class="mini-node amber">◷<small>CLOCK</small></div><span class="mini-wire"></span><div class="mini-node amber">×<small>MULTIPLY</small></div><span class="mini-wire cyan"></span><div class="mini-node cyan">∿<small>SOUND</small></div></div><span class="welcome-caption">BUILT FOR THE ROOM. OPEN TO POSSIBILITY.</span></div><form class="auth-card" @submit.prevent="authenticate"><div class="eyebrow">{{ bootstrap ? 'FIRST-TIME SETUP' : invitation ? 'YOU’RE INVITED' : 'WELCOME BACK' }}</div><h2>{{ bootstrap ? 'Create your first account' : registering ? 'Join the ensemble' : 'Enter your workspace' }}</h2><p>{{ bootstrap ? 'Your projects and audio stay on this server.' : 'Sign in to compose, connect, and perform.' }}</p><label>Username<input v-model="username" autocomplete="username" minlength="3" maxlength="64" required placeholder="Your username"></label><label>Password<input v-model="password" type="password" :autocomplete="registering || bootstrap ? 'new-password' : 'current-password'" required :minlength="registering || bootstrap ? 8 : 1" placeholder="Your password"></label><button class="button primary wide" :disabled="busy">{{ busy ? 'Connecting…' : bootstrap || registering ? 'Create account' : 'Sign in' }}<ChevronRight :size="17" /></button><button v-if="invitation && !bootstrap" type="button" class="text-button" @click="registering = !registering">{{ registering ? 'Already have an account? Sign in' : 'New here? Create an account' }}</button><div class="auth-footer"><Radio :size="14" /> Connect on the same physical network.</div></form></main>
+    <template v-else>
+      <div v-show="!stage" class="workspace-header"><div class="project-heading"><button class="project-icon" @click="projectPicker = !projectPicker" aria-label="Choose project"><FolderOpen :size="21" /></button><div><div class="eyebrow">PERFORMANCE / {{ project?.mode || 'NEW PROJECT' }}</div><button class="project-title" @click="projectPicker = !projectPicker">{{ project?.name || 'Your workspace' }}<ChevronDown :size="16" /></button></div><span v-if="project" class="mode-pill">{{ active ? 'ACTIVE SHOW' : 'PREPARATION' }}</span></div><div class="workspace-actions"><button v-if="project" class="button small" @click="enterStage">Performance mode</button><span v-if="project" class="revision">{{ saving ? 'Saving…' : `Revision ${project.revision}` }}</span><button class="button small" @click="tab = 'ensemble'"><Users :size="15" /> Ensemble <span class="count-badge">{{ members.length }}</span></button><button v-if="project && editable" class="button small" :disabled="saving" aria-label="Project settings" @click="settingsOpen = true"><Settings2 :size="15" /> Project settings</button><button class="button small" @click="task(loadDevices)"><Settings2 :size="15" /> Audio setup</button></div></div>
+      <div v-if="projectPicker" class="project-popover"><div class="eyebrow">PROJECTS</div><button v-for="p in summaries" :key="p.id" @click="task(() => openProject(p.id))"><span>{{ p.name }}</span><small>{{ p.mode }}</small></button><button @click="creating = true; projectPicker = false"><Plus :size="16" /> New project</button></div>
+      <div v-if="project" v-show="!stage" class="workspace-tabs"><nav><button :class="{ active: tab === 'graph' }" @click="tab = 'graph'"><Network :size="16" /> Signal graph</button><button :class="{ active: tab === 'score' }" @click="tab = 'score'"><Music2 :size="16" /> Score & parts</button><button :class="{ active: tab === 'ensemble' }" @click="tab = 'ensemble'"><Users :size="16" /> Ensemble</button><button :class="{ active: tab === 'monitor' }" @click="tab = 'monitor'"><Headphones :size="16" /> Monitor</button></nav><div class="graph-legend"><span><i class="legend-audio"></i>Audio</span><span><i class="legend-control"></i>Control</span><span><i class="legend-spectral"></i>Spectral</span></div></div>
+      <StageView v-if="project && stage" :project="project" :part="part" :beat="partBeat" :meter-beat="meterBeat" :bpm="active && telemetry ? telemetry.bpm : project.bpm" :active="active" :stale="stale" :running="running" :status="partStatus" :can-launch="canLaunchPart" :monitor-open="stageMonitor" @select="selectedPart = $event" @launch="playing => task(() => launchPart(playing))" @exit="stage = false; fullscreen = false" @fullscreen="task(toggleFullscreen)" @monitor="stageMonitor = !stageMonitor" />
+      <div v-else-if="project && tab === 'graph'" class="graph-workspace">
+        <aside v-if="library" class="node-library"><div class="library-heading"><h3>Node library</h3><button class="icon-button" aria-label="Hide node library" @click="library = false"><LayoutGrid :size="15" /></button></div><label class="search-box"><Search :size="15" /><input v-model="search" placeholder="Find a node…" aria-label="Search nodes"><kbd>/</kbd></label><select v-model="category" aria-label="Node category"><option v-for="c in categories" :key="c">{{ c }}</option></select><div class="library-list"><button v-for="d in catalog" :key="d.kind" class="library-node" :disabled="!editable || active || saving" :title="d.description" @click="addNode(d)"><span class="library-glyph" :class="d.outputs[0]?.signal || 'audio'">{{ d.symbol }}</span><span>{{ d.label }}<small>{{ d.category }}</small></span><Plus :size="13" class="add-sign" /></button></div><div class="library-footer"><CircleHelp :size="15" /><span>Click to add. Connect to explore.<br>Open a node to edit its parameters.</span></div></aside>
+        <div class="graph-canvas"><VueFlow :nodes="flowNodes" :edges="flowEdges" :node-types="nodeTypes" :edge-types="edgeTypes" :min-zoom="0.2" :max-zoom="2" :nodes-connectable="editable && !active" :delete-key-code="null" fit-view-on-init @connect="onConnect" @node-drag-stop="nodeDrag" @edge-click="({ edge }) => selectedEdges = [edge.id]"><Background :gap="24" :size="1" pattern-color="#394043" /><Controls position="bottom-left" :show-interactive="false" /></VueFlow><div class="canvas-top"><button v-if="!library" class="button small" @click="library = true"><LayoutGrid :size="14" /> Library</button><span class="canvas-caption">{{ project.graph.nodes.length }} NODES <span>/</span> {{ project.graph.edges.length }} CONNECTIONS</span><div class="canvas-tools"><button class="icon-button" :disabled="!undo.length || saving" aria-label="Undo" @click="task(undoEdit)"><Undo2 :size="16" /></button><button class="icon-button" aria-label="Export project" @click="exportProject"><Download :size="16" /></button><label class="icon-button import-button" title="Import project JSON"><Upload :size="16" /><input type="file" accept=".json" :disabled="active || !editable" @change="importProject"></label></div></div><div v-if="pendingPort" class="connection-hint">Choose a {{ pendingPort.direction === 'source' ? 'target input' : 'source output' }} · Esc to cancel</div><div class="canvas-bottom-note"><span class="tiny-dot"></span>{{ active ? 'SHOW ACTIVE · LIVE PARAMETERS AVAILABLE IN NODE MODALS' : 'PATCH YOUR PERFORMANCE' }}</div></div>
+      </div>
+      <div v-else-if="project && tab === 'score'" class="content-pane"><div class="part-tabs"><button v-for="p in project.parts" :key="p.id" :class="{ active: part?.id === p.id }" @click="selectedPart = p.id"><Music2 :size="15" />{{ p.name }}</button><button v-if="editable" :disabled="active || saving || project.parts.length >= 32" @click="addPart"><Plus :size="14" /> Add part</button></div><div class="score-actions"><button class="button small" @click="downloadXML"><Download :size="14" /> MusicXML</button><label class="button small">Import MusicXML<input type="file" accept=".xml,.musicxml" style="display:none" :disabled="active || !editable" @change="uploadXML"></label><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(true))"><Play :size="14" /> Launch part</button><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(false))"><Square :size="14" /> Stop part</button><output class="mode-pill" aria-label="Part playback status">{{ partStatus }}</output></div><div v-if="part && editable" class="part-routing"><label>Performer<select :value="part.performer || ''" :disabled="active" @change="updatePart({ ...part!, performer: ($event.target as HTMLSelectElement).value || null })"><option value="">Unassigned</option><option v-for="m in members" :key="m.id" :value="m.id">{{ m.username }}</option></select></label><label>Instrument / input<select :value="part.instrument_node || ''" :disabled="active" @change="updatePart({ ...part!, instrument_node: ($event.target as HTMLSelectElement).value || null })"><option value="">Acoustic / external only</option><option v-for="n in project.graph.nodes.filter(n => ['synth', 'browser_input', 'input'].includes(n.kind))" :key="n.id" :value="n.id">{{ n.label }}</option></select></label><label>OSC IP:port<input :value="part.osc_destination || ''" placeholder="192.168.1.10:9000" :disabled="active" @change="updatePart({ ...part!, osc_destination: ($event.target as HTMLInputElement).value || null })"></label><label>OSC address<input :value="part.osc_address" placeholder="/pr0former/note" :disabled="active || saving" @change="updatePart({ ...part!, osc_address: ($event.target as HTMLInputElement).value })"></label><label>MIDI channel<select aria-label="MIDI channel" :value="part.midi_channel || 1" :disabled="active || saving" @change="updatePart({ ...part!, midi_channel: Number(($event.target as HTMLSelectElement).value) })"><option v-for="channel in 16" :key="channel" :value="channel">{{ channel }}</option></select></label><label>MIDI port name<input :value="part.midi_port || ''" placeholder="From Audio setup" :disabled="active" @change="updatePart({ ...part!, midi_port: ($event.target as HTMLInputElement).value || null })"></label></div><ScoreEditor v-if="part" :part="part" :beat="partBeat" :editable="editable && !active && !saving" :beats-per-bar="project.beats_per_bar" :beat-unit="project.beat_unit || 4" @update="updatePart" @meter="updateMeter" /><p class="feature-note">Notation and piano roll edit the same notes. MusicXML import reports unsupported notation before replacing the score. Advanced engraving remains in development.</p></div>
+      <div v-else-if="project && tab === 'ensemble'" class="content-pane"><div class="section-heading"><div><div class="eyebrow">PEOPLE IN THE PERFORMANCE</div><h2>Your ensemble</h2></div><span class="mode-pill">{{ members.length }} / 32 PLAYERS</span></div><div class="member-grid"><article v-for="m in members" :key="m.id" class="member-card"><span class="avatar">{{ m.username.slice(0, 2).toUpperCase() }}</span><div><h3>{{ m.username }}</h3><span>{{ m.role }}</span></div></article></div><section v-if="role === 'owner'" class="invite-panel"><h3>Invite a collaborator</h3><p>Create a single-use link valid for seven days.</p><div class="invite-controls"><select v-model="inviteRole"><option value="performer">Performer</option><option value="editor">Editor</option><option value="conductor">Conductor</option></select><button class="button primary" @click="task(invite)"><Plus :size="15" /> Create invitation</button></div><input v-if="inviteLink" :value="inviteLink" readonly aria-label="Invitation link" @focus="($event.target as HTMLInputElement).select()"></section></div>
+      <div v-else-if="project && tab === 'monitor'" class="content-pane"><div class="section-heading"><div><div class="eyebrow">LISTENING & TIMING</div><h2>Performance monitor</h2></div><Headphones :size="32" /></div><div class="monitor-cards"><article><Activity :size="22" /><h3>Clock synchronization</h3><strong>{{ stale ? 'Waiting for engine' : `${Math.round(now - receivedAt)} ms` }}</strong><p>{{ stale ? 'Activate the show to receive engine timing.' : 'Age of the latest engine snapshot. The score interpolates locally.' }}</p></article><article><AudioLines :size="22" /><h3>Server audio output</h3><strong>{{ telemetry?.hardware_enabled ? 'Enabled' : 'Muted' }}</strong><p>Use audio setup to enable the system output. Start at a low listening level.</p></article><article><Headphones :size="22" /><h3>Browser monitor feed</h3><strong>WebRTC / Opus</strong><p>Connect below for the master stereo monitor and optional microphone uplink.</p></article></div></div>
+      <div v-else class="empty-workspace"><Music2 :size="40" /><h2>A new space for your ensemble.</h2><button class="button primary" @click="creating = true"><Plus :size="16" /> Create a project</button></div>
+      <div v-if="project" v-show="stage ? stageMonitor : tab === 'monitor'" class="monitor-dock"><MonitorPanel :key="project.id" :project-id="project.id" :active="active" :nodes="project.graph.nodes" /></div>
+      <footer v-if="project" class="transport-bar"><div class="transport-controls"><button class="icon-button stop-button" :disabled="!active || !conductor" aria-label="Stop" @click="task(() => transport('stop'))"><Square :size="16" fill="currentColor" /></button><button class="play-button" :disabled="!active || !conductor" :aria-label="running ? 'Pause' : 'Play'" @click="task(() => transport(running ? 'pause' : 'play'))"><Pause v-if="running" :size="19" fill="currentColor" /><Play v-else :size="19" fill="currentColor" /></button><div class="position-display"><strong>{{ String(Math.floor(meterBeat / project.beats_per_bar) + 1).padStart(3, '0') }}<span>:</span>{{ String(Math.floor(meterBeat % project.beats_per_bar) + 1).padStart(2, '0') }}</strong><small>BAR · BEAT</small></div></div><div class="tempo-control"><label for="tempo">TEMPO</label><input id="tempo" v-model.number="bpmDraft" type="number" min="1" max="400" :disabled="!active || !conductor" @change="task(() => transport('tempo'))"><span title="Quarter notes per minute">♩ BPM</span><div class="beat-lights"><i v-for="b in project.beats_per_bar" :key="b" :class="{ lit: running && Math.floor(meterBeat % project.beats_per_bar) === b - 1 }"></i></div></div><div class="transport-right"><span class="engine-label"><span class="status-dot" :class="{ live: active && !stale }"></span>{{ active ? stale ? 'ENGINE STALE' : 'ENGINE RUNNING' : 'ENGINE IDLE' }}<small>48 kHz · 128-frame DSP blocks</small></span><button class="button" :class="{ primary: !active }" :disabled="!conductor" @click="task(() => transport(active ? 'deactivate' : 'activate'))">{{ active ? 'Deactivate show' : 'Activate show' }}</button></div></footer>
+    </template>
+    <ProjectSettings v-if="settingsOpen && project" :key="project.id" :project="project" :active="active" :editable="editable" @close="settingsOpen = false" @saved="settingsSaved" />
+    <NodeModal v-if="selected && selectedDescriptor && project" :node="selected" :descriptor="selectedDescriptor" :nodes="project.graph.nodes" :edges="project.graph.edges" :values="telemetry?.values[selected.id]" :stale="stale" :editable="editable" :active="active" :saving="saving" @close="selectedNode = null" @change="editParameter" @disconnect="disconnect" @source="id => selectedNode = id" @undo="task(undoEdit)" @remove="removeNode" @upload="file => task(() => uploadSample(file))" @channels="nodeChannels" />
+    <div v-if="creating" class="overlay"><form class="dialog-card" @submit.prevent="createProject"><header><div><div class="eyebrow">START SOMETHING</div><h2>New performance</h2></div><button type="button" class="icon-button" aria-label="Close" @click="creating = false"><X :size="20" /></button></header><label>Project name<input v-model="newName" maxlength="120" required autofocus></label><label>Performance mode</label><label v-for="m in [{ id: 'structured', title: 'Structured', text: 'A repeatable score and a shared timeline.' }, { id: 'conducted', title: 'Conducted', text: 'One conductor, an evolving performance.' }, { id: 'freeform', title: 'Freeform', text: 'Independent players, a common pulse.' }]" :key="m.id" class="mode-choice" :class="{ chosen: newMode === m.id }"><input v-model="newMode" type="radio" :value="m.id"><div><strong>{{ m.title }}</strong><p>{{ m.text }}</p></div></label><p class="feature-note">Structured mode follows the shared score. Conducted and freeform modes also support individual part launching.</p><button class="button primary wide" :disabled="busy">{{ busy ? 'Creating…' : 'Create performance' }}<Plus :size="16" /></button></form></div>
+    <div v-if="showDevices" class="overlay"><section class="dialog-card"><header><div><div class="eyebrow">SERVER HARDWARE</div><h2>Audio setup</h2></div><button class="icon-button" aria-label="Close" @click="showDevices = false"><X :size="20" /></button></header><p>Audio starts muted. Output uses the server’s system-default device at 48 kHz.</p><template v-if="devices"><label>Available outputs</label><div v-for="d in devices.outputs" :key="d" class="device-row"><AudioLines :size="16" />{{ d }}</div><label>MIDI outputs</label><div v-for="d in devices.midi_outputs" :key="d" class="device-row">{{ d }}</div><p v-if="!devices.midi_outputs?.length" class="dim">No MIDI outputs found.</p><p v-if="devices.error" class="field-error">{{ devices.error }}</p><p>Underrun frames: {{ devices.underruns }}</p><button class="button primary wide" :disabled="!active || role !== 'owner'" @click="task(() => hardware())">{{ telemetry?.hardware_enabled ? 'Mute server output' : 'Enable server output' }}</button><button class="button wide" style="margin-top:12px" :disabled="!active || role !== 'owner'" @click="task(() => hardware(true))">{{ devices.input_enabled ? 'Disable server input' : 'Enable server input' }}</button></template><p v-else>Reading devices…</p><p class="feature-note">Audio input/output uses the system-default devices at 48 kHz. An aggregate device can provide additional channels.</p></section></div>
+  </div>
+</template>

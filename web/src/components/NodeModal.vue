@@ -1,0 +1,73 @@
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { X, Link2, ArrowUpRight, Unplug, RotateCcw, Activity } from 'lucide-vue-next'
+import type { Descriptor, GraphNode, GraphEdge, Parameter } from '../types'
+import { finiteInput, formatValue } from '../api'
+const props = defineProps<{ node: GraphNode; descriptor: Descriptor; edges: GraphEdge[]; nodes: GraphNode[]; values?: Record<string, number>; stale: boolean; editable: boolean; active: boolean; saving: boolean }>()
+const emit = defineEmits<{ close: []; change: [key: string, value: number]; disconnect: [edge: GraphEdge]; source: [id: string]; undo: []; remove: []; upload: [file: File]; channels: [width: number] }>()
+const dialog = ref<HTMLDialogElement>()
+const history = ref<Record<string, number[]>>({})
+const draft = ref<Record<string, number>>({})
+const errors = ref<Record<string, string>>({})
+let previousFocus: HTMLElement | null = null
+const links = computed(() => Object.fromEntries(props.edges.filter(e => e.target === props.node.id).map(e => [e.target_port, e])))
+watch(() => props.node.id, () => { history.value = {}; draft.value = {}; errors.value = {} })
+watch(() => props.values, values => {
+  if (!values || props.stale) return
+  for (const p of props.descriptor.parameters) {
+    const v = values[p.id]
+    if (v !== undefined) history.value[p.id] = [...(history.value[p.id] || []), v].slice(-100)
+  }
+})
+function trace(p: Parameter) {
+  const values = history.value[p.id] || []
+  const min = Math.min(...values), max = Math.max(...values), span = max - min || 1
+  return values.map((v, i) => `${i * 240 / 99},${28 - (v - min) / span * 24}`).join(' ')
+}
+function value(p: Parameter) { return draft.value[p.id] ?? props.node.parameters[p.id] ?? p.default }
+function edit(p: Parameter, text: string, commit: boolean) {
+  const v = finiteInput(text, p.min, p.max)
+  if (v === null) { errors.value[p.id] = `Enter ${p.min} to ${p.max}`; return }
+  delete errors.value[p.id]
+  draft.value[p.id] = v
+  if (commit || !p.structural) emit('change', p.id, v)
+}
+function sourceName(edge: GraphEdge) { return props.nodes.find(n => n.id === edge.source)?.label || edge.source }
+function trap(event: KeyboardEvent) {
+  if (event.key !== 'Tab') return
+  const els = dialog.value?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),[tabindex="0"]')
+  if (!els?.length) return
+  const first = els[0], last = els[els.length - 1]
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+}
+onMounted(async () => { previousFocus = document.activeElement as HTMLElement; await nextTick(); dialog.value?.showModal() })
+onBeforeUnmount(() => { dialog.value?.close(); previousFocus?.focus() })
+</script>
+
+<template>
+  <dialog ref="dialog" class="parameter-modal" @cancel.prevent="emit('close')" @keydown="trap" aria-labelledby="node-modal-title">
+    <header class="modal-header"><div class="modal-icon">{{ descriptor.symbol }}</div><div><div class="eyebrow">{{ descriptor.category }} / {{ node.channels }} CHANNELS</div><h2 id="node-modal-title">{{ node.label }}</h2></div><button class="icon-button modal-close" aria-label="Close parameters" @click="emit('close')"><X :size="20" /></button></header>
+    <p class="modal-description">{{ descriptor.description }}</p>
+    <div class="modal-status"><span class="status-dot" :class="{ live: active && !stale }"></span>{{ active ? stale ? 'Engine values stale' : 'Live engine · 20 updates / second' : 'Project inactive · stored values' }}<span v-if="saving" class="saving">Saving…</span></div>
+    <div class="parameter-list">
+      <section v-if="descriptor.category !== 'Math' && descriptor.category !== 'Control' && descriptor.category !== 'Timing'" class="parameter-row"><div class="parameter-heading"><label for="node-channels">Audio channels</label><span class="small-tag">STRUCTURAL</span></div><select id="node-channels" :value="node.channels" :disabled="active || !editable || saving" @change="emit('channels', +($event.target as HTMLSelectElement).value)"><option v-for="width in 8" :key="width" :value="width">{{ width }} channel{{ width === 1 ? '' : 's' }}</option></select></section>
+      <section v-if="['sample', 'phase_vocoder'].includes(node.kind)" class="parameter-row"><label class="button">Upload WAV sample<input type="file" accept=".wav,audio/wav" style="display:none" :disabled="active || !editable || saving" @change="($event.target as HTMLInputElement).files?.[0] && emit('upload', ($event.target as HTMLInputElement).files![0])"></label><p class="feature-note">Up to 30 seconds. Match the node’s channel width to the WAV file.</p></section>
+      <section v-for="p in descriptor.parameters" :key="p.id" class="parameter-row" :class="{ driven: links[p.id] }">
+        <div class="parameter-heading"><label :for="`param-${p.id}`">{{ p.label }}</label><span v-if="p.structural" class="small-tag">STRUCTURAL</span><span v-else-if="links[p.id]" class="connected-label"><Link2 :size="12" /> CONNECTED</span></div>
+        <template v-if="links[p.id]">
+          <div class="driven-value"><output :class="{ dim: stale }">{{ active ? formatValue(values?.[p.id], p.unit) : '—' }}</output><svg viewBox="0 0 240 34" role="img" :aria-label="`${p.label} recent history`"><polyline :points="trace(p)" fill="none" stroke="currentColor" stroke-width="1.5" /></svg></div>
+          <div class="driver-source"><button @click="emit('source', links[p.id].source)"><ArrowUpRight :size="14" />{{ sourceName(links[p.id]) }} <span>/ {{ links[p.id].source_port }}</span></button><button :disabled="!editable || active || saving" title="Deactivate the show before changing connections" @click="emit('disconnect', links[p.id])"><Unplug :size="14" /> Disconnect</button></div>
+        </template>
+        <template v-else>
+          <div class="parameter-controls"><input type="range" :min="p.min" :max="p.max" :step="p.structural ? 1 : 'any'" :value="value(p)" :disabled="!editable || (active && p.structural)" :aria-label="p.label" @input="edit(p, ($event.target as HTMLInputElement).value, false)"><div class="number-field"><input :id="`param-${p.id}`" type="number" :min="p.min" :max="p.max" :step="p.structural ? 1 : 'any'" :value="value(p)" :disabled="!editable || (active && p.structural)" @change="edit(p, ($event.target as HTMLInputElement).value, !p.structural)"><span>{{ p.unit }}</span></div><button v-if="p.structural" class="button small" :disabled="!editable || active || saving" @click="emit('change', p.id, value(p))">Apply</button></div>
+          <div class="parameter-range"><span>{{ p.min }} {{ p.unit }}</span><span>{{ p.max }} {{ p.unit }}</span></div>
+          <p v-if="errors[p.id]" class="field-error">{{ errors[p.id] }}</p>
+        </template>
+      </section>
+      <div v-if="!descriptor.parameters.length" class="empty-parameters"><Activity :size="24" /><p>This node has no editable parameters.</p><p>Output: {{ formatValue(values?._out) }}</p></div>
+    </div>
+    <footer class="modal-footer"><button class="text-button" :disabled="!editable || saving" @click="emit('undo')"><RotateCcw :size="14" /> Undo last edit</button><span>Live edits are kept when you close.</span><button class="text-button danger" :disabled="!editable || active || saving" @click="emit('remove')">Delete node</button></footer>
+  </dialog>
+</template>
+

@@ -1,0 +1,9 @@
+[package]
+name = "pr0-example-gain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pr0-dsp.workspace = true
+

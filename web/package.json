@@ -1,0 +1,33 @@
+{
+  "name": "pr0former-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vue-tsc -b && vite build",
+    "test": "vitest run src",
+    "test:e2e": "playwright test",
+    "test:load": "PR0_LOAD=1 playwright test",
+    "test:load:ui": "PR0_LOAD=1 PR0_LOAD_UI=1 playwright test",
+    "test:load:uplink": "PR0_LOAD=1 PR0_LOAD_UI=1 PR0_LOAD_INPUT=1 playwright test"
+  },
+  "dependencies": {
+    "@fontsource/dm-sans": "^5.3.0",
+    "@fontsource/space-grotesk": "^5.3.0",
+    "@vue-flow/background": "^1.3.2",
+    "@vue-flow/controls": "^1.1.3",
+    "@vue-flow/core": "^1.48.2",
+    "lucide-vue-next": "^0.468.0",
+    "vexflow": "^5.0.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "~5.9.0",
+    "vite": "^7.1.0",
+    "vitest": "^3.2.0",
+    "vue-tsc": "^3.0.0"
+  }
+}

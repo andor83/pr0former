@@ -1,0 +1,29 @@
+[package]
+name = "pr0-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pr0-core.workspace = true
+pr0-dsp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+argon2 = "0.5"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rosc = "0.11"
+cpal = "0.16"
+midir = "0.10"
+hound = "3.5"
+rtrb = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+webrtc = "0.14"
+opus = "0.3"
+bytes = "1"
