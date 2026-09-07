@@ -1,6 +1,7 @@
 mod audio;
 mod bind;
 mod media;
+mod output_buffer;
 mod performance;
 mod samples;
 mod settings;
@@ -386,6 +387,42 @@ async fn get_project(
         .push(&id, "info", "Project loaded; sample caches ready");
     Ok(Json(json!({"project":project,"role":r})))
 }
+fn validate_live_update(previous: &Project, next: &Project) -> Result<(), String> {
+    if next.mode != previous.mode {
+        return Err("Mode changes require deactivation".into());
+    }
+    if previous.mode == Mode::Structured {
+        let mut graph_edit = previous.clone();
+        graph_edit.graph = next.graph.clone();
+        graph_edit.revision = next.revision;
+        // Deleting an instrument detaches its score route; other score edits
+        // still require deactivation in structured mode.
+        for part in &mut graph_edit.parts {
+            if part
+                .instrument_node
+                .as_ref()
+                .is_some_and(|id| !next.graph.nodes.iter().any(|n| &n.id == id))
+            {
+                part.instrument_node = None;
+            }
+            if let Some(restored) = next.parts.iter().find(|p| p.id == part.id) {
+                if restored.instrument_node.as_ref().is_some_and(|id| {
+                    !previous.graph.nodes.iter().any(|n| &n.id == id)
+                        && next.graph.nodes.iter().any(|n| &n.id == id)
+                }) {
+                    part.instrument_node = restored.instrument_node.clone();
+                }
+            }
+        }
+        if serde_json::to_value(graph_edit).unwrap() != serde_json::to_value(next).unwrap() {
+            return Err(
+                "Structured score and project settings changes require deactivation".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn update_project(
     State(app): State<App>,
     headers: HeaderMap,
@@ -422,11 +459,9 @@ async fn update_project(
         }
     }
 
-    if active && (previous.mode == Mode::Structured || p.mode != previous.mode) {
-        return Err(Failure(
-            StatusCode::CONFLICT,
-            "Structured shows and mode changes require deactivation".into(),
-        ));
+    if active {
+        validate_live_update(&previous, &p)
+            .map_err(|message| Failure(StatusCode::CONFLICT, message))?;
     }
     let prepared = if active {
         let prepared_project = p.clone();
@@ -468,6 +503,7 @@ async fn parameter(
     csrf(&headers)?;
     let u = user(&app, &headers)?;
     can_edit(&role(&app, &id, &u)?)?;
+    let _guard = app.setup.lock().await;
     let mut p = load(&app, &id)?;
     let previous = p.clone();
     if p.revision != c.revision {
@@ -1069,5 +1105,39 @@ async fn main() {
     } else {
         let listener = tokio::net::TcpListener::bind(address).await.unwrap();
         axum::serve(listener, router).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod live_edit_tests {
+    use super::*;
+    #[test]
+    fn structured_live_edits_allow_graphs_but_protect_score_and_mode() {
+        let previous = pr0_core::demo_project("x".into(), "x".into(), Mode::Structured);
+        let mut next = previous.clone();
+        next.graph.nodes[0].x += 10.;
+        next.revision += 1;
+        assert!(validate_live_update(&previous, &next).is_ok());
+        next.parts[0].name = "Changed part".into();
+        assert!(validate_live_update(&previous, &next).is_err());
+        let mut deleted = previous.clone();
+        deleted.graph.nodes.retain(|n| n.id != "tone");
+        deleted
+            .graph
+            .edges
+            .retain(|e| e.source != "tone" && e.target != "tone");
+        for part in &mut deleted.parts {
+            if part.instrument_node.as_deref() == Some("tone") {
+                part.instrument_node = None;
+            }
+        }
+        assert!(validate_live_update(&previous, &deleted).is_ok());
+        assert!(
+            validate_live_update(&deleted, &previous).is_ok(),
+            "undo can restore the deleted instrument route"
+        );
+        next = previous.clone();
+        next.mode = Mode::Freeform;
+        assert!(validate_live_update(&previous, &next).is_err());
     }
 }

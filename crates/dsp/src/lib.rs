@@ -146,6 +146,7 @@ struct RuntimeNode {
     seed: u64,
     envelope: f64,
     smooth: f64,
+    frequency_driven: bool,
     filters: [[Biquad; 3]; MAX_CHANNELS],
     first: [(f64, f64); MAX_CHANNELS],
     filter_cutoff: f64,
@@ -173,6 +174,7 @@ impl RuntimeNode {
         self.output = [0.; MAX_CHANNELS];
         self.control_text = None;
         match self.kind.as_str() {
+            "audio_to_control" => scalar = input[0] * self.p("scale") + self.p("offset"),
             "control_visualizer" => {
                 if self.bindings.is_empty() {
                     match self.fallback {
@@ -318,8 +320,12 @@ impl RuntimeNode {
                 }
             }
             "oscillator" => {
-                self.smooth +=
-                    (self.p("frequency") - self.smooth) * (1. - (-1. / (0.005 * sr)).exp());
+                if self.frequency_driven {
+                    self.smooth = self.p("frequency");
+                } else {
+                    self.smooth +=
+                        (self.p("frequency") - self.smooth) * (1. - (-1. / (0.005 * sr)).exp());
+                }
                 self.phase = (self.phase + self.smooth / sr).fract();
                 self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let noise = (self.seed >> 32) as f64 / u32::MAX as f64 * 2. - 1.;
@@ -479,6 +485,22 @@ impl RuntimeNode {
             }
             "ifft" | "rifft" => {
                 self.output = self.spectral.as_mut().unwrap().inverse();
+            }
+            "spectral_math" => {
+                let factors = [
+                    self.p("magnitude_scale"),
+                    self.p("magnitude_offset"),
+                    self.p("phase_scale"),
+                    self.p("phase_offset"),
+                ];
+                self.spectral.as_mut().unwrap().map_bins(factors, None);
+            }
+            "spectral_curve" => {
+                // The catalog prepares two 33-point curves after size and overlap.
+                self.spectral.as_mut().unwrap().map_bins(
+                    [1., 0., 1., 0.],
+                    Some((&self.values[2..35], &self.values[35..68])),
+                );
             }
             "spectral_gain" | "to_polar" | "to_cartesian" => {
                 let gain = self.p("gain");
@@ -703,6 +725,10 @@ impl Engine {
                 seed: n.parameters.get("seed").copied().unwrap_or(1.) as u64,
                 envelope: 0.,
                 smooth: 0.,
+                frequency_driven: graph
+                    .edges
+                    .iter()
+                    .any(|edge| edge.target == n.id && edge.target_port == "frequency"),
                 filters: [[Biquad::default(); 3]; MAX_CHANNELS],
                 first: [(0., 0.); MAX_CHANNELS],
                 filter_cutoff: -1.,
@@ -1854,6 +1880,111 @@ mod tests {
                 e.audio_frame("osc", "out"),
                 reference.audio_frame("osc", "out")
             );
+        }
+    }
+    #[test]
+    fn audio_to_control_drives_unsmoothed_sample_rate_fm() {
+        for width in 1..=8 {
+            let template = demo_project("x".into(), "x".into(), Mode::Freeform)
+                .graph
+                .nodes[0]
+                .clone();
+            let make = |id: &str, kind: &str, parameters: BTreeMap<String, f64>| {
+                let mut node = template.clone();
+                node.id = id.into();
+                node.kind = kind.into();
+                node.channels = width;
+                node.parameters = parameters;
+                node
+            };
+            let graph = Graph {
+                nodes: vec![
+                    make("mod", "input", BTreeMap::new()),
+                    make(
+                        "convert",
+                        "audio_to_control",
+                        [("scale".into(), 800.), ("offset".into(), 1000.)].into(),
+                    ),
+                    make(
+                        "carrier",
+                        "oscillator",
+                        [("frequency".into(), 440.), ("amplitude".into(), 0.2)].into(),
+                    ),
+                ],
+                edges: vec![
+                    pr0_core::Edge {
+                        id: "signal".into(),
+                        source: "mod".into(),
+                        source_port: "out".into(),
+                        target: "convert".into(),
+                        target_port: "in".into(),
+                    },
+                    pr0_core::Edge {
+                        id: "fm".into(),
+                        source: "convert".into(),
+                        source_port: "out".into(),
+                        target: "carrier".into(),
+                        target_port: "frequency".into(),
+                    },
+                ],
+            };
+            let mut engine = Engine::prepare(graph, 48000.).unwrap();
+            let mut phase = 0.;
+            for sample in 0..4800 {
+                let modulation = (TAU * sample as f64 / 12.).sin() as f32;
+                let mut input = [0.9; MAX_CHANNELS];
+                input[0] = modulation;
+                engine.render(&[input], &mut [[0.; MAX_CHANNELS]; 1]);
+                let frequency = modulation as f64 * 800. + 1000.;
+                phase = (phase + frequency / 48000.).fract();
+                assert_eq!(engine.nodes[1].control[0], frequency);
+                assert_eq!(engine.nodes[2].smooth, frequency);
+                for value in &engine.audio_frame("carrier", "out")[..width] {
+                    assert!((*value as f64 - (TAU * phase).sin() * 0.2).abs() < 1e-7);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sine_stays_clean_through_gain_and_output() {
+        for gain_db in [-12., 0., 6.] {
+            let mut p = demo_project("x".into(), "x".into(), Mode::Freeform);
+            p.graph
+                .nodes
+                .retain(|n| ["tone", "gain", "out"].contains(&n.id.as_str()));
+            p.graph
+                .edges
+                .retain(|e| ["tone", "gain"].contains(&e.source.as_str()));
+            for node in &mut p.graph.nodes {
+                if node.id == "tone" {
+                    node.kind = "oscillator".into();
+                    node.parameters = [
+                        ("frequency".into(), 873.),
+                        ("amplitude".into(), 0.1759),
+                        ("waveform".into(), 0.),
+                    ]
+                    .into();
+                } else {
+                    node.parameters.insert(
+                        "gain".into(),
+                        if node.id == "gain" { gain_db } else { -13.7 },
+                    );
+                }
+            }
+            let mut engine = Engine::prepare(p.graph, 48000.).unwrap();
+            engine.render(&[], &mut vec![[0.; MAX_CHANNELS]; 9600]);
+            let factor = 10_f64.powf((gain_db - 13.7) / 20.);
+            for _ in 0..4800 {
+                let mut rendered = [[0.; MAX_CHANNELS]; 1];
+                engine.render(&[], &mut rendered);
+                let source = engine.audio_frame("tone", "out");
+                let output = engine.output_frame("out");
+                for ch in 0..2 {
+                    assert!((output[ch] as f64 - source[ch] as f64 * factor).abs() < 1e-7);
+                    assert_eq!(rendered[0][ch], output[ch]);
+                }
+            }
         }
     }
     #[test]

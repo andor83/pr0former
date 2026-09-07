@@ -108,6 +108,60 @@ impl Spectral {
         self.cursor = (self.cursor + 1) % (self.size * 2);
         output
     }
+    /// Apply once to each fresh frame. Work in magnitude/phase and mirror the
+    /// negative half so inverse transforms still represent real audio.
+    pub fn map_bins(&mut self, factors: [f64; 4], curves: Option<(&[f64], &[f64])>) {
+        if !self.fresh {
+            return;
+        }
+        let half = self.size / 2;
+        for channel in &mut self.bins {
+            for i in 0..=half {
+                let bin = channel[i];
+                let (magnitude, phase) = if self.polar {
+                    (bin.re, bin.im)
+                } else {
+                    (bin.norm(), bin.arg())
+                };
+                let (gain, shift) = curves
+                    .map(|(m, p)| {
+                        let x = i as f64 * 32. / half as f64;
+                        let left = (x.floor() as usize).min(31);
+                        let fraction = x - left as f64;
+                        (
+                            m[left] + (m[left + 1] - m[left]) * fraction,
+                            p[left] + (p[left + 1] - p[left]) * fraction,
+                        )
+                    })
+                    .unwrap_or((1., 0.));
+                let magnitude =
+                    ((magnitude as f64 * factors[0] + factors[1]).max(0.) * gain) as f32;
+                let phase = if i == 0 || i == half {
+                    phase
+                } else {
+                    ((phase as f64 * factors[2] + factors[3] + shift + std::f64::consts::PI)
+                        .rem_euclid(std::f64::consts::TAU)
+                        - std::f64::consts::PI) as f32
+                };
+                channel[i] = if self.polar {
+                    Complex::new(magnitude, phase)
+                } else {
+                    Complex::from_polar(magnitude, phase)
+                };
+                if i > 0 && i < half {
+                    channel[self.size - i] = if self.polar {
+                        Complex::new(magnitude, -phase)
+                    } else {
+                        channel[i].conj()
+                    };
+                } else if !self.polar {
+                    channel[i].im = 0.;
+                }
+            }
+        }
+        self.fresh = false;
+    }
+
     pub fn transform(&mut self, kind: &str, gain: f64) {
         if !self.fresh {
             return;
@@ -149,6 +203,73 @@ impl Spectral {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spectral_math_and_curves_preserve_frame_contracts() {
+        for polar in [false, true] {
+            for channels in 1..=8 {
+                for size in [256, 1024, 8192] {
+                    let mut source = Spectral::new(size, 4, channels);
+                    source.generation = 7;
+                    source.polar = polar;
+                    for channel in &mut source.bins {
+                        for i in 0..=size / 2 {
+                            let value = if polar {
+                                Complex::new(2., 0.3)
+                            } else {
+                                Complex::from_polar(2., 0.3)
+                            };
+                            channel[i] = value;
+                            if i > 0 && i < size / 2 {
+                                channel[size - i] = if polar {
+                                    Complex::new(2., -0.3)
+                                } else {
+                                    value.conj()
+                                };
+                            }
+                        }
+                        channel[0] = Complex::new(2., 0.);
+                        channel[size / 2] = Complex::new(2., 0.);
+                    }
+                    let mut mapped = Spectral::new(size, 4, channels);
+                    mapped.copy_from(&source);
+                    mapped.map_bins([2., 1., 2., 0.1], None);
+                    let bin = mapped.bins[0][size / 4];
+                    let expected = if polar {
+                        Complex::new(5., 0.7)
+                    } else {
+                        Complex::from_polar(5., 0.7)
+                    };
+                    assert!((bin - expected).norm() < 1e-5);
+                    let saved = mapped.bins.clone();
+                    mapped.map_bins([10., 0., 1., 0.], None);
+                    assert_eq!(mapped.bins, saved, "must process each generation only once");
+                    assert_eq!(mapped.generation, 7);
+                    assert_eq!(mapped.polar, polar);
+                    let mut curved = Spectral::new(size, 4, channels);
+                    curved.copy_from(&source);
+                    let magnitude: Vec<f64> = (0..33).map(|i| i as f64 / 32.).collect();
+                    curved.map_bins([1., 0., 1., 0.], Some((&magnitude, &[0.2; 33])));
+                    for channel in &curved.bins {
+                        for i in 1..size / 2 {
+                            let value = channel[i];
+                            let mag = if polar { value.re } else { value.norm() };
+                            assert!((mag - 2. * i as f32 / (size / 2) as f32).abs() < 1e-5);
+                            let mirror = if polar {
+                                Complex::new(value.re, -value.im)
+                            } else {
+                                value.conj()
+                            };
+                            assert_eq!(channel[size - i], mirror);
+                        }
+                        assert_eq!(channel[0].im, 0.);
+                        assert_eq!(channel[size / 2].im, 0.);
+                    }
+                    assert_eq!(curved.generation, source.generation);
+                    assert_eq!(curved.polar, polar);
+                }
+            }
+        }
+    }
     #[test]
     fn streaming_fft_reconstructs_with_reported_delay() {
         for size in [256, 1024, 8192] {

@@ -116,3 +116,18 @@ For the opt-in 32-client protocol/audio baseline, run `npm run test:load` from `
 - [Writing audio plugins](docs/PLUGINS.md)
 - [Implementation status and remaining acceptance work](docs/STATUS.md)
 - [TouchDesigner integration](examples/touchdesigner.md)
+
+## Live patching and shortcuts
+
+Nodes and connections can be edited during an active show in every performance mode. Changes apply after server preparation at the next DSP block. Unchanged processors keep their state; rewiring and changed processor settings can click because graph crossfades are not implemented.
+
+- **Space:** activate and play; then toggle pause/resume.
+- **Backspace / Delete:** remove selected graph nodes and connections.
+- **Ctrl/Cmd+Z:** undo a graph edit, including live wiring/deletion.
+- **Right-click a node:** Edit or Delete. Enter on a focused node opens its modal.
+
+Shortcuts leave text fields and dialogs alone. Transport still requires owner/conductor authority.
+
+For FM, connect **Oscillator → Audio to control → another Oscillator's Frequency**. Set the modulator amplitude to 1, conversion Scale to 100 and Offset to 440 for ±100 Hz deviation around 440 Hz. The converter reads the first channel on every sample; connected frequency is not smoothed. Frequency clamps to 0–20000 Hz.
+
+For spectral editing, use **FFT → Spectral math / Spectral curve → Inverse FFT → Output**, with matching FFT size, overlap, and channels. Spectral math multiplies/adds magnitudes and phases. Spectral curve lets you draw magnitude multipliers and phase offsets from DC to Nyquist; release a stroke to apply it live. Negative-frequency bins mirror positive bins for real audio, and DC/Nyquist retain phase.

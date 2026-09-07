@@ -104,7 +104,6 @@ fn run(
     let mut last = Instant::now();
     let mut deadline = Instant::now();
     let mut seq = 0_u64;
-    let mut pending_graph: Option<(f64, Project, Box<Engine>)> = None;
     let mut next_tempo: Option<(f64, f64)> = None;
     let mut device_error = String::new();
     let mut browser: std::collections::BTreeMap<String, std::collections::VecDeque<[f32; 2]>> =
@@ -258,20 +257,22 @@ fn run(
                     project: p,
                     engine: prepared,
                 } => {
-                    let boundary = engine
-                        .as_ref()
-                        .map(|e| {
-                            if e.clock.running {
-                                ((e.clock.beat / p.quarter_beats_per_bar()).floor() + 1.)
-                                    * p.quarter_beats_per_bar()
-                            } else {
-                                e.clock.beat
-                            }
-                        })
-                        .unwrap_or(0.);
+                    // Commands are handled between DSP blocks, in order. Install
+                    // now so a following parameter edit targets the new graph.
+                    let mut prepared = prepared;
+                    if let Some(previous) = &mut engine {
+                        prepared.clock = previous.clock;
+                        sequencer = Some(match sequencer.take() {
+                            Some(seq) => seq.replace(&p, previous, &mut prepared, &io),
+                            None => crate::performance::Sequencer::new(&p),
+                        });
+                        prepared.carry_node_state(previous);
+                    }
                     previews.clear();
-                    pending_graph = Some((boundary, p, prepared));
+                    project = Some(p);
+                    engine = Some(*prepared);
                 }
+
                 Command::Load(p, mut e) => {
                     sequencer = Some(crate::performance::Sequencer::new(&p));
                     e.clock.bpm = p.bpm;
@@ -282,7 +283,6 @@ fn run(
                 }
                 Command::Unload => {
                     previews.clear();
-                    pending_graph = None;
                     let _ = io.try_send(crate::performance::External::Panic);
                     sequencer = None;
                     engine = None;
@@ -374,24 +374,6 @@ fn run(
             }
         }
 
-        if pending_graph.as_ref().is_some_and(|(boundary, _, _)| {
-            engine
-                .as_ref()
-                .is_some_and(|e| e.clock.beat >= *boundary || !e.clock.running)
-        }) {
-            let (_, p, mut prepared) = pending_graph.take().unwrap();
-            if let Some(previous) = &mut engine {
-                prepared.clock = previous.clock;
-                sequencer = Some(match sequencer.take() {
-                    Some(seq) => seq.replace(&p, previous, &mut prepared, &io),
-                    None => crate::performance::Sequencer::new(&p),
-                });
-                prepared.carry_node_state(previous);
-            }
-            project = Some(p);
-            engine = Some(*prepared);
-        }
-
         if let Some(failed) = outputs
             .iter()
             .find(|out| out.errors.load(Ordering::Relaxed) > 0)
@@ -412,10 +394,7 @@ fn run(
             hardware = false;
             testing = false;
         }
-        if outputs
-            .first()
-            .is_some_and(|o| o.queue.slots() < 4096 - settings.block_size * 2)
-        {
+        if outputs.first().is_some_and(|o| !o.buffer.needs_frames()) {
             std::thread::sleep(Duration::from_micros(500));
             continue;
         }
@@ -677,7 +656,7 @@ pub fn output_devices() -> Vec<(u32, String)> {
 struct Output {
     id: u32,
     _stream: cpal::Stream,
-    queue: rtrb::Producer<[f32; MAX_CHANNELS]>,
+    buffer: crate::output_buffer::OutputBuffer,
     delay: Vec<[f32; MAX_CHANNELS]>,
     cursor: usize,
     errors: Arc<AtomicU64>,
@@ -688,7 +667,7 @@ impl Output {
             std::mem::swap(&mut frame, &mut self.delay[self.cursor]);
             self.cursor = (self.cursor + 1) % self.delay.len();
         }
-        let _ = self.queue.push(frame);
+        self.buffer.push(frame);
     }
 }
 fn open_outputs(
@@ -726,23 +705,18 @@ fn open_outputs(
             .with_sample_rate(cpal::SampleRate(settings.sample_rate))
             .config();
         let channels = config.channels as usize;
-        let (queue, mut consumer) = rtrb::RingBuffer::<[f32; MAX_CHANNELS]>::new(4096);
-        let u = underruns.clone();
+        let (buffer, mut consumer) = crate::output_buffer::OutputBuffer::new(
+            settings.block_size,
+            settings.sample_rate,
+            underruns.clone(),
+        );
         let errors = Arc::new(AtomicU64::new(0));
         let err = errors.clone();
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
-                    for frame in data.chunks_mut(channels) {
-                        let samples = consumer.pop().unwrap_or_else(|_| {
-                            u.fetch_add(1, Ordering::Relaxed);
-                            [0.; MAX_CHANNELS]
-                        });
-                        for (ch, v) in frame.iter_mut().enumerate() {
-                            *v = samples.get(ch).copied().unwrap_or(0.);
-                        }
-                    }
+                    consumer.write(data, channels);
                 },
                 move |_| {
                     err.fetch_add(1, Ordering::Relaxed);
@@ -760,7 +734,7 @@ fn open_outputs(
         outputs.push(Output {
             id: selected.id,
             _stream: stream,
-            queue,
+            buffer,
             delay: vec![[0.; MAX_CHANNELS]; delay],
             cursor: 0,
             errors,

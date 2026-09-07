@@ -612,11 +612,25 @@ pub fn catalog() -> Vec<Descriptor> {
         &["visualizer", "fft", "phase"],
     );
     add(
+        "audio_to_control",
+        "Audio to control",
+        "∿→#",
+        "Audio",
+        "Converts the first audio channel to a numeric control value every sample: out = input × scale + offset. For FM, set scale to deviation in Hz and offset to carrier frequency; connect out to oscillator Frequency. Use Channel map to select another channel.",
+        vec![port("in", Audio)],
+        vec![port("out", Control)],
+        vec![
+            param("scale", "Scale", "", -100000., 100000., 1.),
+            param("offset", "Offset", "", -100000., 100000., 0.),
+        ],
+        &["signal to control", "FM", "HFO", "audio rate"],
+    );
+    add(
         "oscillator",
         "Oscillator",
         "∿",
         "Audio",
-        "Sine, triangle, sawtooth, square, or noise oscillator with smoothed frequency. Sawtooth and square edges use band-limiting.",
+        "Sine, triangle, sawtooth, square, or noise. Manual frequency edits are smoothed; connected frequency follows every sample for FM (0–20000 Hz). Sawtooth and square edges use band-limiting.",
         vec![],
         vec![port("out", Audio)],
         vec![
@@ -914,6 +928,8 @@ pub fn catalog() -> Vec<Descriptor> {
         ("ifft", "Inverse FFT", Spectral, Audio),
         ("rifft", "Inverse real FFT", Spectral, Audio),
         ("spectral_gain", "Spectral gain", Spectral, Spectral),
+        ("spectral_math", "Spectral math", Spectral, Spectral),
+        ("spectral_curve", "Spectral curve", Spectral, Spectral),
         ("to_polar", "Magnitude / phase", Spectral, Spectral),
         ("to_cartesian", "Real / imaginary", Spectral, Spectral),
     ] {
@@ -925,12 +941,63 @@ pub fn catalog() -> Vec<Descriptor> {
         if kind == "spectral_gain" {
             parameters.push(param("gain", "Gain", "", 0., 10., 1.));
         }
+        if kind == "spectral_math" {
+            parameters.extend([
+                param("magnitude_scale", "Magnitude multiply", "×", 0., 16., 1.),
+                param("magnitude_offset", "Magnitude add", "", -1000., 1000., 0.),
+                param("phase_scale", "Phase multiply", "×", -16., 16., 1.),
+                param(
+                    "phase_offset",
+                    "Phase add",
+                    "rad",
+                    -std::f64::consts::PI,
+                    std::f64::consts::PI,
+                    0.,
+                ),
+            ]);
+        }
+        if kind == "spectral_curve" {
+            for (prefix, min, max, default) in [
+                ("magnitude_curve", 0., 2., 1.),
+                (
+                    "phase_curve",
+                    -std::f64::consts::PI,
+                    std::f64::consts::PI,
+                    0.,
+                ),
+            ] {
+                for i in 0..33 {
+                    parameters.push(Parameter {
+                        structural: true,
+                        ..param(
+                            &format!("{prefix}_{i}"),
+                            &format!("{prefix} point {i}"),
+                            "",
+                            min,
+                            max,
+                            default,
+                        )
+                    });
+                }
+            }
+        }
+        let description = match kind {
+            "spectral_math" => {
+                "Per-bin magnitude and phase: multiply then add. Negative magnitudes clamp to zero; phase wraps. Negative-frequency bins mirror the positive bins for real audio; DC/Nyquist retain phase. Accepts Cartesian or polar frames. Match FFT size, overlap and channels."
+            }
+            "spectral_curve" => {
+                "Draw 33-point curves from DC to Nyquist: multiply magnitudes (0–2×), add phase (−π…π). Linear interpolation per bin, shared by all channels. Negative-frequency bins mirror for real audio; DC/Nyquist retain phase. Match FFT size, overlap and channels."
+            }
+            _ => {
+                "Windowed spectral frames. Connected spectral nodes must share FFT size, overlap and channel width."
+            }
+        };
         add(
             kind,
             label,
             "▥",
             "Spectral",
-            "Windowed spectral frames. Connected spectral nodes must share FFT size, overlap and channel width.",
+            description,
             vec![port("in", input)],
             vec![port("out", output)],
             parameters,

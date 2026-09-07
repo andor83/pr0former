@@ -7,7 +7,7 @@ import { Settings2 } from 'lucide-vue-next'
 import type { Descriptor, GraphNode, Telemetry } from '../types'
 import { formatValue } from '../api'
 import DataVisualizer from './DataVisualizer.vue'
-const props = defineProps<NodeProps<{ node: GraphNode; descriptor: Descriptor; values?: Record<string, number>; open: (id: string) => void; connectPort: (id: string, port: string, direction: string) => void }>>()
+const props = defineProps<NodeProps<{ node: GraphNode; descriptor: Descriptor; values?: Record<string, number>; open: (id: string) => void; connectPort: (id: string, port: string, direction: string) => void; contextMenu: (id: string, event: MouseEvent) => void }>>()
 const telemetry = inject<ShallowRef<Telemetry | null>>('telemetry')
 const telemetryStale=inject<ComputedRef<boolean>>('telemetryStale')
 const values = computed(() => telemetry?.value?.values[props.id])
@@ -20,7 +20,7 @@ const height = computed(() => visualizer.value ? props.data.node.kind==='control
 </script>
 
 <template>
-  <div class="patch-node" :class="[signal, { selected, 'math-node': isMath, 'visualizer-node':visualizer }]" :style="{ minHeight: `${height}px` }" tabindex="0" @keydown.enter.stop="data.open(id)" @dblclick.stop="data.open(id)">
+  <div class="patch-node" :class="[signal, { selected, 'math-node': isMath, 'visualizer-node':visualizer }]" :style="{ minHeight: `${height}px` }" tabindex="0" @contextmenu.prevent.stop="data.contextMenu(id, $event)" @keydown.enter.stop="data.open(id)" @dblclick.stop="data.open(id)">
     <div class="node-cap"><span>{{ data.descriptor.category }}</span><button class="node-settings nodrag nopan" :aria-label="`Edit ${data.node.label}`" @click.stop="data.open(id)"><Settings2 :size="14" /></button></div>
     <div v-if="isMath" class="math-symbol">{{ data.descriptor.symbol }}</div>
     <div v-else class="node-title"><span class="node-glyph">{{ data.descriptor.symbol }}</span>{{ data.node.label }}</div>

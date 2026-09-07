@@ -64,3 +64,17 @@
 .compact .control-visualizer-value{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .visualizer-placeholder{color:#829ba4;font-size:12px;padding:16px 0;}
 .data-visualizer.stale canvas{opacity:.45}
+
+.node-context-menu { position: fixed; z-index: 100; min-width: 180px; padding: 5px; border: 1px solid #414b4e; border-radius: 8px; background: #202729; box-shadow: 0 12px 30px #0008; }
+.node-context-menu button { display: block; width: 100%; min-height: 40px; padding: 8px 12px; text-align: left; border: 0; border-radius: 4px; background: transparent; color: #e7eeee; }
+.node-context-menu button:hover, .node-context-menu button:focus-visible { background: #334144; outline: 1px solid #65d4da; }
+.node-context-menu button.danger { color: #f1a29a; }
+
+.spectral-curve-editor { margin: 12px 0 20px; color: #c6abea; }
+.spectral-curve-editor:first-child { color: #edbf73; }
+.spectral-curve-editor svg { display: block; width: 100%; height: 160px; margin-top: 12px; border: 1px solid #425056; border-radius: 6px; background: #131d22; touch-action: none; }
+.spectral-curve-editor svg:focus-visible { outline: 2px solid #65d4da; }
+.spectral-curve-editor svg[aria-disabled="true"] { opacity: .55; }
+.spectral-curve-editor small { color: #9bb4bc; }
+
+.spectral-curve-editor .parameter-range { padding-right: 0; }

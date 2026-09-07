@@ -60,7 +60,9 @@ test('authorization, invitations, revision conflicts, and sample preparation', a
   expect(engineDevices.engine_enabled).toBe(true)
   expect(engineDevices.block_size).toBe(1024)
   expect((await request.get(`/api/projects/${id}/preview?edge=edge-0`)).status()).toBe(400)
-  expect((await request.put(`/api/projects/${id}`, { headers, data: project })).status()).toBe(409)
+  expect((await request.put(`/api/projects/${id}`, { headers, data: project })).status()).toBe(200)
+  const activeProject = (await (await request.get(`/api/projects/${id}`)).json()).project
+  expect((await request.put(`/api/projects/${id}`, { headers, data: { ...activeProject, name: 'Blocked live settings change' } })).status()).toBe(409)
   expect((await request.post(`/api/projects/${id}/transport`, { headers, data: { action: 'play' } })).ok()).toBeTruthy()
   expect((await request.post(`/api/projects/${id}/transport`, { headers, data: { action: 'deactivate' } })).ok()).toBeTruthy()
   expect((await request.put(settingsPath, { headers, data: { sample_rate: 48000, interfaces: [] } })).ok()).toBeTruthy()
