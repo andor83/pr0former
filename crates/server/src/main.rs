@@ -398,11 +398,10 @@ fn validate_live_update(previous: &Project, next: &Project) -> Result<(), String
         // Deleting an instrument detaches its score route; other score edits
         // still require deactivation in structured mode.
         for part in &mut graph_edit.parts {
-            if part
-                .instrument_node
-                .as_ref()
-                .is_some_and(|id| !next.graph.nodes.iter().any(|n| &n.id == id))
-            {
+            if part.instrument_node.as_ref().is_some_and(|id| {
+                previous.graph.nodes.iter().any(|n| &n.id == id)
+                    && !next.graph.nodes.iter().any(|n| &n.id == id)
+            }) {
                 part.instrument_node = None;
             }
             if let Some(restored) = next.parts.iter().find(|p| p.id == part.id) {
@@ -1111,6 +1110,29 @@ async fn main() {
 #[cfg(test)]
 mod live_edit_tests {
     use super::*;
+    #[test]
+    fn existing_missing_instrument_does_not_block_unrelated_live_graph_edits() {
+        let mut previous = pr0_core::demo_project("x".into(), "x".into(), Mode::Structured);
+        previous.graph.nodes.retain(|n| n.id != "tone");
+        previous
+            .graph
+            .edges
+            .retain(|e| e.source != "tone" && e.target != "tone");
+        // Older projects can retain a score route to an already deleted node.
+        assert_eq!(previous.parts[0].instrument_node.as_deref(), Some("tone"));
+        let mut added = previous.clone();
+        let mut node = added.graph.nodes[0].clone();
+        node.id = "new-clock".into();
+        added.graph.nodes.push(node);
+        assert!(validate_live_update(&previous, &added).is_ok());
+        let mut deleted = added.clone();
+        deleted.graph.nodes.retain(|n| n.id != "new-clock");
+        assert!(validate_live_update(&added, &deleted).is_ok());
+        assert_eq!(
+            deleted.parts[0].instrument_node,
+            previous.parts[0].instrument_node
+        );
+    }
     #[test]
     fn structured_live_edits_allow_graphs_but_protect_score_and_mode() {
         let previous = pr0_core::demo_project("x".into(), "x".into(), Mode::Structured);

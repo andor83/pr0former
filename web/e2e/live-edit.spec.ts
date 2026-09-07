@@ -13,7 +13,8 @@ test('live graph editing, FM conversion, context menus and keyboard transport in
   for (const mode of ['structured', 'conducted', 'freeform']) {
     let project = await (await page.request.post('/api/projects', { headers, data: { name: `Live ${mode}`, mode } })).json()
     project.bpm = 1 // A bar takes four minutes: live edits must not wait for it.
-    project.parts = []
+    // Keep the starter score's route to the already removed "tone" node,
+    // as can occur in older projects. Unrelated live graph edits must work.
     const node = (id: string, kind: string, x: number, y: number, parameters = {}) => ({ id, kind, label: id, x, y, channels: 2, parameters })
     project.graph = { nodes: [node('Modulator', 'oscillator', 0, 0, { frequency: 100, amplitude: 1 }), node('Carrier', 'oscillator', 0, 450, { frequency: 440, amplitude: 0.1 }), node('Output', 'output', 800, 450, { gain: -12 })], edges: [{ id: 'sound', source: 'Carrier', source_port: 'out', target: 'Output', target_port: 'in' }] }
     expect((await page.request.put(`/api/projects/${project.id}`, { headers, data: project })).ok()).toBeTruthy()
