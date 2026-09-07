@@ -62,7 +62,6 @@ pub enum Command {
     Bang(String),
     Devices(oneshot::Sender<Value>),
     Hardware(bool),
-    Capture(bool),
     Clip {
         part: String,
         playing: bool,
@@ -141,7 +140,6 @@ fn run(
                 Command::Transport(a) => Some(a.as_str()),
                 Command::Tempo(_) => Some("Tempo change queued"),
                 Command::Clip { .. } => Some("Part cue queued"),
-                Command::Capture(_) => Some("Input state requested"),
                 Command::Hardware(_) => Some("Output state requested"),
                 Command::Test(_) => Some("Latency metronome state changed"),
                 _ => None,
@@ -198,11 +196,14 @@ fn run(
                     input_rates.clear();
 
                     let result = if value {
-                        open_outputs(&settings, underruns.clone()).map(|devices| {
+                        open_outputs(&settings, underruns.clone()).and_then(|devices| {
+                            let captured = open_inputs(&settings)?;
                             outputs = devices;
+                            inputs = captured;
                             hardware = !outputs.is_empty();
                             enabled = true;
                             device_error.clear();
+                            Ok(())
                         })
                     } else {
                         Ok(())
@@ -218,18 +219,6 @@ fn run(
                 Command::Test(value) => {
                     testing = value;
                     test_sample = 0;
-                }
-                Command::Capture(enabled) => {
-                    inputs.clear();
-                    if enabled {
-                        match open_inputs(&settings) {
-                            Ok(opened) => {
-                                inputs = opened;
-                                device_error.clear();
-                            }
-                            Err(e) => device_error = e,
-                        }
-                    }
                 }
                 Command::Clip { part, playing } => {
                     if let (Some(seq), Some(e)) = (&mut sequencer, &mut engine) {
@@ -794,12 +783,24 @@ fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, Strin
             errors,
         });
     }
-    if inputs.is_empty() {
-        return Err(
-            "No native inputs enabled. Select inputs in System settings and save first.".into(),
-        );
-    }
     Ok(inputs)
+}
+
+#[cfg(test)]
+mod input_startup_tests {
+    #[test]
+    fn no_selected_inputs_allows_engine_startup_without_opening_devices() {
+        let mut settings = crate::settings::Settings::default();
+        assert!(super::open_inputs(&settings).unwrap().is_empty());
+        settings
+            .input_interfaces
+            .push(crate::settings::InputInterface {
+                id: 1,
+                name: "Unavailable unchecked input".into(),
+                enabled: false,
+            });
+        assert!(super::open_inputs(&settings).unwrap().is_empty());
+    }
 }
 
 pub fn output_devices() -> Vec<(u32, String)> {

@@ -860,14 +860,10 @@ async fn audio_enable(
     if app.active.lock().unwrap().as_deref() != Some(&id) {
         return Err(bad("Activate this project first"));
     }
-    send(
-        &app,
-        if c.input {
-            audio::Command::Capture(c.enabled)
-        } else {
-            audio::Command::Hardware(c.enabled)
-        },
-    )?;
+    if c.input {
+        return Err(bad("Native inputs start and stop with the audio engine"));
+    }
+    send(&app, audio::Command::Hardware(c.enabled))?;
     Ok(Json(json!({"ok":true})))
 }
 async fn enable_engine(app: &App, id: &str, enabled: bool) -> Api<()> {

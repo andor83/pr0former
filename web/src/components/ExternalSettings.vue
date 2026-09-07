@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed,onMounted,onBeforeUnmount,ref} from 'vue'
+import {computed,onMounted,onBeforeUnmount,ref,toRaw} from 'vue'
 import {api} from '../api'
 import type {Part,Project} from '../types'
 const props=defineProps<{tab:'midi'|'osc';project:Project;devices:any;editable:boolean;active:boolean;saving:boolean}>()
@@ -10,8 +10,8 @@ const part=computed(()=>props.project.parts.find(p=>p.id===selected.value)||prop
 const interfaces=computed(()=>[{name:'All IPv4 interfaces',address:'0.0.0.0'},...(status.value?.interfaces||[]),...(osc.value?.bind_addresses||[]).filter(ip=>ip!=='0.0.0.0'&&!status.value?.interfaces?.some((i:any)=>i.address===ip)).map(address=>({name:'Unavailable saved interface',address}))])
 function update(key:keyof Part,value:unknown){if(part.value)emit('part',{...part.value,[key]:value})}
 function binding(ip:string,enabled:boolean){if(!osc.value)return;osc.value.bind_addresses=enabled?(ip==='0.0.0.0'?[ip]:[...osc.value.bind_addresses.filter(x=>x!=='0.0.0.0'&&x!==ip),ip]):osc.value.bind_addresses.filter(x=>x!==ip)}
-async function refresh(){try{status.value=await api('/system/osc');if(!osc.value)osc.value=structuredClone(status.value.settings)}catch(e){error.value=String(e)}}
-async function save(){if(!osc.value)return;busy.value=true;error.value='';try{status.value=await api(`/projects/${props.project.id}/system/osc`,'PUT',osc.value);osc.value=structuredClone(status.value.settings)}catch(e){error.value=String(e)}finally{busy.value=false}}
+async function refresh(){try{status.value=await api('/system/osc');if(!osc.value)osc.value=structuredClone(toRaw(status.value.settings))}catch(e){error.value=String(e)}}
+async function save(){if(!osc.value)return;busy.value=true;error.value='';try{status.value=await api(`/projects/${props.project.id}/system/osc`,'PUT',osc.value);osc.value=structuredClone(toRaw(status.value.settings))}catch(e){error.value=String(e)}finally{busy.value=false}}
 let timer:ReturnType<typeof setInterval>|undefined
 onMounted(()=>{void refresh();timer=setInterval(()=>void refresh(),2000)})
 onBeforeUnmount(()=>clearInterval(timer))
@@ -54,7 +54,7 @@ onBeforeUnmount(()=>clearInterval(timer))
 <fieldset v-if="part" :disabled="!editable||active||saving">
 <template v-if="tab==='midi'">
 <label>MIDI port name<select :value="part.midi_port||''" @change="update('midi_port',($event.target as HTMLSelectElement).value||null)"><option value="">No MIDI output</option><option v-for="name in devices?.midi_outputs" :key="name" :value="name">{{name}}</option><option v-if="part.midi_port&&!devices?.midi_outputs?.includes(part.midi_port)" :value="part.midi_port">{{part.midi_port}} · unavailable</option></select></label>
-<label>MIDI channel<select :value="part.midi_channel||1" @change="update('midi_channel',Number(($event.target as HTMLSelectElement).value))"><option v-for="channel in 16" :key="channel" :value="channel">{{channel}}</option></select></label>
+<label>MIDI channel<select aria-label="MIDI channel" :value="part.midi_channel||1" @change="update('midi_channel',Number(($event.target as HTMLSelectElement).value))"><option v-for="channel in 16" :key="channel" :value="channel">{{channel}}</option></select></label>
 </template>
 <template v-else>
 <label>OSC IP:port<input :value="part.osc_destination||''" placeholder="192.168.1.10:9000" @change="update('osc_destination',($event.target as HTMLInputElement).value||null)"></label>
