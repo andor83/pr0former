@@ -1042,12 +1042,45 @@ impl Engine {
             node.fallback = visualizer::Datum::prepare(Some(value));
         }
     }
-    pub fn bang(&mut self, id: &str) {
+    pub fn tempo_connected(&self) -> bool {
+        self.nodes
+            .iter()
+            .any(|n| n.kind == "clock" && n.bindings.iter().any(|b| !b.parameter))
+    }
+    /// Validate transient external control events without changing the project literal.
+    pub fn external_control(&mut self, id: &str, value: &pr0_core::ControlValue) -> bool {
+        let Some(n) = self
+            .nodes
+            .iter()
+            .find(|n| n.id == id && n.kind == "control_input" && n.bindings.is_empty())
+        else {
+            return false;
+        };
+        let mode = n.p("mode");
+        let valid = match value {
+            pr0_core::ControlValue::Number(v) => {
+                mode > 0.
+                    && mode < 4.
+                    && v.is_finite()
+                    && *v >= n.p("min")
+                    && *v <= n.p("max")
+                    && (mode != 1. || v.fract() == 0.)
+            }
+            pr0_core::ControlValue::Text(s) => mode == 4. && s.len() <= 256,
+        };
+        if valid {
+            self.control(id, value);
+        }
+        valid
+    }
+    pub fn bang(&mut self, id: &str) -> bool {
         if let Some(node) = self.nodes.iter_mut().find(|n| {
             n.id == id && n.kind == "control_input" && n.bindings.is_empty() && n.p("mode") == 0.
         }) {
             node.bang = true;
+            return true;
         }
+        false
     }
     pub fn parameter(&mut self, node: &str, key: &str, value: f64) -> Result<(), String> {
         let n = self

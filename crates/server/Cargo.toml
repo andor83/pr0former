@@ -27,3 +27,4 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 webrtc = "0.14"
 opus = "0.3"
 bytes = "1"
+if-addrs = "0.15"

@@ -2,6 +2,7 @@ mod audio;
 mod bind;
 mod build_info;
 mod media;
+mod osc;
 mod output_buffer;
 mod performance;
 mod samples;
@@ -32,6 +33,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 struct App {
+    osc: Arc<osc::Runtime>,
     db: Arc<Mutex<Connection>>,
     events: broadcast::Sender<Value>,
     engine: std::sync::mpsc::SyncSender<audio::Command>,
@@ -1117,9 +1119,16 @@ async fn main() {
     let (events, _) = broadcast::channel(128);
     let media = Arc::new(media::Media::new());
     let logs = Arc::new(settings::Logs::default());
-    let engine = audio::start(events.clone(), media.audio.clone(), logs.clone());
+    let osc = osc::Runtime::load();
+    let engine = audio::start(
+        events.clone(),
+        media.audio.clone(),
+        logs.clone(),
+        osc.clone(),
+    );
     let cert = std::env::var("PR0_TLS_CERT").ok();
     let app = App {
+        osc,
         db: Arc::new(Mutex::new(db)),
         events,
         engine,
@@ -1129,7 +1138,10 @@ async fn main() {
         secure: cert.is_some(),
         media,
     };
+    app.osc.listen(&app);
     let router = Router::new()
+        .route("/api/system/osc", get(osc::get))
+        .route("/api/projects/{id}/system/osc", put(osc::put))
         .route("/api/status", get(status))
         .route("/api/system/audio", get(settings::get))
         .route(

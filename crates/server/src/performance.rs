@@ -375,13 +375,13 @@ impl HeldNotes {
     }
 }
 fn send_osc(
-    socket: Option<&std::net::UdpSocket>,
+    socket: &crate::osc::Runtime,
     destination: std::net::SocketAddr,
     address: &str,
     pitch: u8,
     velocity: u8,
 ) {
-    if let Some(socket) = socket {
+    {
         let packet = rosc::OscPacket::Message(rosc::OscMessage {
             addr: address.into(),
             args: vec![
@@ -390,16 +390,15 @@ fn send_osc(
             ],
         });
         if let Ok(bytes) = rosc::encoder::encode(&packet) {
-            let _ = socket.send_to(&bytes, destination);
+            socket.send(&bytes, destination);
         }
     }
 }
-pub fn external_worker() -> SyncSender<External> {
+pub fn external_worker(socket: std::sync::Arc<crate::osc::Runtime>) -> SyncSender<External> {
     let (tx, rx) = sync_channel(4096);
     std::thread::Builder::new()
         .name("pr0-midi-osc".into())
         .spawn(move || {
-            let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok();
             let mut midi: BTreeMap<String, midir::MidiOutputConnection> = BTreeMap::new();
             let mut held = HeldNotes::default();
             while let Ok(event) = rx.recv() {
@@ -442,14 +441,14 @@ pub fn external_worker() -> SyncSender<External> {
                                 pitch,
                                 velocity,
                             ) {
-                                send_osc(socket.as_ref(), destination, &address, pitch, velocity);
+                                send_osc(&socket, destination, &address, pitch, velocity);
                             }
                         }
                     }
                     External::Panic => {
                         for ((route, pitch), _) in &held.0 {
                             if let Route::Osc(destination, address) = route {
-                                send_osc(socket.as_ref(), *destination, address, *pitch, 0);
+                                send_osc(&socket, *destination, address, *pitch, 0);
                             }
                         }
                         held.0.clear();
@@ -643,7 +642,7 @@ mod tests {
         receiver
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .unwrap();
-        let tx = external_worker();
+        let tx = external_worker(std::sync::Arc::new(crate::osc::Runtime::default()));
         for velocity in [90, 70, 0] {
             tx.send(External::Note {
                 midi: None,

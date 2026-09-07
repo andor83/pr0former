@@ -213,7 +213,12 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   expect(cursorX).toBeCloseTo(positions[0]!.x, 0)
   await page.getByLabel('Follow playback').uncheck()
   await expect(page.getByLabel('Follow playback')).not.toBeChecked()
+  await page.getByRole('button',{name:'Settings menu',exact:true}).click()
+  await page.getByRole('menuitem',{name:'System settings',exact:true}).click()
+  await page.getByRole('tab',{name:'MIDI',exact:true}).click()
   await page.getByLabel('MIDI channel', { exact: true }).selectOption('10')
+  await expect(page.getByLabel('MIDI channel',{exact:true})).toBeEnabled()
+  await page.getByRole('tab',{name:'OSC',exact:true}).click()
   await page.getByLabel('OSC address', { exact: true }).fill('/touchdesigner/note')
   await page.getByLabel('OSC address', { exact: true }).press('Tab')
   await expect.poll(async () => {
@@ -221,6 +226,7 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
     return [saved.parts[0].midi_channel, saved.parts[0].osc_address]
   }).toEqual([10, '/touchdesigner/note'])
   await expect(page.getByLabel('OSC address', { exact: true })).toBeEnabled()
+  await page.getByRole('button',{name:'Close system settings',exact:true}).click()
   const rhythms = (await (await page.request.get(`/api/projects/${projectId}`)).json()).project
   rhythms.parts[0].notes = rhythms.parts[0].notes.map((n: any, i: number) => ({ ...n, beat: [0, 1, 3][i], duration: [0.75, 1.25, 0.8][i] }))
   const rhythmResponse = await page.request.put(`/api/projects/${projectId}`, { headers: { 'X-Pr0former': '1' }, data: rhythms })
@@ -246,6 +252,9 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
     await delayedSave
     await route.fulfill({ response })
   })
+  await page.getByRole('button',{name:'Settings menu',exact:true}).click()
+  await page.getByRole('menuitem',{name:'System settings',exact:true}).click()
+  await page.getByRole('tab',{name:'MIDI',exact:true}).click()
   await page.getByLabel('MIDI channel', { exact: true }).selectOption('11')
   await expect.poll(() => savedBeforeRemote?.revision).toBeTruthy()
   const newer = { ...savedBeforeRemote, name: 'Latest ensemble revision' }
@@ -258,6 +267,7 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await expect(page.locator('.revision')).toHaveText(`Revision ${remoteSaved.revision}`)
   await expect(page.getByRole('button', { name: 'Latest ensemble revision', exact: true })).toBeVisible()
   await page.unroute(`**/api/projects/${projectId}`)
+  await page.getByRole('button',{name:'Close system settings',exact:true}).click()
   await page.getByRole('button', { name: 'Performance mode', exact: true }).click()
   await page.context().setOffline(true)
   await expect(page.getByText('Connecting', { exact: true })).toBeAttached()

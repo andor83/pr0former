@@ -13,7 +13,7 @@ onMounted(refresh)
 <template>
   <section class="subgraph-library" :class="{expanded:open}" aria-label="Subgraph library">
     <div class="library-heading"><button class="library-accordion-title" :aria-expanded="open" aria-controls="subgraph-library-content" @click="emit('toggle')"><span aria-hidden="true">{{open?'⌄':'›'}}</span> Subgraph library</button><button class="text-button" @click="refresh" aria-label="Refresh subgraph library">↻</button></div>
-    <div v-show="open" id="subgraph-library-content" class="subgraph-library-content">
+    <div :inert="!open" :aria-hidden="!open" id="subgraph-library-content" class="subgraph-library-content">
     <p v-if="error" role="alert" class="field-error">{{error}}</p>
     <p v-if="!entries.length" class="feature-note">Save a subgraph from its right-click menu. Private entries are yours; public versions can be used by everyone on this server.</p>
     <article v-for="entry in entries" :key="entry.id" class="subgraph-library-entry">

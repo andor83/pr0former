@@ -66,8 +66,17 @@ pub struct LibraryRef {
     pub id: String,
     pub version: u64,
 }
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct IoConfig {
+    pub port: String,
+    pub address: String,
+    pub destination: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io: Option<IoConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<LibraryRef>,
     /// Container node ID; absent means the root editor. Flat storage permits arbitrary nesting.
@@ -457,6 +466,87 @@ pub fn catalog() -> Vec<Descriptor> {
         vec![param("open", "Open", "", 0., 1., 1.)],
         &["spigot"],
     );
+    for input in [true, false] {
+        let structural = |mut p: Parameter| {
+            p.structural = true;
+            p
+        };
+        add(
+            if input { "midi_input" } else { "midi_output" },
+            if input { "MIDI input" } else { "MIDI output" },
+            "♪",
+            "External",
+            if input {
+                "Server MIDI Note or CC input. Select a port, message type and channel in the modal. Outputs number, value and a one-sample message trigger."
+            } else {
+                "Send MIDI notes or CC to a server port. Rising trigger sends number/value; falling trigger releases a Note. Values are rounded to 0–127."
+            },
+            if input {
+                vec![]
+            } else {
+                vec![
+                    port("number", Control),
+                    port("value", Control),
+                    port("trigger", Control),
+                ]
+            },
+            if input {
+                vec![
+                    port("number", Control),
+                    port("value", Control),
+                    port("trigger", Control),
+                ]
+            } else {
+                vec![]
+            },
+            vec![
+                structural(param("mode", "Message type (0 Note, 1 CC)", "", 0., 1., 0.)),
+                structural(param(
+                    "channel",
+                    "MIDI channel (0 all inputs)",
+                    "",
+                    if input { 0. } else { 1. },
+                    16.,
+                    1.,
+                )),
+            ],
+            &[],
+        );
+        add(
+            if input { "osc_input" } else { "osc_output" },
+            if input { "OSC input" } else { "OSC output" },
+            "↔",
+            "External",
+            if input {
+                "Receive one numeric or text argument at an exact OSC address. Enable OSC reception in System settings."
+            } else {
+                "Send one control value to an OSC destination/address. With trigger connected, send on its rising edge; otherwise send changed values. Rate is bounded."
+            },
+            if input {
+                vec![]
+            } else {
+                vec![port("in", Control), port("trigger", Control)]
+            },
+            if input {
+                vec![port("out", Control)]
+            } else {
+                vec![]
+            },
+            if input {
+                vec![structural(param("text", "Text mode", "", 0., 1., 0.))]
+            } else {
+                vec![structural(param(
+                    "rate",
+                    "Maximum message rate",
+                    "Hz",
+                    1.,
+                    200.,
+                    60.,
+                ))]
+            },
+            &[],
+        );
+    }
     add(
         "control_input",
         "Graphical control",
@@ -1245,6 +1335,47 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
+            if let Some(io) = &n.io {
+                if !matches!(
+                    n.kind.as_str(),
+                    "midi_input" | "midi_output" | "osc_input" | "osc_output"
+                ) {
+                    return Err("I/O routes belong to MIDI/OSC nodes".into());
+                }
+                if io.port.len() > 256 || io.port.chars().any(char::is_control) {
+                    return Err("Invalid MIDI port name".into());
+                }
+                if !io.address.is_empty()
+                    && (!io.address.starts_with('/')
+                        || io.address.len() > 256
+                        || io
+                            .address
+                            .chars()
+                            .any(|c| c.is_whitespace() || "*?[]{}#,\\".contains(c)))
+                {
+                    return Err(
+                        "Choose a literal OSC address starting with / (at most 256 bytes)".into(),
+                    );
+                }
+                if !io.destination.is_empty()
+                    && io
+                        .destination
+                        .parse::<std::net::SocketAddr>()
+                        .map_or(true, |a| !a.is_ipv4() || a.port() == 0)
+                {
+                    return Err("OSC node destination must be IPv4:port with a nonzero port".into());
+                }
+            }
+            if matches!(n.kind.as_str(), "midi_input" | "midi_output")
+                && n.parameters
+                    .iter()
+                    .any(|(k, v)| (k == "mode" || k == "channel") && v.fract() != 0.)
+            {
+                return Err("MIDI mode/channel must be whole numbers".into());
+            }
+            if n.kind == "osc_input" && n.parameters.get("text").is_some_and(|v| v.fract() != 0.) {
+                return Err("Choose numeric or text OSC input".into());
+            }
             if let Some(value) = &n.control_value {
                 if !matches!(n.kind.as_str(), "control_visualizer" | "control_input") {
                     return Err(
@@ -1451,7 +1582,7 @@ impl Graph {
         for &i in &order {
             if matches!(
                 self.nodes[i].kind.as_str(),
-                "control_visualizer" | "control_input"
+                "control_visualizer" | "control_input" | "osc_input"
             ) || (self.nodes[i].kind.starts_with("subgraph_")
                 && self.nodes[i].kind.ends_with("_control"))
             {
@@ -1463,6 +1594,8 @@ impl Graph {
                     text[*ids.get(&edge.source).unwrap()]
                 } else {
                     matches!(self.nodes[i].control_value, Some(ControlValue::Text(_)))
+                        || (self.nodes[i].kind == "osc_input"
+                            && self.nodes[i].parameters.get("text") == Some(&1.))
                         || (self.nodes[i].kind == "control_input"
                             && self.nodes[i].parameters.get("mode") == Some(&4.))
                 };
@@ -1474,7 +1607,7 @@ impl Graph {
             if text[source]
                 && !matches!(
                     self.nodes[target].kind.as_str(),
-                    "control_visualizer" | "control_input"
+                    "control_visualizer" | "control_input" | "osc_output"
                 )
                 && !(self.nodes[target].kind.starts_with("subgraph_")
                     && self.nodes[target].kind.ends_with("_control"))
@@ -1596,6 +1729,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         .map(|(id, kind, x, y)| {
             let d = catalog.iter().find(|d| d.kind == *kind).unwrap();
             Node {
+                io: None,
                 library: None,
                 parent: None,
                 id: id.to_string(),

@@ -17,6 +17,10 @@ pub fn monotonic_ms() -> f64 {
     START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.
 }
 pub enum Command {
+    Osc {
+        project: String,
+        message: rosc::OscMessage,
+    },
     Visualizers {
         session: String,
         project: String,
@@ -72,11 +76,12 @@ pub fn start(
     events: broadcast::Sender<Value>,
     media: broadcast::Sender<crate::media::AudioBlock>,
     logs: Arc<crate::settings::Logs>,
+    osc: Arc<crate::osc::Runtime>,
 ) -> SyncSender<Command> {
     let (tx, rx) = sync_channel::<Command>(256);
     std::thread::Builder::new()
         .name("pr0-orchestrator".into())
-        .spawn(move || run(events, media, logs, rx))
+        .spawn(move || run(events, media, logs, rx, osc))
         .expect("Start audio worker");
     tx
 }
@@ -85,8 +90,9 @@ fn run(
     media: broadcast::Sender<crate::media::AudioBlock>,
     logs: Arc<crate::settings::Logs>,
     rx: std::sync::mpsc::Receiver<Command>,
+    osc: Arc<crate::osc::Runtime>,
 ) {
-    let io = crate::performance::external_worker();
+    let io = crate::performance::external_worker(osc.clone());
     let mut sequencer: Option<crate::performance::Sequencer> = None;
     let mut engine: Option<Engine> = None;
     let mut project: Option<Project> = None;
@@ -312,6 +318,57 @@ fn run(
                         }
                     }
                 }
+                Command::Osc {
+                    project: id,
+                    message,
+                } => {
+                    let accepted = if enabled && project.as_ref().is_some_and(|p| p.id == id) {
+                        if let Some(e) = engine.as_mut() {
+                            match crate::osc::action(&message) {
+                                Some(crate::osc::Action::Control(node, value)) => {
+                                    e.external_control(&node, &value)
+                                }
+                                Some(crate::osc::Action::Bang(node)) => e.bang(&node),
+                                Some(crate::osc::Action::Tempo(bpm)) if !e.tempo_connected() => {
+                                    if e.clock.running {
+                                        next_tempo = Some((e.clock.beat.floor() + 1., bpm));
+                                    } else {
+                                        e.clock.set_tempo(bpm);
+                                    }
+                                    true
+                                }
+                                Some(crate::osc::Action::Transport(action)) => {
+                                    match action {
+                                        "play" => e.clock.running = true,
+                                        "pause" => {
+                                            if let Some(seq) = &mut sequencer {
+                                                seq.pause(e, &io);
+                                            }
+                                            e.clock.running = false;
+                                        }
+                                        "stop" => {
+                                            if let Some(seq) = &mut sequencer {
+                                                seq.reset(e, &io);
+                                            }
+                                            e.clock.stop();
+                                            next_tempo = None;
+                                        }
+                                        _ => {}
+                                    }
+                                    true
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !accepted {
+                        osc.reject();
+                    }
+                }
                 Command::Control {
                     node,
                     value,
@@ -364,7 +421,23 @@ fn run(
                 }
                 Command::Devices(reply) => {
                     let devices = output_devices();
-                    let midi = midir::MidiOutput::new("pr0former device list")
+                    let midi_out = midir::MidiOutput::new("pr0former device list");
+                    let midi_in = midir::MidiInput::new("pr0former device list");
+                    let midi_error = midi_out
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .or_else(|| midi_in.as_ref().err().map(ToString::to_string));
+                    let midi = midi_out
+                        .ok()
+                        .map(|m| {
+                            m.ports()
+                                .iter()
+                                .filter_map(|p| m.port_name(p).ok())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let midi_inputs = midi_in
                         .ok()
                         .map(|m| {
                             m.ports()
@@ -376,7 +449,7 @@ fn run(
                     let _=reply.send(json!({
 "input_interfaces":input_devices().iter().map(|(id,name)|json!({"id":id,"name":name})).collect::<Vec<_>>(),"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":devices.iter().map(|(id,name)|json!({
 "id":id,"name":name}
-)).collect::<Vec<_>>(),"midi_outputs":midi,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}
+)).collect::<Vec<_>>(),"midi_outputs":midi,"midi_inputs":midi_inputs,"midi_error":midi_error,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}
 ));
                 }
                 Command::Hardware(value) => {

@@ -8,6 +8,7 @@ const draft=ref(String(props.node.control_value??'')),focused=ref(false),error=r
 watch(()=>props.node.control_value,value=>{if(!focused.value)draft.value=String(value??'')})
 watch(mode,()=>{draft.value=String(props.node.control_value??'');error.value=''})
 const incoming=computed(()=>props.data?.value)
+watch(incoming,value=>{if(props.active&&!props.stale&&!focused.value&&!props.connected&&value!==undefined)draft.value=String(value)})
 function edit(text:string){
   draft.value=text;error.value=''
   if(mode.value===4){if(new TextEncoder().encode(text).length>256){error.value='Use at most 256 UTF-8 bytes';return}emit('value',text);return}
