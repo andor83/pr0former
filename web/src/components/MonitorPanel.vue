@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { Headphones, Mic, Radio, Square } from 'lucide-vue-next'
+import BrowserInputPicker from './BrowserInputPicker.vue'
+import { browserInputChoices, browserInputBusy, captureError, refreshBrowserInputs } from '../browserInputs'
 import { api } from '../api'
 import type { GraphNode } from '../types'
 const props = defineProps<{ projectId: string; active: boolean; nodes: GraphNode[] }>()
 const error = ref(''), state = ref('disconnected'), microphone = ref(false), inputNode = ref(''), monitorNode = ref(''), volume = ref(0.5)
 const monitor = ref<HTMLAudioElement>(), settings = ref(''), stats = ref({ lost: 0, jitter: 0, buffer: 0, rtt: 0 })
-type Attempt = { peer: RTCPeerConnection; abort: AbortController; stream?: MediaStream; offer?: Promise<RTCSessionDescriptionInit>; timer?: ReturnType<typeof setInterval> }
+type Attempt = { inputKey?: string; peer: RTCPeerConnection; abort: AbortController; stream?: MediaStream; offer?: Promise<RTCSessionDescriptionInit>; timer?: ReturnType<typeof setInterval> }
 let current: Attempt | null = null
 async function disconnect() {
   const attempt = current
   if (!attempt) return
   current = null
+  if (attempt.inputKey) delete browserInputBusy[attempt.inputKey]
   attempt.abort.abort(); clearInterval(attempt.timer)
   attempt.stream?.getTracks().forEach(track => track.stop())
   attempt.peer.ontrack = null; attempt.peer.onconnectionstatechange = null; attempt.peer.close()
@@ -65,8 +68,12 @@ async function connect() {
       try { await monitor.value.play() } catch { if (current === owned) error.value = 'Tap Resume audio to permit monitor playback.' }
     }
     if (microphone.value) {
-      const captured = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 2, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false })
+      const key = `${props.projectId}:${inputNode.value}`
+      owned.inputKey = key; browserInputBusy[key] = true
+      const deviceId = browserInputChoices[key]
+      const captured = await navigator.mediaDevices.getUserMedia({ audio: { ...(deviceId ? { deviceId: { exact: deviceId } } : {}), channelCount: 2, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false })
       if (current !== owned) { captured.getTracks().forEach(track => track.stop()); return }
+      void refreshBrowserInputs()
       owned.stream = captured
       settings.value = JSON.stringify(captured.getAudioTracks()[0].getSettings(), null, 2)
       captured.getAudioTracks().forEach(track => pc.addTrack(track, captured))
@@ -94,7 +101,7 @@ async function connect() {
     }, 1000)
   } catch (e) {
     if (attempt && current !== attempt) return
-    error.value = e instanceof Error ? e.message : String(e)
+    error.value = captureError(e)
     if (attempt) await disconnect(); else state.value = 'disconnected'
   }
 }
@@ -106,7 +113,7 @@ onBeforeUnmount(() => { void disconnect() })
   <section class="browser-monitor">
     <div class="section-heading"><div><div class="eyebrow">WEBRTC / OPUS · STEREO</div><h2>Browser audio</h2></div><span class="mode-pill">{{ state.toUpperCase() }}</span></div>
     <audio ref="monitor" autoplay playsinline></audio>
-    <div class="monitor-form"><label>Monitor feed<select v-model="monitorNode" aria-label="Monitor feed" :disabled="state !== 'disconnected'"><option value="">Master mix</option><option v-for="node in nodes.filter(n => n.kind === 'monitor_output')" :key="node.id" :value="node.id">{{ node.label }}</option></select></label><label><input v-model="microphone" type="checkbox" :disabled="state !== 'disconnected'"> Send microphone to the graph</label><select v-if="microphone" v-model="inputNode" :disabled="state !== 'disconnected'" aria-label="Browser input node"><option value="">Select assigned browser input…</option><option v-for="node in nodes.filter(n => n.kind === 'browser_input')" :key="node.id" :value="node.id">{{ node.label }} · {{ node.id.slice(0, 8) }}</option></select><div class="monitor-buttons"><button v-if="state === 'disconnected'" class="button primary" :disabled="!active" @click="connect"><Headphones :size="16" /> Connect monitor</button><button v-else class="button" :disabled="state === 'disconnecting'" @click="disconnect"><Square :size="14" /> Disconnect</button><button v-if="state === 'connected'" class="button" @click="resume">Resume audio</button></div><label>Monitor level<input v-model.number="volume" type="range" min="0" max="1" step="0.01" aria-label="Monitor level" @input="level"></label></div>
+    <div class="monitor-form"><label>Monitor feed<select v-model="monitorNode" aria-label="Monitor feed" :disabled="state !== 'disconnected'"><option value="">Master mix</option><option v-for="node in nodes.filter(n => n.kind === 'monitor_output')" :key="node.id" :value="node.id">{{ node.label }}</option></select></label><label><input v-model="microphone" type="checkbox" :disabled="state !== 'disconnected'"> Send microphone to the graph</label><select v-if="microphone" v-model="inputNode" :disabled="state !== 'disconnected'" aria-label="Browser input node"><option value="">Select assigned browser input…</option><option v-for="node in nodes.filter(n => n.kind === 'browser_input')" :key="node.id" :value="node.id">{{ node.label }} · {{ node.id.slice(0, 8) }}</option></select><BrowserInputPicker v-if="microphone && inputNode" :input-key="`${projectId}:${inputNode}`" :disabled="state !== 'disconnected'" /><p v-if="microphone && !nodes.some(n => n.kind === 'browser_input')" class="field-error">No Browser input nodes exist. Add one to the graph first.</p><div class="monitor-buttons"><button v-if="state === 'disconnected'" class="button primary" :disabled="!active" @click="connect"><Headphones :size="16" /> Connect monitor</button><button v-else class="button" :disabled="state === 'disconnecting'" @click="disconnect"><Square :size="14" /> Disconnect</button><button v-if="state === 'connected'" class="button" @click="resume">Resume audio</button></div><label>Monitor level<input v-model.number="volume" type="range" min="0" max="1" step="0.01" aria-label="Monitor level" @input="level"></label></div>
     <p v-if="error" class="field-error" role="alert">{{ error }}</p>
     <div class="media-stats"><span>RTT <strong>{{ stats.rtt.toFixed(1) }} ms</strong></span><span>Jitter <strong>{{ stats.jitter.toFixed(1) }} ms</strong></span><span>Mean jitter buffer <strong>{{ stats.buffer.toFixed(1) }} ms</strong></span><span>Packets lost <strong>{{ stats.lost }}</strong></span></div>
     <p class="feature-note">Choose the master mix or a dedicated Monitor output from the patch. Disconnect to change feeds. Use headphones when sending a microphone. Per-part mix-minus sends and physical end-to-end latency calibration are still pending; these network statistics do not measure total listening latency.</p>

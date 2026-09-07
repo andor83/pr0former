@@ -78,3 +78,7 @@
 .spectral-curve-editor small { color: #9bb4bc; }
 
 .spectral-curve-editor .parameter-range { padding-right: 0; }
+
+.graph-breadcrumbs{display:flex;align-items:center;gap:6px;max-width:45%;overflow-x:auto;white-space:nowrap;pointer-events:auto}.graph-breadcrumbs button{min-height:36px}.browser-input-picker{max-width:100%}.browser-input-picker select{max-width:100%}
+
+.node-library .library-list{min-height:100px;flex:1 1 45%;overflow:auto}.subgraph-library{border-top:1px solid var(--line);padding:8px 12px;min-height:150px;max-height:45%;overflow:auto;flex:1 1 40%}.subgraph-library .library-heading{padding:4px 0}.subgraph-library-entry{padding-bottom:12px}.subgraph-library-entry select{width:100%;font-size:11px}.subgraph-library .feature-note{font-size:11px}.library-node[draggable=true]{cursor:grab}

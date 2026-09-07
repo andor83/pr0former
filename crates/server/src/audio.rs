@@ -97,8 +97,7 @@ fn run(
         Default::default();
     let mut logged_underruns = 0;
     let mut error_logged = String::new();
-    let mut input_stream = None;
-    let mut input_queue: Option<rtrb::Consumer<[f32; MAX_CHANNELS]>> = None;
+    let mut inputs: Vec<Input> = vec![];
     let mut hardware = false;
     let underruns = Arc::new(AtomicU64::new(0));
     let mut last = Instant::now();
@@ -181,8 +180,7 @@ fn run(
                     hardware = false;
                     enabled = false;
                     testing = false;
-                    input_stream = None;
-                    input_queue = None;
+                    inputs.clear();
                     settings = new_settings;
                     media_rates.clear();
                     input_rates.clear();
@@ -210,14 +208,11 @@ fn run(
                     test_sample = 0;
                 }
                 Command::Capture(enabled) => {
-                    if !enabled {
-                        input_stream = None;
-                        input_queue = None;
-                    } else if input_stream.is_none() {
-                        match open_input(settings.sample_rate) {
-                            Ok((stream, queue)) => {
-                                input_stream = Some(stream);
-                                input_queue = Some(queue);
+                    inputs.clear();
+                    if enabled {
+                        match open_inputs(&settings) {
+                            Ok(opened) => {
+                                inputs = opened;
                                 device_error.clear();
                             }
                             Err(e) => device_error = e,
@@ -282,6 +277,7 @@ fn run(
                     next_tempo = None;
                 }
                 Command::Unload => {
+                    inputs.clear();
                     previews.clear();
                     let _ = io.try_send(crate::performance::External::Panic);
                     sequencer = None;
@@ -352,9 +348,9 @@ fn run(
                         })
                         .unwrap_or_default();
                     let _=reply.send(json!({
-"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":devices.iter().map(|(id,name)|json!({
+"input_interfaces":input_devices().iter().map(|(id,name)|json!({"id":id,"name":name})).collect::<Vec<_>>(),"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":devices.iter().map(|(id,name)|json!({
 "id":id,"name":name}
-)).collect::<Vec<_>>(),"midi_outputs":midi,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":input_stream.is_some(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}
+)).collect::<Vec<_>>(),"midi_outputs":midi,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}
 ));
                 }
                 Command::Hardware(value) => {
@@ -440,11 +436,21 @@ fn run(
                 if let Some(seq) = &mut sequencer {
                     seq.tick(e, &io);
                 }
-                let input = input_queue
-                    .as_mut()
-                    .and_then(|q| q.pop().ok())
-                    .unwrap_or([0.; MAX_CHANNELS]);
-                e.render(std::slice::from_ref(&input), std::slice::from_mut(frame));
+                for input in &mut inputs {
+                    input.frame = input.queue.pop().ok().unwrap_or([0.; MAX_CHANNELS]);
+                }
+                if let Some(p) = &project {
+                    for node in p.graph.nodes.iter().filter(|n| n.kind == "input") {
+                        let route = node.parameters.get("interface").copied().unwrap_or(0.) as u32;
+                        let sample = inputs
+                            .iter()
+                            .find(|i| route == 0 || i.id == route)
+                            .map(|i| i.frame)
+                            .unwrap_or([0.; MAX_CHANNELS]);
+                        e.external(&node.id, sample);
+                    }
+                }
+                e.render(&[], std::slice::from_mut(frame));
                 for preview in &mut previews {
                     if preview.frames.len() < 256 {
                         preview
@@ -550,7 +556,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":input_stream.is_some(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
 ));
                 }
             }
@@ -584,6 +590,11 @@ fn run(
             }
         }
 
+        if inputs.iter().any(|i| i.errors.load(Ordering::Relaxed) > 0) {
+            inputs.clear();
+            device_error =
+                "Native input stream failed. Refresh devices and enable capture again.".into();
+        }
         if hardware {
             deadline = Instant::now();
             continue;
@@ -600,9 +611,11 @@ fn run(
     }
 }
 
-fn open_input(rate: u32) -> Result<(cpal::Stream, rtrb::Consumer<[f32; MAX_CHANNELS]>), String> {
-    let host = cpal::default_host();
-    let device = host.default_input_device().ok_or("No input device")?;
+fn open_input(
+    device: cpal::Device,
+    rate: u32,
+    errors: Arc<AtomicU64>,
+) -> Result<(cpal::Stream, rtrb::Consumer<[f32; MAX_CHANNELS]>), String> {
     let supported = device
         .supported_input_configs()
         .map_err(|e| e.to_string())?
@@ -627,12 +640,67 @@ fn open_input(rate: u32) -> Result<(cpal::Stream, rtrb::Consumer<[f32; MAX_CHANN
                     let _ = producer.push(samples);
                 }
             },
-            move |_| {},
+            move |_| {
+                errors.fetch_add(1, Ordering::Relaxed);
+            },
             None,
         )
         .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
     Ok((stream, consumer))
+}
+
+struct Input {
+    id: u32,
+    _stream: cpal::Stream,
+    queue: rtrb::Consumer<[f32; MAX_CHANNELS]>,
+    frame: [f32; MAX_CHANNELS],
+    errors: Arc<AtomicU64>,
+}
+fn device_id(name: &str) -> u32 {
+    name.bytes()
+        .fold(2166136261_u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
+        % 999999999
+        + 1
+}
+pub fn input_devices() -> Vec<(u32, String)> {
+    cpal::default_host()
+        .input_devices()
+        .map(|ds| {
+            ds.filter_map(|d| d.name().ok())
+                .map(|name| (device_id(&name), name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, String> {
+    let mut inputs = vec![];
+    for selected in settings.input_interfaces.iter().filter(|i| i.enabled) {
+        let device = cpal::default_host()
+            .input_devices()
+            .map_err(|e| e.to_string())?
+            .find(|d| {
+                d.name()
+                    .is_ok_and(|name| name == selected.name && device_id(&name) == selected.id)
+            })
+            .ok_or_else(|| format!("Input {} is unavailable", selected.name))?;
+        let errors = Arc::new(AtomicU64::new(0));
+        let (stream, queue) = open_input(device, settings.sample_rate, errors.clone())
+            .map_err(|e| format!("Input {}: {e}", selected.name))?;
+        inputs.push(Input {
+            id: selected.id,
+            _stream: stream,
+            queue,
+            frame: [0.; MAX_CHANNELS],
+            errors,
+        });
+    }
+    if inputs.is_empty() {
+        return Err(
+            "No native inputs enabled. Select inputs in System settings and save first.".into(),
+        );
+    }
+    Ok(inputs)
 }
 
 pub fn output_devices() -> Vec<(u32, String)> {

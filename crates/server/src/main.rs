@@ -5,6 +5,7 @@ mod output_buffer;
 mod performance;
 mod samples;
 mod settings;
+mod subgraphs;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json, Router,
@@ -625,6 +626,17 @@ async fn transport(
         match c.action.as_str() {
             "play" | "pause" | "stop" => send(&app, audio::Command::Transport(c.action))?,
             "tempo" => {
+                let project = load(&app, &id)?;
+                if project.graph.edges.iter().any(|e| {
+                    e.target_port == "tempo"
+                        && project
+                            .graph
+                            .nodes
+                            .iter()
+                            .any(|n| n.id == e.target && n.kind == "clock")
+                }) {
+                    return Err(bad("Project tempo is driven by a global clock connection"));
+                }
                 let bpm = c.bpm.ok_or_else(|| bad("Tempo required"))?;
                 if !bpm.is_finite() || !(1.0..=400.0).contains(&bpm) {
                     return Err(bad("Tempo must be 1–400 BPM"));
@@ -885,14 +897,13 @@ async fn preview(
     let u = user(&app, &headers)?;
     role(&app, &id, &u)?;
     let p = load(&app, &id)?;
-    let edge = p
-        .graph
+    let graph = p.graph.flatten().map_err(bad)?;
+    let edge = graph
         .edges
         .iter()
         .find(|e| e.id == query.edge)
         .ok_or_else(|| bad("Connection missing"))?;
-    let source = p
-        .graph
+    let source = graph
         .nodes
         .iter()
         .find(|n| n.id == edge.source)
@@ -1021,6 +1032,7 @@ async fn main() {
         CREATE TABLE IF NOT EXISTS members(project_id TEXT REFERENCES projects(id),user_id TEXT REFERENCES users(id),role TEXT NOT NULL,PRIMARY KEY(project_id,user_id));
         CREATE TABLE IF NOT EXISTS revisions(project_id TEXT REFERENCES projects(id),revision INTEGER,body TEXT NOT NULL,PRIMARY KEY(project_id,revision));
         CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),role TEXT,expires INTEGER,used INTEGER);").expect("Database migration");
+    subgraphs::migrate(&db).expect("Subgraph library migration");
     let (events, _) = broadcast::channel(128);
     let media = Arc::new(media::Media::new());
     let logs = Arc::new(settings::Logs::default());
@@ -1045,6 +1057,16 @@ async fn main() {
         )
         .route("/api/projects/{id}/logs", get(settings::logs))
         .route("/api/projects/{id}/preview", get(preview))
+        .route("/api/subgraphs", get(subgraphs::list))
+        .route(
+            "/api/subgraphs/{id}/versions/{version}",
+            get(subgraphs::get),
+        )
+        .route("/api/projects/{id}/subgraphs", post(subgraphs::save))
+        .route(
+            "/api/projects/{id}/subgraphs/insert",
+            post(subgraphs::insert),
+        )
         .route("/api/projects/{id}/engine", post(engine_enable))
         .route("/api/projects/{id}/latency-test", post(latency_test))
         .route("/api/register", post(register))

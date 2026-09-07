@@ -62,7 +62,17 @@ pub enum ControlValue {
 }
 pub const MAX_CONTROL_TEXT_BYTES: usize = 256;
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryRef {
+    pub id: String,
+    pub version: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<LibraryRef>,
+    /// Container node ID; absent means the root editor. Flat storage permits arbitrary nesting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub id: String,
     pub kind: String,
     pub label: String,
@@ -195,6 +205,54 @@ pub fn catalog() -> Vec<Descriptor> {
             aliases: aliases.iter().map(|s| s.to_string()).collect(),
         });
     };
+    add(
+        "subgraph",
+        "Subgraph",
+        "▣",
+        "Subgraphs",
+        "Open a nested graph. Named boundary nodes define its ports.",
+        vec![],
+        vec![],
+        vec![],
+        &[],
+    );
+    for (suffix, signal) in [
+        ("audio", Audio),
+        ("control", Control),
+        ("spectral", Spectral),
+    ] {
+        for direction in ["input", "output"] {
+            let parameters = if signal == Spectral {
+                vec![
+                    Parameter {
+                        structural: true,
+                        ..param("size", "FFT size", "samples", 256., 8192., 1024.)
+                    },
+                    Parameter {
+                        structural: true,
+                        ..param("overlap", "Overlap", "", 2., 4., 4.)
+                    },
+                ]
+            } else {
+                vec![]
+            };
+            add(
+                &format!("subgraph_{direction}_{suffix}"),
+                &format!("Subgraph {suffix} {direction}"),
+                if direction == "input" { "↳" } else { "↱" },
+                if signal == Spectral {
+                    "Spectral"
+                } else {
+                    "Subgraphs"
+                },
+                "Rename this node to name its parent subgraph port. Set channel width and spectral frame format here.",
+                vec![port("in", signal)],
+                vec![port("out", signal)],
+                parameters,
+                &[],
+            );
+        }
+    }
     for (kind, label, symbol) in [
         ("add", "Add", "+"),
         ("subtract", "Subtract", "−"),
@@ -285,8 +343,8 @@ pub fn catalog() -> Vec<Descriptor> {
         "Global clock",
         "◷",
         "Timing",
-        "Authoritative project clock. Beat pulses and continuous beat position.",
-        vec![],
+        "Authoritative project clock. Connect tempo to control project BPM (1–400), preserving beat phase. Disconnect to retain the last tempo.",
+        vec![port("tempo", Control)],
         vec![
             port("tick", Control),
             port("beat", Control),
@@ -447,7 +505,13 @@ pub fn catalog() -> Vec<Descriptor> {
         "Selected server interface input; channel index is zero-based.",
         vec![],
         vec![port("out", Audio)],
-        vec![param("offset", "First channel", "", 0., 63., 0.)],
+        vec![
+            Parameter {
+                structural: true,
+                ..param("interface", "Input interface", "", 0., 999999999., 0.)
+            },
+            param("offset", "First channel", "", 0., 63., 0.),
+        ],
         &["adc~"],
     );
     add(
@@ -1041,6 +1105,94 @@ pub fn catalog() -> Vec<Descriptor> {
 impl Graph {
     /// Return a stable topological schedule after validating all port contracts.
     pub fn validate(&self) -> Result<Vec<usize>, String> {
+        self.flatten()?.validate_flat()
+    }
+    /// Validate and resolve subgraph ports without recursion or runtime containers.
+    pub fn flatten(&self) -> Result<Graph, String> {
+        // Validate metadata and limits before resolving any references.
+        let mut metadata = self.clone();
+        metadata.edges.clear();
+        metadata.validate_flat()?;
+        let nodes: BTreeMap<_, _> = self.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        for node in &self.nodes {
+            if let Some(reference) = &node.library {
+                if node.kind != "subgraph"
+                    || reference.id.is_empty()
+                    || reference.id.len() > 128
+                    || reference.version == 0
+                {
+                    return Err("Invalid subgraph library reference".into());
+                }
+            }
+            if node.kind.starts_with("subgraph_") && node.parent.is_none() {
+                return Err("Subgraph input/output nodes belong inside a subgraph".into());
+            }
+            if node.label.trim().is_empty() || node.label.len() > 256 {
+                return Err("Node names must be 1–256 bytes".into());
+            }
+            let mut parent = node.parent.as_deref();
+            let mut seen = BTreeSet::from([node.id.as_str()]);
+            while let Some(id) = parent {
+                if !seen.insert(id) {
+                    return Err("Subgraph containment cannot contain cycles".into());
+                }
+                let container = nodes.get(id).ok_or("Missing parent subgraph")?;
+                if container.kind != "subgraph" {
+                    return Err("Parent must be a subgraph".into());
+                }
+                parent = container.parent.as_deref();
+            }
+        }
+        let mut flat = self.clone();
+        flat.nodes.retain(|n| n.kind != "subgraph");
+        for n in &mut flat.nodes {
+            n.parent = None;
+        }
+        for edge in &mut flat.edges {
+            let source = nodes
+                .get(edge.source.as_str())
+                .ok_or("Missing source node")?;
+            let target = nodes
+                .get(edge.target.as_str())
+                .ok_or("Missing target node")?;
+            if source.parent != target.parent {
+                return Err("Connections must stay in one graph; use subgraph ports".into());
+            }
+            if source.kind.starts_with("subgraph_output_")
+                || target.kind.starts_with("subgraph_input_")
+            {
+                return Err("Subgraph boundary port points in the wrong direction".into());
+            }
+            if source.kind == "subgraph" {
+                let port = nodes
+                    .get(edge.source_port.as_str())
+                    .ok_or("Missing subgraph output port")?;
+                if port.parent.as_deref() != Some(source.id.as_str())
+                    || !port.kind.starts_with("subgraph_output_")
+                {
+                    return Err("Invalid subgraph output port".into());
+                }
+                edge.source = port.id.clone();
+                edge.source_port = "out".into();
+            }
+            if target.kind == "subgraph" {
+                let port = nodes
+                    .get(edge.target_port.as_str())
+                    .ok_or("Missing subgraph input port")?;
+                if port.parent.as_deref() != Some(target.id.as_str())
+                    || !port.kind.starts_with("subgraph_input_")
+                {
+                    return Err("Invalid subgraph input port".into());
+                }
+                edge.target = port.id.clone();
+                edge.target_port = "in".into();
+            }
+        }
+        // Validate actual widths, FFT formats, strings, drivers and cycles across every boundary.
+        flat.validate_flat()?;
+        Ok(flat)
+    }
+    pub fn validate_flat(&self) -> Result<Vec<usize>, String> {
         if self.nodes.len() > 256 || self.edges.len() > 2048 {
             return Err("Graph exceeds 256 nodes / 2048 edges".into());
         }
@@ -1112,6 +1264,21 @@ impl Graph {
                     return Err("Pole count must be an integer".into());
                 }
             }
+        }
+        if self
+            .edges
+            .iter()
+            .filter(|e| {
+                e.target_port == "tempo"
+                    && self
+                        .nodes
+                        .iter()
+                        .any(|n| n.id == e.target && n.kind == "clock")
+            })
+            .count()
+            > 1
+        {
+            return Err("Only one global clock tempo input may be connected".into());
         }
         let mut indegree = vec![0; self.nodes.len()];
         let mut outgoing = vec![vec![]; self.nodes.len()];
@@ -1227,7 +1394,10 @@ impl Graph {
         }
         let mut text = vec![false; self.nodes.len()];
         for &i in &order {
-            if self.nodes[i].kind == "control_visualizer" {
+            if self.nodes[i].kind == "control_visualizer"
+                || (self.nodes[i].kind.starts_with("subgraph_")
+                    && self.nodes[i].kind.ends_with("_control"))
+            {
                 text[i] = if let Some(edge) = self
                     .edges
                     .iter()
@@ -1242,7 +1412,11 @@ impl Graph {
         for edge in &self.edges {
             let source = *ids.get(&edge.source).unwrap();
             let target = *ids.get(&edge.target).unwrap();
-            if text[source] && self.nodes[target].kind != "control_visualizer" {
+            if text[source]
+                && self.nodes[target].kind != "control_visualizer"
+                && !(self.nodes[target].kind.starts_with("subgraph_")
+                    && self.nodes[target].kind.ends_with("_control"))
+            {
                 return Err(
                     "String control data cannot connect to a numeric-only input or parameter"
                         .into(),
@@ -1360,6 +1534,8 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         .map(|(id, kind, x, y)| {
             let d = catalog.iter().find(|d| d.kind == *kind).unwrap();
             Node {
+                library: None,
+                parent: None,
                 id: id.to_string(),
                 kind: kind.to_string(),
                 label: d.label.clone(),

@@ -140,6 +140,7 @@ struct RuntimeNode {
     analyzer: Option<Box<visualizer::Analyzer>>,
     voices: [Voice; 64],
     external: [f32; MAX_CHANNELS],
+    external_set: bool,
     phase: f64,
     previous: f64,
     count: f64,
@@ -174,6 +175,11 @@ impl RuntimeNode {
         self.output = [0.; MAX_CHANNELS];
         self.control_text = None;
         match self.kind.as_str() {
+            "subgraph_input_audio" | "subgraph_output_audio" => self.output = input,
+            "subgraph_input_control" | "subgraph_output_control" => {
+                scalar = input[0];
+                self.control_text = self.input_text;
+            }
             "audio_to_control" => scalar = input[0] * self.p("scale") + self.p("offset"),
             "control_visualizer" => {
                 if self.bindings.is_empty() {
@@ -315,6 +321,11 @@ impl RuntimeNode {
             }
             "input" => {
                 let offset = self.p("offset") as usize;
+                let hardware = if self.external_set || self.p("interface") != 0. {
+                    &self.external
+                } else {
+                    hardware
+                };
                 for (ch, out) in self.output[..self.channels].iter_mut().enumerate() {
                     *out = hardware.get(ch + offset).copied().unwrap_or(0.) as f64;
                 }
@@ -666,7 +677,8 @@ pub struct Engine {
 }
 impl Engine {
     pub fn prepare(graph: Graph, sample_rate: f64) -> Result<Self, String> {
-        let order = graph.validate()?;
+        let graph = graph.flatten()?;
+        let order = graph.validate_flat()?;
         let descriptors = catalog();
         let mut nodes = Vec::new();
         for n in &graph.nodes {
@@ -719,6 +731,7 @@ impl Engine {
                 },
                 voices: [Voice::default(); 64],
                 external: [0.; MAX_CHANNELS],
+                external_set: false,
                 phase: 0.,
                 previous: -1.,
                 count: 0.,
@@ -1000,9 +1013,10 @@ impl Engine {
         if let Some(n) = self
             .nodes
             .iter_mut()
-            .find(|n| n.id == node && n.kind == "browser_input")
+            .find(|n| n.id == node && matches!(n.kind.as_str(), "browser_input" | "input"))
         {
             n.external = sample;
+            n.external_set = true;
         }
     }
     pub fn parameter(&mut self, node: &str, key: &str, value: f64) -> Result<(), String> {
@@ -1089,6 +1103,12 @@ impl Engine {
                         }
                     }
                 }
+                if self.nodes[idx].kind == "clock" && !self.nodes[idx].bindings.is_empty() {
+                    let bpm = self.nodes[idx].input[0][0];
+                    if bpm.is_finite() {
+                        self.clock.set_tempo(bpm);
+                    }
+                }
                 self.nodes[idx].process(&self.clock, &hardware);
                 if self.nodes[idx].kind == "output" {
                     for (ch, sample) in out.iter_mut().enumerate() {
@@ -1159,6 +1179,9 @@ impl Engine {
                     .zip(n.values.iter().copied())
                     .collect();
                 values.insert("_out".into(), n.control[0]);
+                if n.kind == "clock" {
+                    values.insert("tempo".into(), self.clock.bpm);
+                }
                 values.insert("_latency".into(), n.latency as f64);
                 values.insert(
                     "_peak".into(),
@@ -1237,6 +1260,187 @@ impl Fourier {
 mod tests {
     use super::*;
     use pr0_core::{Mode, demo_project};
+    #[test]
+    fn subgraph_boundaries_preserve_audio_control_and_spectral_signals() {
+        for signal in ["audio", "control", "spectral"] {
+            for width in [1, 2, 8] {
+                let mut source = visual_node(
+                    "source",
+                    if signal == "control" {
+                        "value"
+                    } else {
+                        "input"
+                    },
+                    width,
+                );
+                if signal == "control" {
+                    source.parameters.insert("value".into(), 37.);
+                }
+                let group = visual_node("group", "subgraph", width);
+                let mut inlet = visual_node("inlet", &format!("subgraph_input_{signal}"), width);
+                inlet.parent = Some("group".into());
+                let mut outlet = inlet.clone();
+                outlet.id = "outlet".into();
+                outlet.kind = format!("subgraph_output_{signal}");
+                let sink = visual_node(
+                    "sink",
+                    if signal == "control" {
+                        "value"
+                    } else {
+                        "monitor_output"
+                    },
+                    width,
+                );
+                let mut graph = Graph {
+                    nodes: vec![source, group, inlet, outlet, sink],
+                    edges: vec![],
+                };
+                let wire =
+                    |id: &str, source: &str, source_port: &str, target: &str, target_port: &str| {
+                        pr0_core::Edge {
+                            id: id.into(),
+                            source: source.into(),
+                            source_port: source_port.into(),
+                            target: target.into(),
+                            target_port: target_port.into(),
+                        }
+                    };
+                graph.edges = vec![
+                    wire("enter", "source", "out", "group", "inlet"),
+                    wire("inside", "inlet", "out", "outlet", "in"),
+                    wire(
+                        "leave",
+                        "group",
+                        "outlet",
+                        "sink",
+                        if signal == "control" { "value" } else { "in" },
+                    ),
+                ];
+                if signal == "spectral" {
+                    let mut fft = visual_node("fft", "fft", width);
+                    fft.parameters.insert("size".into(), 1024.);
+                    let mut ifft = visual_node("ifft", "ifft", width);
+                    ifft.parameters.insert("size".into(), 1024.);
+                    graph.nodes.extend([fft, ifft]);
+                    graph.edges[0].source = "fft".into();
+                    graph.edges[2].target = "ifft".into();
+                    graph.edges.extend([
+                        wire("analysis", "source", "out", "fft", "in"),
+                        wire("synthesis", "ifft", "out", "sink", "in"),
+                    ]);
+                }
+                let mut engine = Engine::prepare(graph.clone(), 48000.).unwrap();
+                engine.render(&vec![[0.2; 8]; 4096], &mut vec![[0.; 8]; 4096]);
+                if signal == "control" {
+                    assert_eq!(engine.telemetry()["sink"]["value"], 37.);
+                } else if signal == "audio" {
+                    assert!((engine.audio_frame("outlet", "out")[0] - 0.2).abs() < 1e-6);
+                } else {
+                    let frame = |id: &str| {
+                        engine
+                            .nodes
+                            .iter()
+                            .find(|n| n.id == id)
+                            .unwrap()
+                            .spectral
+                            .as_ref()
+                            .unwrap()
+                    };
+                    assert_eq!(frame("fft").bins, frame("outlet").bins);
+                    assert_eq!(frame("fft").generation, frame("outlet").generation);
+                }
+                // Authored edges cannot bypass a boundary even if their signal types match.
+                graph.edges[0].target = "inlet".into();
+                graph.edges[0].target_port = "in".into();
+                assert!(graph.validate().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn subgraphs_allow_deep_nesting_but_reject_containment_cycles() {
+        let mut graph = Graph::default();
+        for index in 0..200 {
+            let mut node = visual_node(&format!("group-{index}"), "subgraph", 2);
+            if index > 0 {
+                node.parent = Some(format!("group-{}", index - 1));
+            }
+            graph.nodes.push(node);
+        }
+        assert!(graph.validate().is_ok());
+        graph.nodes[0].parent = Some("group-199".into());
+        assert!(graph.validate().unwrap_err().contains("containment"));
+        graph.nodes[0].parent = Some("absent".into());
+        assert!(graph.validate().unwrap_err().contains("Missing parent"));
+    }
+
+    #[test]
+    fn connected_tempo_changes_global_clock_without_resetting_phase() {
+        let mut p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        let source = p.graph.nodes.iter_mut().find(|n| n.id == "tone").unwrap();
+        source.kind = "add".into();
+        source.parameters = [("a".into(), 60.), ("b".into(), 0.)].into();
+        p.graph.edges = vec![pr0_core::Edge {
+            id: "tempo".into(),
+            source: "tone".into(),
+            source_port: "out".into(),
+            target: "clock".into(),
+            target_port: "tempo".into(),
+        }];
+        let mut e = Engine::prepare(p.graph.clone(), 1000.).unwrap();
+        e.clock.beat = 3.25;
+        e.clock.running = true;
+        e.render(&[], &mut [[0.; 8]; 100]);
+        assert!((e.clock.beat - 3.35).abs() < 1e-10);
+        assert_eq!(e.clock.bpm, 60.);
+        e.parameter("tone", "a", 240.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 100]);
+        assert!((e.clock.beat - 3.75).abs() < 1e-10);
+        assert_eq!(e.telemetry()["clock"]["tempo"], 240.);
+        e.parameter("tone", "a", -10.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert_eq!(e.clock.bpm, 1.);
+        let mut other = p
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "clock")
+            .unwrap()
+            .clone();
+        other.id = "second-clock".into();
+        p.graph.nodes.push(other);
+        let mut edge = p.graph.edges[0].clone();
+        edge.id = "second-tempo".into();
+        edge.target = "second-clock".into();
+        p.graph.edges.push(edge);
+        assert!(p.graph.validate().unwrap_err().contains("Only one"));
+    }
+
+    #[test]
+    fn native_inputs_receive_separate_external_frames_and_channel_offsets() {
+        let mut p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        p.graph.edges.clear();
+        p.graph.nodes.retain(|n| n.id == "tone" || n.id == "gain");
+        for (index, node) in p.graph.nodes.iter_mut().enumerate() {
+            node.kind = "input".into();
+            node.parameters = [
+                ("interface".into(), (index + 1) as f64),
+                ("offset".into(), index as f64),
+            ]
+            .into();
+        }
+        let mut e = Engine::prepare(p.graph, 48000.).unwrap();
+        e.external("tone", [0.25; 8]);
+        e.external("gain", [0., 0.5, 0.75, 0., 0., 0., 0., 0.]);
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert_eq!(e.audio_frame("tone", "out")[0], 0.25);
+        assert_eq!(e.audio_frame("gain", "out")[0], 0.5);
+        assert_eq!(e.audio_frame("gain", "out")[1], 0.75);
+        e.external("gain", [0.; 8]);
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert_eq!(e.audio_frame("gain", "out")[0], 0.);
+    }
+
     #[test]
     fn clock_ratio_graph_preserves_tempo_phase_and_restarts_at_zero() {
         let p = demo_project("x".into(), "x".into(), Mode::Freeform);

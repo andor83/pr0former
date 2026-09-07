@@ -16,11 +16,19 @@ pub struct Interface {
     pub latency_ms: f64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InputInterface {
+    pub id: u32,
+    pub name: String,
+    pub enabled: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub sample_rate: u32,
     #[serde(default = "default_block_size")]
     pub block_size: usize,
     pub interfaces: Vec<Interface>,
+    #[serde(default)]
+    pub input_interfaces: Vec<InputInterface>,
 }
 fn default_block_size() -> usize {
     128
@@ -31,6 +39,7 @@ impl Default for Settings {
             sample_rate: 48000,
             block_size: 128,
             interfaces: vec![],
+            input_interfaces: vec![],
         }
     }
 }
@@ -67,6 +76,15 @@ pub fn validate(s: &Settings) -> Result<(), String> {
             return Err("Invalid interface or latency (0–1000 ms)".into());
         }
     }
+    let mut ids = std::collections::HashSet::new();
+    if s.input_interfaces.len() > 64 {
+        return Err("Too many input interfaces".into());
+    }
+    for i in &s.input_interfaces {
+        if i.id == 0 || i.id > 999999999 || !ids.insert(i.id) || i.name.len() > 256 {
+            return Err("Invalid input interface".into());
+        }
+    }
     Ok(())
 }
 pub fn validate_route_changes(
@@ -78,7 +96,7 @@ pub fn validate_route_changes(
     // node at a time after global interface changes. New routes must be enabled.
     let mut changed = next.clone();
     changed.graph.nodes.retain(|node| {
-        node.kind == "output"
+        matches!(node.kind.as_str(), "output" | "input")
             && !previous.graph.nodes.iter().any(|old| {
                 old.id == node.id
                     && old.kind == node.kind
@@ -90,10 +108,17 @@ pub fn validate_route_changes(
 }
 pub fn validate_routes(p: &pr0_core::Project, s: &Settings) -> Result<(), String> {
     for n in &p.graph.nodes {
-        if n.kind == "output" {
+        if matches!(n.kind.as_str(), "output" | "input") {
             let id = n.parameters.get("interface").copied().unwrap_or(0.);
             if id.fract() != 0.
-                || (id != 0. && !s.interfaces.iter().any(|i| i.enabled && i.id as f64 == id))
+                || (id != 0.
+                    && !(if n.kind == "input" {
+                        s.input_interfaces
+                            .iter()
+                            .any(|i| i.enabled && i.id as f64 == id)
+                    } else {
+                        s.interfaces.iter().any(|i| i.enabled && i.id as f64 == id)
+                    }))
             {
                 return Err(format!("{}: select an enabled audio interface", n.label));
             }
@@ -126,6 +151,14 @@ pub async fn put(
         if i.enabled && !detected.iter().any(|d| d.0 == i.id && d.1 == i.name) {
             return Err(bad(
                 "Selected interface is no longer available; refresh devices",
+            ));
+        }
+    }
+    let detected_inputs = audio::input_devices();
+    for i in &s.input_interfaces {
+        if i.enabled && !detected_inputs.iter().any(|d| d.0 == i.id && d.1 == i.name) {
+            return Err(bad(
+                "Selected input is no longer available; refresh devices",
             ));
         }
     }
@@ -207,6 +240,35 @@ impl Logs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_input_routes_require_enabled_inputs_and_legacy_settings_load() {
+        let mut settings: Settings =
+            serde_json::from_str(r#"{"sample_rate":48000,"interfaces":[]}"#).unwrap();
+        assert!(settings.input_interfaces.is_empty());
+        let mut project = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
+        project.graph.nodes.retain(|n| n.id == "tone");
+        project.graph.edges.clear();
+        project.graph.nodes[0].kind = "input".into();
+        project.graph.nodes[0].parameters = [("interface".into(), 123.)].into();
+        assert!(validate_routes(&project, &settings).is_err());
+        settings.input_interfaces.push(InputInterface {
+            id: 123,
+            name: "Input".into(),
+            enabled: true,
+        });
+        assert!(validate_routes(&project, &settings).is_ok());
+        settings.input_interfaces[0].enabled = false;
+        assert!(validate_routes(&project, &settings).is_err());
+        project.graph.nodes[0]
+            .parameters
+            .insert("interface".into(), 0.);
+        assert!(validate_routes(&project, &settings).is_ok());
+        settings
+            .input_interfaces
+            .push(settings.input_interfaces[0].clone());
+        assert!(validate(&settings).is_err());
+    }
+
     #[test]
     fn rejects_invalid_rates_routes_and_latencies() {
         let mut s = Settings::default();
