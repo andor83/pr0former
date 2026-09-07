@@ -1,3 +1,5 @@
+import { readFile, access } from 'node:fs/promises'
+import { join } from 'node:path'
 import { test, expect } from '@playwright/test'
 
 test('authorization, invitations, revision conflicts, and sample preparation', async ({ request, playwright }) => {
@@ -34,9 +36,36 @@ test('authorization, invitations, revision conflicts, and sample preparation', a
   project.graph.nodes.find((n: any) => n.id === 'tone').parameters = { ...Object.fromEntries(descriptor.parameters.map((p: any) => [p.id, p.default])), asset: sample.asset, speed: 2 }
   const saved = await request.put(`/api/projects/${id}`, { headers, data: project })
   expect(saved.ok()).toBeTruthy(); project = await saved.json()
+  const settingsPath = `/api/projects/${id}/system/audio`
+  expect((await request.put(settingsPath,{headers,data:{sample_rate:48000,block_size:77,interfaces:[]}})).status()).toBe(400)
+  const originalPath = join(process.env.PR0_TEST_DATA!, 'samples', id, `${sample.asset}.wav`)
+  expect(await readFile(originalPath)).toEqual(pcm)
+  expect((await stranger.put(settingsPath, { headers, data: { sample_rate: 96000, block_size:1024, interfaces: [] } })).ok()).toBeFalsy()
+  expect((await request.put(settingsPath, { headers, data: { sample_rate: 12345, interfaces: [] } })).status()).toBe(400)
+  expect((await request.put(`/api/projects/${id}/parameter`, { headers, data: { node: 'out', parameter: 'interface', value: 999, revision: project.revision } })).status()).toBe(400)
+  const other = await (await request.post('/api/projects', { headers, data: { name: 'Lazy cache project', mode: 'structured' } })).json()
+  const otherSample = await (await request.post(`/api/projects/${other.id}/samples`, { headers, multipart: { sample: { name: 'tone.wav', mimeType: 'audio/wav', buffer: pcm } } })).json()
+  const lazyCache = join(process.env.PR0_TEST_DATA!, 'samples', other.id, `${otherSample.asset}-96000-v1.wav`)
+  expect((await request.put(settingsPath, { headers, data: { sample_rate: 96000, block_size:1024, interfaces: [] } })).ok()).toBeTruthy()
+  const cache = await readFile(join(process.env.PR0_TEST_DATA!, 'samples', id, `${sample.asset}-96000-v1.wav`))
+  expect(cache.readUInt32LE(24)).toBe(96000)
+  expect(await readFile(originalPath)).toEqual(pcm)
+  await expect(access(lazyCache)).rejects.toThrow()
+  expect((await request.get(`/api/projects/${other.id}`)).ok()).toBeTruthy()
+  await access(lazyCache)
   expect((await request.post(`/api/projects/${id}/transport`, { headers, data: { action: 'activate' } })).ok()).toBeTruthy()
+  expect((await request.put(settingsPath, { headers, data: { sample_rate: 48000, interfaces: [] } })).status()).toBe(400)
+  expect((await request.post(`/api/projects/${id}/engine`, { headers, data: { enabled: false } })).status()).toBe(400)
+  const engineDevices=await (await request.get('/api/devices')).json()
+  expect(engineDevices.engine_enabled).toBe(true)
+  expect(engineDevices.block_size).toBe(1024)
+  expect((await request.get(`/api/projects/${id}/preview?edge=edge-0`)).status()).toBe(400)
   expect((await request.put(`/api/projects/${id}`, { headers, data: project })).status()).toBe(409)
   expect((await request.post(`/api/projects/${id}/transport`, { headers, data: { action: 'play' } })).ok()).toBeTruthy()
   expect((await request.post(`/api/projects/${id}/transport`, { headers, data: { action: 'deactivate' } })).ok()).toBeTruthy()
+  expect((await request.put(settingsPath, { headers, data: { sample_rate: 48000, interfaces: [] } })).ok()).toBeTruthy()
+  const logs = await (await request.get(`/api/projects/${id}/logs`)).json()
+  expect(logs.some((l:any)=>l.message.includes('96000 Hz'))).toBe(true)
+  expect(logs.every((l:any)=>l.project_id===id)).toBe(true)
   await stranger.dispose()
 })

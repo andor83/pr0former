@@ -3,9 +3,11 @@ mod channels;
 mod clock_ratio;
 mod effects;
 mod envelope;
+mod oscillator;
 mod sequence;
 mod spectral;
 pub mod stretch;
+mod visualizer;
 use pr0_core::{Graph, MAX_CHANNELS, catalog};
 use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
@@ -132,6 +134,10 @@ struct RuntimeNode {
     input: [[f64; MAX_CHANNELS]; 8],
     output: [f64; MAX_CHANNELS],
     control: [f64; 3],
+    control_text: Option<visualizer::Text>,
+    input_text: Option<visualizer::Text>,
+    fallback: visualizer::Datum,
+    analyzer: Option<Box<visualizer::Analyzer>>,
     voices: [Voice; 64],
     external: [f32; MAX_CHANNELS],
     phase: f64,
@@ -165,7 +171,24 @@ impl RuntimeNode {
         let input = self.input[0];
         let mut scalar = 0.;
         self.output = [0.; MAX_CHANNELS];
+        self.control_text = None;
         match self.kind.as_str() {
+            "control_visualizer" => {
+                if self.bindings.is_empty() {
+                    match self.fallback {
+                        visualizer::Datum::Number(value) => scalar = value,
+                        visualizer::Datum::Text(value) => self.control_text = Some(value),
+                    }
+                } else {
+                    scalar = input[0];
+                    self.control_text = self.input_text;
+                }
+            }
+            "audio_visualizer" => {
+                self.output = input;
+                self.analyzer.as_mut().unwrap().capture(&input);
+            }
+            "spectral_visualizer" => {}
             "add" => scalar = a + b,
             "subtract" => scalar = a - b,
             "multiply" => scalar = a * b,
@@ -298,7 +321,14 @@ impl RuntimeNode {
                 self.smooth +=
                     (self.p("frequency") - self.smooth) * (1. - (-1. / (0.005 * sr)).exp());
                 self.phase = (self.phase + self.smooth / sr).fract();
-                let v = (TAU * self.phase).sin() * self.p("amplitude");
+                self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let noise = (self.seed >> 32) as f64 / u32::MAX as f64 * 2. - 1.;
+                let v = oscillator::wave(
+                    self.phase,
+                    self.smooth / sr,
+                    self.p("waveform").round() as u32,
+                    noise,
+                ) * self.p("amplitude");
                 self.output[..self.channels].fill(v);
             }
             "synth" => {
@@ -654,6 +684,17 @@ impl Engine {
                 input: [[0.; MAX_CHANNELS]; 8],
                 output: [0.; MAX_CHANNELS],
                 control: [0.; 3],
+                control_text: None,
+                input_text: None,
+                fallback: visualizer::Datum::prepare(n.control_value.as_ref()),
+                analyzer: if matches!(n.kind.as_str(), "audio_visualizer" | "spectral_visualizer") {
+                    Some(Box::new(visualizer::Analyzer::new(
+                        n.parameters.get("size").copied().unwrap_or(1024.) as usize,
+                        n.channels,
+                    )))
+                } else {
+                    None
+                },
                 voices: [Voice::default(); 64],
                 external: [0.; MAX_CHANNELS],
                 phase: 0.,
@@ -772,6 +813,7 @@ impl Engine {
             let compatible = target.kind == source.kind
                 && target.channels == source.channels
                 && target.defaults == source.defaults
+                && target.fallback == source.fallback
                 && target.latency == source.latency
                 && target.bindings.len() == source.bindings.len()
                 && target
@@ -888,6 +930,32 @@ impl Engine {
             }
         }
     }
+    /// Source-side snapshot for an authorized audio connection preview.
+    pub fn audio_frame(&self, source: &str, port: &str) -> [f32; MAX_CHANNELS] {
+        let Some(node) = self.nodes.iter().find(|n| n.id == source) else {
+            return [0.; MAX_CHANNELS];
+        };
+        if node.kind == "channel_split" {
+            let channel = port
+                .strip_prefix("ch_")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut frame = [0.; MAX_CHANNELS];
+            if (1..=node.channels).contains(&channel) {
+                frame[0] = node.output[channel - 1] as f32;
+            }
+            frame
+        } else {
+            std::array::from_fn(|ch| node.output[ch] as f32)
+        }
+    }
+    pub fn output_frame(&self, id: &str) -> [f32; MAX_CHANNELS] {
+        self.nodes
+            .iter()
+            .find(|n| n.id == id && n.kind == "output")
+            .map(|n| std::array::from_fn(|ch| n.output[ch] as f32))
+            .unwrap_or([0.; MAX_CHANNELS])
+    }
     /// Read a dedicated monitor after rendering one frame. Never sums into the
     /// hardware output. Wider bundles explicitly select their first two channels.
     pub fn monitor_frame(&self, id: &str) -> [f32; 2] {
@@ -939,6 +1007,7 @@ impl Engine {
             *out = [0.; MAX_CHANNELS];
             for &idx in &self.order {
                 self.nodes[idx].input = [[0.; MAX_CHANNELS]; 8];
+                self.nodes[idx].input_text = None;
                 for j in 0..self.nodes[idx].bindings.len() {
                     let b = self.nodes[idx].bindings[j].clone();
                     let control = self.nodes[b.source]
@@ -984,6 +1053,11 @@ impl Engine {
                         let is_control = b.signal == pr0_core::Signal::Control;
                         if is_control {
                             self.nodes[idx].input[b.destination][0] = control;
+                            self.nodes[idx].input_text = if b.source_port == 0 {
+                                self.nodes[b.source].control_text
+                            } else {
+                                None
+                            };
                         } else {
                             self.nodes[idx].input[b.destination] = audio;
                         }
@@ -1003,6 +1077,51 @@ impl Engine {
         }
     }
     /// Called by the non-realtime orchestration worker between blocks.
+    /// Called once per configured DSP block, outside render/device callbacks.
+    pub fn analyze_visualizers(&mut self) {
+        for node in &mut self.nodes {
+            if let Some(analyzer) = &mut node.analyzer {
+                if let Some(frames) = &node.spectral {
+                    analyzer.spectral_block(&frames.bins, frames.polar);
+                } else {
+                    analyzer.analyze();
+                }
+            }
+        }
+    }
+    pub fn visualizations(&self) -> std::collections::BTreeMap<String, pr0_core::Visualization> {
+        use pr0_core::{ControlValue, Visualization};
+        self.nodes
+            .iter()
+            .filter_map(|node| {
+                let value = match node.kind.as_str() {
+                    "control_visualizer" => Visualization::Control {
+                        value: node
+                            .control_text
+                            .map(|t| ControlValue::Text(t.as_str().to_owned()))
+                            .unwrap_or(ControlValue::Number(node.control[0])),
+                    },
+                    "audio_visualizer" => node.analyzer.as_ref().unwrap().snapshot(),
+                    "spectral_visualizer" => {
+                        let frames = node.spectral.as_ref().unwrap();
+                        let analyzer = node.analyzer.as_ref().unwrap();
+                        Visualization::Spectral {
+                            sequence: analyzer.sequence,
+                            generation: frames.generation,
+                            size: frames.bins[0].len(),
+                            ready: frames.generation > 0,
+                            polar: frames.polar,
+                            channels: visualizer::spectrum(&frames.bins, frames.polar, 1.),
+                            history: analyzer.history(),
+                            columns: analyzer.columns(),
+                        }
+                    }
+                    _ => return None,
+                };
+                Some((node.id.clone(), value))
+            })
+            .collect()
+    }
     pub fn telemetry(&self) -> BTreeMap<String, BTreeMap<String, f64>> {
         self.nodes
             .iter()
@@ -1503,6 +1622,239 @@ mod tests {
                 .count(),
             2
         );
+    }
+    fn visual_node(id: &str, kind: &str, channels: usize) -> pr0_core::Node {
+        let mut node = demo_project("x".into(), "x".into(), Mode::Freeform)
+            .graph
+            .nodes
+            .remove(0);
+        node.id = id.into();
+        node.kind = kind.into();
+        node.channels = channels;
+        node.parameters.clear();
+        node.control_value = None;
+        if [
+            "fft",
+            "ifft",
+            "to_polar",
+            "to_cartesian",
+            "spectral_visualizer",
+            "audio_visualizer",
+        ]
+        .contains(&kind)
+        {
+            node.parameters.insert("size".into(), 256.);
+            if kind != "audio_visualizer" {
+                node.parameters.insert("overlap".into(), 4.);
+            }
+        }
+        node
+    }
+    fn visual_edge(id: &str, source: &str, target: &str) -> pr0_core::Edge {
+        pr0_core::Edge {
+            id: id.into(),
+            source: source.into(),
+            source_port: "out".into(),
+            target: target.into(),
+            target_port: "in".into(),
+        }
+    }
+    #[test]
+    fn audio_visualizer_is_transparent_at_every_width_and_records_each_block() {
+        for channels in 1..=8 {
+            let input = visual_node("in", "input", channels);
+            let vis = visual_node("vis", "audio_visualizer", channels);
+            let out = visual_node("out", "output", channels);
+            let mut reference = Engine::prepare(
+                Graph {
+                    nodes: vec![input.clone(), out.clone()],
+                    edges: vec![visual_edge("direct", "in", "out")],
+                },
+                48000.,
+            )
+            .unwrap();
+            let mut e = Engine::prepare(
+                Graph {
+                    nodes: vec![input, vis, out],
+                    edges: vec![
+                        visual_edge("a", "in", "vis"),
+                        visual_edge("b", "vis", "out"),
+                    ],
+                },
+                48000.,
+            )
+            .unwrap();
+            for block in 0..4 {
+                let input: Vec<[f32; 8]> = (0..128)
+                    .map(|i| {
+                        std::array::from_fn(|ch| {
+                            if ch < channels {
+                                ((i + block * 128) as f32 * std::f32::consts::TAU / 32.).sin()
+                                    * (ch + 1) as f32
+                                    * 0.05
+                            } else {
+                                0.
+                            }
+                        })
+                    })
+                    .collect();
+                let mut expected = vec![[0.; 8]; 128];
+                let mut actual = expected.clone();
+                reference.render(&input, &mut expected);
+                e.render(&input, &mut actual);
+                e.analyze_visualizers();
+                assert_eq!(actual, expected);
+            }
+            let pr0_core::Visualization::Audio {
+                sequence,
+                channels: spectra,
+                history,
+                columns,
+                ready,
+                ..
+            } = e.visualizations().remove("vis").unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(sequence, 4);
+            assert_eq!(columns, 4);
+            assert!(ready);
+            assert_eq!(spectra.len(), channels);
+            assert_eq!(history[0].len(), 4 * 32 * 2);
+            assert!(spectra[0].magnitude[8] > 0.049);
+        }
+    }
+    #[test]
+    fn control_visualizer_preserves_numbers_and_utf8_strings() {
+        for value in [
+            pr0_core::ControlValue::Number(-123.75),
+            pr0_core::ControlValue::Text("ready ♫ 東京".into()),
+        ] {
+            let mut source = visual_node("source", "control_visualizer", 1);
+            source.control_value = Some(value.clone());
+            let target = visual_node("target", "control_visualizer", 1);
+            let mut e = Engine::prepare(
+                Graph {
+                    nodes: vec![source, target],
+                    edges: vec![visual_edge("line", "source", "target")],
+                },
+                48000.,
+            )
+            .unwrap();
+            e.render(&[], &mut [[0.; 8]; 8]);
+            let pr0_core::Visualization::Control { value: observed } =
+                e.visualizations().remove("target").unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(value, observed);
+        }
+    }
+    #[test]
+    fn spectral_visualizer_preserves_cartesian_and_polar_frames() {
+        for polar in [false, true] {
+            for width in [1, 8] {
+                let mut nodes = vec![
+                    visual_node("in", "input", width),
+                    visual_node("fft", "fft", width),
+                ];
+                let mut edges = vec![visual_edge("audio", "in", "fft")];
+                let source = if polar {
+                    nodes.push(visual_node("polar", "to_polar", width));
+                    edges.push(visual_edge("polar-line", "fft", "polar"));
+                    "polar"
+                } else {
+                    "fft"
+                };
+                nodes.push(visual_node("vis", "spectral_visualizer", width));
+                edges.push(visual_edge("spectral-line", source, "vis"));
+                let mut e = Engine::prepare(Graph { nodes, edges }, 48000.).unwrap();
+                let input: Vec<_> = (0..512).map(|i| [(i as f32 * 0.1).sin(); 8]).collect();
+                e.render(&input, &mut vec![[0.; 8]; 512]);
+                e.analyze_visualizers();
+                let upstream = e
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == source)
+                    .unwrap()
+                    .spectral
+                    .as_ref()
+                    .unwrap();
+                let passed = e
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == "vis")
+                    .unwrap()
+                    .spectral
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(upstream.bins, passed.bins);
+                assert_eq!(upstream.generation, passed.generation);
+                assert_eq!(passed.polar, polar);
+                assert_eq!(
+                    e.nodes.iter().find(|n| n.id == source).unwrap().latency,
+                    e.nodes.iter().find(|n| n.id == "vis").unwrap().latency
+                );
+                let pr0_core::Visualization::Spectral {
+                    channels, columns, ..
+                } = e.visualizations().remove("vis").unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(channels.len(), width);
+                assert_eq!(channels[0].phase.len(), 129);
+                assert_eq!(columns, 1);
+            }
+        }
+    }
+    #[test]
+    fn oscillator_graph_is_sine_and_independent_of_render_block_size() {
+        let mut p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        let mut node = p.graph.nodes.remove(0);
+        node.id = "osc".into();
+        node.kind = "oscillator".into();
+        node.parameters = [("frequency".into(), 1000.), ("amplitude".into(), 0.25)].into();
+        let graph = Graph {
+            nodes: vec![node],
+            edges: vec![],
+        };
+        let mut reference = Engine::prepare(graph.clone(), 48000.).unwrap();
+        reference.render(&[], &mut vec![[0.; 8]; 9600]);
+        let mut samples = vec![];
+        for _ in 0..4800 {
+            reference.render(&[], &mut [[0.; 8]; 1]);
+            samples.push(reference.audio_frame("osc", "out")[0] as f64);
+        }
+        let amplitude = |h: f64| {
+            let sin = samples
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v * (TAU * i as f64 * h / 48.).sin())
+                .sum::<f64>();
+            let cos = samples
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v * (TAU * i as f64 * h / 48.).cos())
+                .sum::<f64>();
+            sin.hypot(cos) / 2400.
+        };
+        assert!((amplitude(1.) - 0.25).abs() < 1e-5);
+        for harmonic in 2..10 {
+            assert!(amplitude(harmonic as f64) < 1e-5);
+        }
+        for block in [32, 64, 128, 256, 512, 1024] {
+            let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
+            let mut left = 14400;
+            while left > 0 {
+                let count = left.min(block);
+                e.render(&[], &mut vec![[0.; 8]; count]);
+                left -= count;
+            }
+            assert_eq!(
+                e.audio_frame("osc", "out"),
+                reference.audio_frame("osc", "out")
+            );
+        }
     }
     #[test]
     fn oscillator_produces_finite_audio() {

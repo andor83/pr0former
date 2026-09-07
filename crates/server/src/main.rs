@@ -3,6 +3,7 @@ mod bind;
 mod media;
 mod performance;
 mod samples;
+mod settings;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json, Router,
@@ -32,6 +33,8 @@ struct App {
     events: broadcast::Sender<Value>,
     engine: std::sync::mpsc::SyncSender<audio::Command>,
     active: Arc<Mutex<Option<String>>>,
+    setup: Arc<tokio::sync::Mutex<()>>,
+    logs: Arc<settings::Logs>,
     secure: bool,
     media: Arc<media::Media>,
 }
@@ -147,6 +150,11 @@ fn save_revision(app: &App, project: &mut Project) -> Api<()> {
     Ok(())
 }
 fn publish(app: &App, p: &Project) {
+    app.logs.push(
+        &p.id,
+        "info",
+        &format!("Project revision {} saved", p.revision),
+    );
     let _ = app
         .events
         .send(json!({"type":"project","project_id":p.id,"project":p}));
@@ -337,6 +345,7 @@ async fn create_project(
     let owner = user(&app, &headers)?;
     let p = demo_project(uid(), c.name, c.mode);
     p.validate().map_err(bad)?;
+    settings::validate_routes(&p, &settings::read()).map_err(bad)?;
     let mut db = app.db.lock().unwrap();
     let tx = db.transaction().map_err(internal)?;
     let body = serde_json::to_string(&p).map_err(internal)?;
@@ -365,7 +374,17 @@ async fn get_project(
 ) -> Api<Json<Value>> {
     let u = user(&app, &headers)?;
     let r = role(&app, &id, &u)?;
-    Ok(Json(json!({"project":load(&app,&id)?,"role":r})))
+    let _guard = app.setup.lock().await;
+    let project = load(&app, &id)?;
+    let prepared = project.clone();
+    let rate = settings::read().sample_rate;
+    tokio::task::spawn_blocking(move || samples::cache_project(&prepared, rate))
+        .await
+        .map_err(internal)?
+        .map_err(bad)?;
+    app.logs
+        .push(&id, "info", "Project loaded; sample caches ready");
+    Ok(Json(json!({"project":project,"role":r})))
 }
 async fn update_project(
     State(app): State<App>,
@@ -376,12 +395,33 @@ async fn update_project(
     csrf(&headers)?;
     let u = user(&app, &headers)?;
     can_edit(&role(&app, &id, &u)?)?;
+    let _guard = app.setup.lock().await;
     if p.id != id {
         return Err(bad("Project ID mismatch"));
     }
     p.validate().map_err(bad)?;
     let active = app.active.lock().unwrap().as_deref() == Some(&id);
     let previous = load(&app, &id)?;
+    settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
+    for node in &p.graph.nodes {
+        if node.kind == "control_visualizer"
+            && previous
+                .graph
+                .nodes
+                .iter()
+                .any(|old| old.id == node.id && old.control_value != node.control_value)
+            && previous
+                .graph
+                .edges
+                .iter()
+                .any(|edge| edge.target == node.id && edge.target_port == "in")
+        {
+            return Err(bad(
+                "Connected visualizer input is read-only; disconnect it before editing",
+            ));
+        }
+    }
+
     if active && (previous.mode == Mode::Structured || p.mode != previous.mode) {
         return Err(Failure(
             StatusCode::CONFLICT,
@@ -429,6 +469,7 @@ async fn parameter(
     let u = user(&app, &headers)?;
     can_edit(&role(&app, &id, &u)?)?;
     let mut p = load(&app, &id)?;
+    let previous = p.clone();
     if p.revision != c.revision {
         return Err(Failure(StatusCode::CONFLICT, "Stale parameter edit".into()));
     }
@@ -457,6 +498,7 @@ async fn parameter(
     }
     n.parameters.insert(c.parameter.clone(), c.value);
     p.validate().map_err(bad)?;
+    settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
     // Serialize revisions before enqueueing; failed runtime delivery is reported explicitly.
     save_revision(&app, &mut p)?;
     if active {
@@ -493,19 +535,37 @@ async fn transport(
             "Transport authority required".into(),
         ));
     }
+    let _guard = app.setup.lock().await;
     if c.action == "activate" {
+        if app
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|other| other != &id)
+        {
+            return Err(bad("Another project owns the audio engine"));
+        }
+        if app.active.lock().unwrap().as_deref() == Some(&id) {
+            return Ok(Json(json!({"ok":true})));
+        }
+        app.logs.push(&id, "info", "Preparing show activation");
         let project = load(&app, &id)?;
         let prepared_project = project.clone();
         let engine = tokio::task::spawn_blocking(move || samples::prepare(&prepared_project))
             .await
             .map_err(internal)?
-            .map_err(bad)?;
+            .map_err(|e| {
+                app.logs.push(&id, "error", &e);
+                bad(e)
+            })?;
         if load(&app, &id)?.revision != project.revision {
             return Err(Failure(
                 StatusCode::CONFLICT,
                 "Project changed during preparation".into(),
             ));
         }
+        enable_engine(&app, &id, true).await?;
         let mut active = app.active.lock().unwrap();
         if let Some(other) = active.as_ref() {
             if other != &id {
@@ -697,6 +757,139 @@ async fn audio_enable(
     )?;
     Ok(Json(json!({"ok":true})))
 }
+async fn enable_engine(app: &App, id: &str, enabled: bool) -> Api<()> {
+    let (tx, rx) = oneshot::channel();
+    send(
+        app,
+        audio::Command::Enable(id.into(), enabled, settings::read(), tx),
+    )?;
+    let result = tokio::time::timeout(Duration::from_secs(10), rx)
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+    match result {
+        Ok(()) => {
+            app.logs.push(
+                id,
+                "info",
+                if enabled {
+                    "Audio engine enabled; selected interfaces opened"
+                } else {
+                    "Audio engine disabled"
+                },
+            );
+            Ok(())
+        }
+        Err(e) => {
+            app.logs.push(id, "error", &e);
+            Err(bad(e))
+        }
+    }
+}
+async fn engine_enable(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(c): Json<DeviceAction>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    if !matches!(role(&app, &id, &u)?.as_str(), "owner" | "conductor") {
+        return Err(bad("Transport authority required"));
+    }
+    let _guard = app.setup.lock().await;
+    if app.active.lock().unwrap().is_some() {
+        return Err(bad("Deactivate the show before changing engine state"));
+    }
+    enable_engine(&app, &id, c.enabled).await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn latency_test(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(c): Json<DeviceAction>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    if role(&app, &id, &u)? != "owner" {
+        return Err(bad("Owner access required"));
+    }
+    let _guard = app.setup.lock().await;
+    if c.enabled && app.active.lock().unwrap().is_some() {
+        return Err(bad("Deactivate the show before calibration"));
+    }
+    if c.enabled {
+        if !settings::read().interfaces.iter().any(|i| i.enabled) {
+            return Err(bad("Select and save an output interface before testing"));
+        }
+        enable_engine(&app, &id, true).await?;
+    }
+    send(&app, audio::Command::Test(c.enabled))?;
+    app.logs.push(
+        &id,
+        "info",
+        if c.enabled {
+            "Latency metronome started"
+        } else {
+            "Latency metronome stopped"
+        },
+    );
+    Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+struct PreviewQuery {
+    edge: String,
+}
+async fn preview(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<PreviewQuery>,
+) -> Api<Json<Value>> {
+    let u = user(&app, &headers)?;
+    role(&app, &id, &u)?;
+    let p = load(&app, &id)?;
+    let edge = p
+        .graph
+        .edges
+        .iter()
+        .find(|e| e.id == query.edge)
+        .ok_or_else(|| bad("Connection missing"))?;
+    let source = p
+        .graph
+        .nodes
+        .iter()
+        .find(|n| n.id == edge.source)
+        .ok_or_else(|| bad("Source missing"))?;
+    let catalog = catalog();
+    let descriptor = catalog
+        .iter()
+        .find(|d| d.kind == source.kind)
+        .ok_or_else(|| bad("Source type missing"))?;
+    let port = descriptor
+        .outputs
+        .iter()
+        .find(|port| port.id == edge.source_port && port.signal == pr0_core::Signal::Audio)
+        .ok_or_else(|| bad("Waveforms require an audio connection"))?;
+    let (tx, rx) = oneshot::channel();
+    send(
+        &app,
+        audio::Command::Preview {
+            project: id,
+            source: edge.source.clone(),
+            port: edge.source_port.clone(),
+            channels: port.fixed_channels.unwrap_or(source.channels),
+            reply: tx,
+        },
+    )?;
+    let result = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .map_err(internal)?
+        .map_err(internal)?
+        .map_err(bad)?;
+    Ok(Json(result))
+}
 async fn websocket(
     State(app): State<App>,
     headers: HeaderMap,
@@ -758,13 +951,23 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String) {
         return;
     }
     let mut check = tokio::time::interval(Duration::from_secs(30));
+    let visualization_session = Uuid::new_v4().to_string();
+    let mut visualizers = false;
     loop {
         tokio::select! {
-            event=events.recv()=>match event{Ok(v)=>{if (v["type"]=="engine_status" || v.get("project_id").and_then(Value::as_str)==Some(&id))&&socket.send(Message::Text(v.to_string().into())).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
-            msg=socket.recv()=>match msg{Some(Ok(Message::Text(text)))=>{if let Ok(v)=serde_json::from_str::<Value>(&text){if v["type"]=="ping"{let _=socket.send(Message::Text(json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string().into())).await;}}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}},
+            event=events.recv()=>match event{Ok(mut v)=>{if !visualizers{if let Some(o)=v.as_object_mut(){o.remove("visualizations");}}if (v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || v.get("project_id").and_then(Value::as_str)==Some(&id))&&socket.send(Message::Text(v.to_string().into())).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
+            msg=socket.recv()=>match msg{Some(Ok(Message::Text(text)))=>{if let Ok(v)=serde_json::from_str::<Value>(&text){if v["type"]=="visualizers"{visualizers=v["enabled"]==true;let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:visualizers});}if v["type"]=="ping"{if visualizers{let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:true});}let _=socket.send(Message::Text(json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string().into())).await;}}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}},
             _=check.tick()=>{if role(&app,&id,&u).is_err(){break;}}
         }
     }
+    let _ = send(
+        &app,
+        audio::Command::Visualizers {
+            session: visualization_session,
+            project: id,
+            enabled: false,
+        },
+    );
 }
 
 #[tokio::main]
@@ -785,18 +988,30 @@ async fn main() {
         CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),role TEXT,expires INTEGER,used INTEGER);").expect("Database migration");
     let (events, _) = broadcast::channel(128);
     let media = Arc::new(media::Media::new());
-    let engine = audio::start(events.clone(), media.audio.clone());
+    let logs = Arc::new(settings::Logs::default());
+    let engine = audio::start(events.clone(), media.audio.clone(), logs.clone());
     let cert = std::env::var("PR0_TLS_CERT").ok();
     let app = App {
         db: Arc::new(Mutex::new(db)),
         events,
         engine,
         active: Arc::new(Mutex::new(None)),
+        setup: Arc::new(tokio::sync::Mutex::new(())),
+        logs,
         secure: cert.is_some(),
         media,
     };
     let router = Router::new()
         .route("/api/status", get(status))
+        .route("/api/system/audio", get(settings::get))
+        .route(
+            "/api/projects/{id}/system/audio",
+            axum::routing::put(settings::put),
+        )
+        .route("/api/projects/{id}/logs", get(settings::logs))
+        .route("/api/projects/{id}/preview", get(preview))
+        .route("/api/projects/{id}/engine", post(engine_enable))
+        .route("/api/projects/{id}/latency-test", post(latency_test))
         .route("/api/register", post(register))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))

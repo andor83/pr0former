@@ -8,6 +8,7 @@ PLATFORM="$(uname -s)"
 STARTUP_ONLY=false
 START_ONLY=false
 STOP_ONLY=false
+UPDATE_ONLY=false
 RUN_DIR="$PROJECT_DIR/.local/manual-runs"
 START_HOST=""
 START_PORT=""
@@ -19,6 +20,7 @@ pr0former initial setup
   ./init.sh             Check/install dependencies, build, and offer startup setup
   ./init.sh --start     Start the built server in the foreground (Ctrl-C to stop)
   ./init.sh --stop      Stop servers launched by --start from this project
+  ./init.sh --update    Rebuild frontend and release server using locked dependencies
   ./init.sh --startup   Interactively enable or disable startup only
   ./init.sh --help      Show this help
   --host HOST          Override the bind host for --start (IPv4, IPv6, or hostname)
@@ -30,6 +32,7 @@ The script asks before installing dependencies or changing startup services.
 No administrator account or password is created; bootstrap in the web interface.
 --start reuses .local/start-pr0former.sh when present, otherwise uses PR0_ environment settings.
 --host and --port override only the specified part of that address for this launch.
+--update requires installed build tools; it does not pull source or restart servers.
 HELP
 }
 while [ "$#" -gt 0 ]; do
@@ -38,6 +41,7 @@ while [ "$#" -gt 0 ]; do
     --startup) STARTUP_ONLY=true ;;
     --start) START_ONLY=true ;;
     --stop) STOP_ONLY=true ;;
+    --update) UPDATE_ONLY=true ;;
     --host|--port)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
         printf '%s requires a value.\n' "$argument" >&2; exit 2
@@ -67,8 +71,9 @@ if [ -n "$START_PORT" ]; then
 fi
 
 if { [ "$START_ONLY" = true ] && [ "$STARTUP_ONLY" = true ]; } ||
-   { [ "$STOP_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; }; then
-  printf 'Use only one of --start, --stop, or --startup.\n' >&2
+   { [ "$STOP_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; } ||
+   { [ "$UPDATE_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STOP_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; }; then
+  printf 'Use only one of --start, --stop, --update, or --startup.\n' >&2
   exit 2
 fi
 if [ "$(id -u)" -eq 0 ]; then
@@ -144,7 +149,7 @@ if [ "$START_ONLY" = true ]; then
   exec "$PROJECT_DIR/target/release/pr0-server"
 fi
 
-if [ ! -t 0 ]; then
+if [ "$UPDATE_ONLY" != true ] && [ ! -t 0 ]; then
   printf 'Setup needs an interactive terminal. Run ./init.sh in your terminal.\n' >&2
   exit 1
 fi
@@ -414,12 +419,29 @@ UNIT
   esac
 }
 
+build_application() {
+  printf '\nInstalling locked frontend dependencies and building the application…\n'
+  (cd "$PROJECT_DIR/web" && npm ci && npm run build)
+  (cd "$PROJECT_DIR" && cargo build --release --locked)
+}
+
+if [ "$UPDATE_ONLY" = true ]; then
+  printf '\npr0former · update build\nProject: %s\n' "$PROJECT_DIR"
+  activate_tools
+  required cargo; required rustc; required node; required npm; required cmake; required pkg-config
+  if ! node_supported || ! rust_supported; then
+    printf 'Node.js 22.12+ and Rust 1.88+ are required. Run ./init.sh to update build tools.\n' >&2
+    exit 1
+  fi
+  build_application
+  printf '\nUpdate complete. Restart the server to use the rebuilt application.\n'
+  exit 0
+fi
+
 printf '\npr0former · interactive setup\nProject: %s\n' "$PROJECT_DIR"
 if [ "$STARTUP_ONLY" = true ]; then startup_menu; exit 0; fi
 install_dependencies
-printf '\nInstalling frontend dependencies and building the application…\n'
-(cd "$PROJECT_DIR/web" && npm ci && npm run build)
-(cd "$PROJECT_DIR" && cargo build --release --locked)
+build_application
 if ask 'Run automated Rust and frontend unit tests?'; then
   (cd "$PROJECT_DIR" && cargo test --workspace --locked)
   (cd "$PROJECT_DIR/web" && npm test)

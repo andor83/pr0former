@@ -132,6 +132,8 @@ pub async fn offer(
     csrf(&headers)?;
     let u = user(&app, &headers)?;
     let membership = role(&app, &id, &u)?;
+    app.logs
+        .push(&id, "info", "Browser audio negotiation requested");
     if app.active.lock().unwrap().as_deref() != Some(&id) {
         return Err(bad("Activate the show before connecting audio"));
     }
@@ -326,6 +328,8 @@ pub async fn offer(
             }
         }
     });
+    app.logs
+        .push(&id, "info", "Browser audio negotiation completed");
     Ok(Json(json!({"type":"answer","sdp":sdp.sdp})))
 }
 pub async fn disconnect(
@@ -336,6 +340,8 @@ pub async fn disconnect(
     csrf(&headers)?;
     let u = user(&app, &headers)?;
     role(&app, &id, &u)?;
+    app.logs
+        .push(&id, "info", "Browser audio disconnect requested");
     let key = format!("{id}/{u}");
     let token = app.media.admissions.lock().unwrap().get(&key).cloned();
     if let Some(token) = &token {

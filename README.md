@@ -14,6 +14,8 @@ A self-hosted electroacoustic performance workspace: Vue scores and patches, a R
 
 The interactive script checks dependencies, offers installation, installs the locked frontend dependencies, builds the frontend and release server, offers tests, and asks about startup configuration. Run it as your normal user in a terminal. Homebrew/system package installation may request administrator access.
 
+After changing or pulling source, rebuild with `./init.sh --update`. This noninteractive command installs the locked frontend dependencies, rebuilds the frontend, and builds the release server, reusing up-to-date Cargo artifacts. Existing build tools are required. It does not pull source, alter startup configuration, or restart a running server; restart the server after a successful update.
+
 ```sh
 ./init.sh --start
 ```

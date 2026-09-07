@@ -53,6 +53,14 @@ pub struct Descriptor {
     pub outputs: Vec<Port>,
     pub parameters: Vec<Parameter>,
 }
+/// Control messages are separate from audio samples and spectral frames.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ControlValue {
+    Number(f64),
+    Text(String),
+}
+pub const MAX_CONTROL_TEXT_BYTES: usize = 256;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
@@ -63,6 +71,8 @@ pub struct Node {
     pub channels: usize,
     #[serde(default)]
     pub parameters: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_value: Option<ControlValue>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
@@ -525,7 +535,13 @@ pub fn catalog() -> Vec<Descriptor> {
         "Output to selected server interface.",
         vec![port("in", Audio)],
         vec![],
-        vec![param("gain", "Output gain", "dB", -90., 6., -12.)],
+        vec![
+            param("gain", "Output gain", "dB", -90., 6., -12.),
+            Parameter {
+                structural: true,
+                ..param("interface", "Audio interface", "", 0., 999999999., 0.)
+            },
+        ],
         &["dac~"],
     );
     add(
@@ -551,15 +567,61 @@ pub fn catalog() -> Vec<Descriptor> {
         &["+~"],
     );
     add(
+        "control_visualizer",
+        "Control visualizer",
+        "123",
+        "Control",
+        "Passes numeric or UTF-8 string control data through unchanged. Disconnected nodes use the input value set in the modal.",
+        vec![port("in", Control)],
+        vec![port("out", Control)],
+        vec![],
+        &["visualizer", "display", "message"],
+    );
+    add(
+        "audio_visualizer",
+        "Audio visualizer",
+        "▥",
+        "Audio",
+        "Transparent multichannel audio pass-through with block-rate spectral analysis and a spectrogram. Display updates are throttled; audio is unchanged.",
+        vec![port("in", Audio)],
+        vec![port("out", Audio)],
+        vec![Parameter {
+            structural: true,
+            ..param("size", "Analysis FFT size", "samples", 256., 8192., 1024.)
+        }],
+        &["visualizer", "spectrogram", "scope"],
+    );
+    add(
+        "spectral_visualizer",
+        "Spectral visualizer",
+        "▤",
+        "Spectral",
+        "Transparent spectral-frame pass-through. Shows a spectrogram, FFT-bin magnitudes, and phase in radians for every channel; Cartesian and polar data are preserved.",
+        vec![port("in", Spectral)],
+        vec![port("out", Spectral)],
+        vec![
+            Parameter {
+                structural: true,
+                ..param("size", "FFT size", "samples", 256., 8192., 1024.)
+            },
+            Parameter {
+                structural: true,
+                ..param("overlap", "Overlap", "", 2., 4., 4.)
+            },
+        ],
+        &["visualizer", "fft", "phase"],
+    );
+    add(
         "oscillator",
         "Oscillator",
         "∿",
         "Audio",
-        "Sine oscillator with smoothed frequency.",
+        "Sine, triangle, sawtooth, square, or noise oscillator with smoothed frequency. Sawtooth and square edges use band-limiting.",
         vec![],
         vec![port("out", Audio)],
         vec![
             param("frequency", "Frequency", "Hz", 0., 20000., 220.),
+            param("waveform", "Waveform", "", 0., 4., 0.),
             param("amplitude", "Amplitude", "", 0., 1., 0.2),
         ],
         &["osc~"],
@@ -940,7 +1002,21 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
-            if d.category == "Spectral" {
+            if let Some(value) = &n.control_value {
+                if n.kind != "control_visualizer" {
+                    return Err("Input literals belong to control visualizers".into());
+                }
+                match value {
+                    ControlValue::Number(v) if !v.is_finite() => {
+                        return Err("Control numbers must be finite".into());
+                    }
+                    ControlValue::Text(v) if v.len() > MAX_CONTROL_TEXT_BYTES => {
+                        return Err("Control strings must be at most 256 UTF-8 bytes".into());
+                    }
+                    _ => {}
+                }
+            }
+            if d.category == "Spectral" || n.kind == "audio_visualizer" {
                 let size = n.parameters.get("size").copied().unwrap_or(1024.);
                 let overlap = n.parameters.get("overlap").copied().unwrap_or(4.);
                 if size.fract() != 0.
@@ -956,6 +1032,9 @@ impl Graph {
                     .iter()
                     .find(|p| &p.id == key)
                     .ok_or(format!("Unknown parameter {key}"))?;
+                if n.kind == "oscillator" && key == "waveform" && value.fract() != 0. {
+                    return Err("Waveform must be an integer from 0 to 4".into());
+                }
                 if !value.is_finite() || *value < p.min || *value > p.max {
                     return Err(format!(
                         "{} must be between {} and {}",
@@ -1069,6 +1148,39 @@ impl Graph {
         }
         if order.len() != self.nodes.len() {
             return Err("Cycles require an explicit feedback scheduler; this engine currently accepts acyclic graphs".into());
+        }
+        if self
+            .nodes
+            .iter()
+            .filter(|n| n.kind.ends_with("_visualizer"))
+            .count()
+            > 16
+        {
+            return Err("At most 16 visualizers per graph".into());
+        }
+        let mut text = vec![false; self.nodes.len()];
+        for &i in &order {
+            if self.nodes[i].kind == "control_visualizer" {
+                text[i] = if let Some(edge) = self
+                    .edges
+                    .iter()
+                    .find(|e| e.target == self.nodes[i].id && e.target_port == "in")
+                {
+                    text[*ids.get(&edge.source).unwrap()]
+                } else {
+                    matches!(self.nodes[i].control_value, Some(ControlValue::Text(_)))
+                };
+            }
+        }
+        for edge in &self.edges {
+            let source = *ids.get(&edge.source).unwrap();
+            let target = *ids.get(&edge.target).unwrap();
+            if text[source] && self.nodes[target].kind != "control_visualizer" {
+                return Err(
+                    "String control data cannot connect to a numeric-only input or parameter"
+                        .into(),
+                );
+            }
         }
         Ok(order)
     }
@@ -1187,6 +1299,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
                 x: *x,
                 y: *y,
                 channels: 2,
+                control_value: None,
                 parameters: d
                     .parameters
                     .iter()
@@ -1264,6 +1377,36 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn control_text_contract_is_validated_through_visualizers() {
+        let mut source = demo_project("x".into(), "x".into(), Mode::Structured)
+            .graph
+            .nodes
+            .remove(0);
+        source.kind = "control_visualizer".into();
+        source.id = "source".into();
+        source.parameters.clear();
+        source.control_value = Some(ControlValue::Text("hello".into()));
+        let mut target = source.clone();
+        target.id = "target".into();
+        target.kind = "add".into();
+        target.control_value = None;
+        let mut graph = Graph {
+            nodes: vec![source, target],
+            edges: vec![Edge {
+                id: "line".into(),
+                source: "source".into(),
+                source_port: "out".into(),
+                target: "target".into(),
+                target_port: "a".into(),
+            }],
+        };
+        assert!(graph.validate().unwrap_err().contains("String control"));
+        graph.nodes[0].control_value = Some(ControlValue::Number(42.));
+        assert!(graph.validate().is_ok());
+        graph.nodes[0].control_value = Some(ControlValue::Text("x".repeat(257)));
+        assert!(graph.validate().is_err());
+    }
     #[test]
     fn external_routes_validate_and_legacy_midi_defaults_to_channel_one() {
         let mut p = demo_project("x".into(), "x".into(), Mode::Structured);
@@ -1386,4 +1529,35 @@ mod tests {
             assert_eq!(p.validate().is_ok(), (0.25..=4096.).contains(&length));
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpectrumChannel {
+    pub magnitude: Vec<f32>,
+    pub phase: Vec<f32>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Visualization {
+    Control {
+        value: ControlValue,
+    },
+    Audio {
+        sequence: u64,
+        size: usize,
+        ready: bool,
+        channels: Vec<SpectrumChannel>,
+        history: Vec<String>,
+        columns: usize,
+    },
+    Spectral {
+        sequence: u64,
+        generation: u64,
+        size: usize,
+        ready: bool,
+        polar: bool,
+        channels: Vec<SpectrumChannel>,
+        history: Vec<String>,
+        columns: usize,
+    },
 }
