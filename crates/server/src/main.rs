@@ -3,6 +3,7 @@ mod bind;
 mod build_info;
 mod hardware_meter;
 mod media;
+mod node_io;
 mod osc;
 mod output_buffer;
 mod performance;
@@ -683,6 +684,8 @@ async fn parameter(
 #[derive(Deserialize)]
 struct Transport {
     action: String,
+    #[serde(default)]
+    count_in_beats: u8,
     bpm: Option<f64>,
 }
 async fn transport(
@@ -699,6 +702,9 @@ async fn transport(
             StatusCode::FORBIDDEN,
             "Transport authority required".into(),
         ));
+    }
+    if c.count_in_beats > 32 {
+        return Err(bad("Count-in must be 0–32 beats"));
     }
     let _guard = app.setup.lock().await;
     if c.action == "activate" {
@@ -754,7 +760,13 @@ async fn transport(
             return Err(bad("Activate this show first"));
         }
         match c.action.as_str() {
-            "play" | "pause" | "stop" => send(&app, audio::Command::Transport(c.action))?,
+            "play" | "pause" | "stop" => send(
+                &app,
+                audio::Command::Transport {
+                    action: c.action,
+                    count_in_beats: c.count_in_beats,
+                },
+            )?,
             "tempo" => {
                 let project = load(&app, &id)?;
                 if project.graph.edges.iter().any(|e| {

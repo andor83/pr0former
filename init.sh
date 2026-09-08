@@ -9,6 +9,7 @@ STARTUP_ONLY=false
 START_ONLY=false
 STOP_ONLY=false
 UPDATE_ONLY=false
+UPDATE_AND_START=false
 RUN_DIR="$PROJECT_DIR/.local/manual-runs"
 START_HOST=""
 START_PORT=""
@@ -21,10 +22,11 @@ pr0former initial setup
   ./init.sh --start     Start the built server in the foreground (Ctrl-C to stop)
   ./init.sh --stop      Stop servers launched by --start from this project
   ./init.sh --update    Rebuild frontend and release server using locked dependencies
+  ./init.sh --uas       Pull latest Git changes, rebuild, and start in the foreground
   ./init.sh --startup   Interactively enable or disable startup only
   ./init.sh --help      Show this help
-  --host HOST          Override the bind host for --start (IPv4, IPv6, or hostname)
-  --port PORT          Override the bind port for --start (1–65535)
+  --host HOST          Override the bind host for --start/--uas (IPv4, IPv6, or hostname)
+  --port PORT          Override the bind port for --start/--uas (1–65535)
 
 macOS: startup uses a LaunchAgent for the current user, at login.
 Linux: startup uses a systemd user service, at login.
@@ -32,10 +34,13 @@ The script asks before installing dependencies or changing startup services.
 No administrator account or password is created; bootstrap in the web interface.
 --start prints the compiled Git revision and checks the tracked remote branch (up to 8 seconds).
 Red warnings identify stale/dirty builds or an unverifiable version; startup still continues.
-No source is pulled or rebuilt automatically.
+--start alone does not pull source or rebuild.
 --start reuses .local/start-pr0former.sh when present, otherwise uses PR0_ environment settings.
 --host and --port override only the specified part of that address for this launch.
 --update requires installed build tools; it does not pull source or restart servers.
+--uas pulls the current branch from its configured upstream (fast-forward only),
+then runs --update and --start. Pull/build failures prevent startup.
+It requires installed build tools and does not change startup services.
 HELP
 }
 while [ "$#" -gt 0 ]; do
@@ -45,6 +50,7 @@ while [ "$#" -gt 0 ]; do
     --start) START_ONLY=true ;;
     --stop) STOP_ONLY=true ;;
     --update) UPDATE_ONLY=true ;;
+    --uas) UPDATE_AND_START=true ;;
     --host|--port)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
         printf '%s requires a value.\n' "$argument" >&2; exit 2
@@ -57,8 +63,8 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-if [ -n "$START_HOST$START_PORT" ] && [ "$START_ONLY" != true ]; then
-  printf '%s\n' '--host and --port require --start.' >&2; exit 2
+if [ -n "$START_HOST$START_PORT" ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ]; then
+  printf '%s\n' '--host and --port require --start or --uas.' >&2; exit 2
 fi
 if [ -n "$START_HOST" ]; then
   case "$START_HOST" in
@@ -75,8 +81,9 @@ fi
 
 if { [ "$START_ONLY" = true ] && [ "$STARTUP_ONLY" = true ]; } ||
    { [ "$STOP_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; } ||
-   { [ "$UPDATE_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STOP_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; }; then
-  printf 'Use only one of --start, --stop, --update, or --startup.\n' >&2
+   { [ "$UPDATE_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STOP_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; } ||
+   { [ "$UPDATE_AND_START" = true ] && { [ "$START_ONLY" = true ] || [ "$STOP_ONLY" = true ] || [ "$UPDATE_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; }; then
+  printf 'Use only one of --start, --stop, --update, --uas, or --startup.\n' >&2
   exit 2
 fi
 if [ "$(id -u)" -eq 0 ]; then
@@ -128,6 +135,19 @@ if [ "$STOP_ONLY" = true ]; then
     printf 'No servers launched by --start are running for this project.\n'
   fi
   exit 0
+fi
+
+if [ "$UPDATE_AND_START" = true ]; then
+  command -v git >/dev/null 2>&1 || { printf 'Git is required for --uas.\n' >&2; exit 1; }
+  printf '\nPulling the latest tracked Git branch…\n'
+  # Never create a merge commit or automatically stash the user's edits.
+  git -C "$PROJECT_DIR" -c pull.rebase=false -c merge.autoStash=false pull --ff-only
+  # Re-read the pulled launcher so updates to the build/start steps take effect.
+  /bin/bash "$PROJECT_DIR/init.sh" --update
+  start_args=(--start)
+  if [ -n "$START_HOST" ]; then start_args+=(--host "$START_HOST"); fi
+  if [ -n "$START_PORT" ]; then start_args+=(--port "$START_PORT"); fi
+  exec /bin/bash "$PROJECT_DIR/init.sh" "${start_args[@]}"
 fi
 
 version_warning() {

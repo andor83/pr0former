@@ -241,7 +241,10 @@ impl Runtime {
                                             None
                                         } {
                                             Some((rest, rosc::OscPacket::Message(m)))
-                                                if rest.is_empty() && action(&m).is_some() =>
+                                                if rest.is_empty()
+                                                    && (action(&m).is_some()
+                                                        || crate::node_io::osc_note(&m)
+                                                            .is_some()) =>
                                             {
                                                 messages.push(m)
                                             }

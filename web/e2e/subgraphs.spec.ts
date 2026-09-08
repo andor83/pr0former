@@ -14,6 +14,7 @@ test('nested subgraph ports, live edits, naming, duplication and subtree undo', 
   let latest:any
   page.on('websocket',socket=>socket.on('framereceived',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='telemetry')latest=m}))
   await page.goto('/')
+  await page.getByLabel('Count in', { exact: true }).selectOption('0')
   await page.getByRole('button',{name:'Play',exact:true}).click()
   await expect.poll(()=>latest?.values?.Result?.value).toBe(7)
   await expect(page.locator('.vue-flow__node')).toHaveCount(3)

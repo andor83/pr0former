@@ -157,6 +157,19 @@ impl Sequencer {
         next.last_beat = previous.clock.beat;
         next
     }
+    /// Seed new/reassigned control nodes with the part's currently held notes.
+    pub fn seed_part_nodes(&self, previous: &pr0_dsp::Engine, prepared: &mut pr0_dsp::Engine) {
+        for (node, part) in prepared.part_sources() {
+            if previous.part_source(&node) == Some(part.as_str()) {
+                continue;
+            }
+            if let Some(lane) = self.lanes.iter().find(|lane| lane.id == part) {
+                for (pitch, velocity) in lane.active.iter().flatten() {
+                    prepared.node_midi_note(&node, *pitch, *velocity);
+                }
+            }
+        }
+    }
     pub fn launch(
         &mut self,
         id: &str,
@@ -263,6 +276,7 @@ impl Sequencer {
                 if let Some(node) = &lane.node {
                     engine.note_scoped(node, lane.owner, e.note_id, e.pitch, e.velocity);
                 }
+                engine.part_note(&lane.id, e.pitch, e.velocity);
                 lane.active[e.note_id as usize] = if e.velocity > 0 {
                     Some((e.pitch, e.velocity))
                 } else {
@@ -310,6 +324,7 @@ impl Lane {
                 if let Some(node) = &self.node {
                     engine.note_scoped(node, self.owner, note_id as u32, pitch, velocity);
                 }
+                engine.part_note(&self.id, pitch, velocity);
                 self.active[note_id] = Some((pitch, velocity));
                 if self.midi.is_some() || self.osc.is_some() {
                     let _ = io.try_send(External::Note {
@@ -326,6 +341,7 @@ impl Lane {
     }
 
     fn release(&mut self, engine: &mut pr0_dsp::Engine, io: &SyncSender<External>) {
+        engine.part_notes_off(&self.id);
         for (note_id, active) in self.active.iter_mut().enumerate() {
             if let Some((pitch, _)) = active.take() {
                 if let Some(node) = &self.node {
@@ -468,6 +484,63 @@ pub fn external_worker(socket: std::sync::Arc<crate::osc::Runtime>) -> SyncSende
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn part_control_streams_isolate_chords_and_reassignment_releases_old_pitches() {
+        let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Structured);
+        p.parts[0].notes.truncate(2);
+        p.parts[0].notes[0].pitch = 60;
+        p.parts[0].notes[0].duration = 2.;
+        p.parts[0].notes[1].pitch = 64;
+        p.parts[0].notes[1].beat = 0.;
+        p.parts[0].notes[1].duration = 2.;
+        let mut other = p.parts[0].clone();
+        other.id = "other".into();
+        other.notes.truncate(1);
+        other.notes[0].pitch = 72;
+        p.parts.push(other);
+        let mut node = p.graph.nodes[0].clone();
+        node.id = "notes".into();
+        node.kind = "part_midi".into();
+        node.parameters.clear();
+        node.part_id = Some(p.parts[0].id.clone());
+        p.graph.nodes.push(node);
+        let mut e = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        e.clock.running = true;
+        let mut seq = Sequencer::new(&p);
+        let (tx, _) = sync_channel(256);
+        let mut events = vec![];
+        for _ in 0..4 {
+            seq.tick(&mut e, &tx);
+            e.render(&[], &mut [[0.; 8]]);
+            let v = e.telemetry().remove("notes").unwrap();
+            if v["trigger"] > 0. {
+                events.push(v["pitch"]);
+            }
+        }
+        assert_eq!(events, vec![60., 64.]);
+        p.graph.nodes.last_mut().unwrap().part_id = Some("other".into());
+        let mut prepared = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        prepared.clock = e.clock;
+        let mut next = seq.replace(&p, &mut e, &mut prepared, &tx);
+        prepared.carry_node_state(&mut e);
+        next.seed_part_nodes(&e, &mut prepared);
+        let mut changes = vec![];
+        for _ in 0..8 {
+            next.tick(&mut prepared, &tx);
+            prepared.render(&[], &mut [[0.; 8]]);
+            let v = prepared.telemetry().remove("notes").unwrap();
+            if v["trigger"] + v["note_off"] > 0. {
+                changes.push((v["pitch"], v["velocity"]));
+            }
+        }
+        assert_eq!(changes, vec![(60., 0.), (64., 0.), (72., 90.)]);
+        next.pause(&mut prepared, &tx);
+        prepared.clock.running = false;
+        for _ in 0..4 {
+            prepared.render(&[], &mut [[0.; 8]]);
+        }
+        assert_eq!(prepared.telemetry()["notes"]["gate"], 0.);
+    }
     #[test]
     fn external_midi_channels_hold_the_same_pitch_independently() {
         let mut held = HeldNotes::default();

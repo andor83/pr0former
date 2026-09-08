@@ -1,13 +1,18 @@
 //! Prepared DSP graph. `render` performs no allocation or locking.
 mod channels;
 mod clock_ratio;
+pub mod count_in;
 mod effects;
 mod envelope;
+mod midi_controls;
+pub mod note_inputs;
 mod oscillator;
+mod sampler;
 mod sequence;
 mod spectral;
 pub mod stretch;
 mod visualizer;
+
 use pr0_core::{
     DEVICE_ROUTE_KEYS, Graph, MAX_CHANNELS, MAX_DEVICE_CHANNELS, catalog, device_channel,
 };
@@ -135,7 +140,13 @@ struct RuntimeNode {
     latency: usize,
     input: [[f64; MAX_CHANNELS]; 8],
     output: [f64; MAX_CHANNELS],
-    control: [f64; 3],
+    control: [f64; 8],
+    part_id: Option<String>,
+    io: Option<pr0_core::IoConfig>,
+    note_inputs: note_inputs::NoteInputs,
+    outgoing_notes: [Option<note_inputs::NoteEvent>; 2],
+    sampler: Option<Box<sampler::Sampler>>,
+    midi_controls: Option<Box<midi_controls::MidiControls>>,
     control_text: Option<visualizer::Text>,
     input_text: Option<visualizer::Text>,
     fallback: visualizer::Datum,
@@ -240,6 +251,62 @@ impl RuntimeNode {
             "atodb" => scalar = 20. * a.abs().max(1e-9).log10(),
             "clamp" => scalar = a.max(self.p("min")).min(self.p("max")),
             "scale" => scalar = self.p("min") + a * (self.p("max") - self.p("min")),
+            "part_midi" | "midi_input" | "osc_to_midi" => {
+                self.control[..5].copy_from_slice(&self.midi_controls.as_mut().unwrap().tick());
+                self.control[5] = self.control[0];
+                self.control[6] = self.control[1];
+                scalar = self.control[0];
+            }
+            "midi_output" | "midi_to_osc" | "poly_sampler" => {
+                let mut values = std::array::from_fn(|i| self.input[i][0]);
+                let mut connected = std::array::from_fn(|i| {
+                    self.bindings
+                        .iter()
+                        .any(|b| !b.parameter && b.destination == i)
+                });
+                // Keep older MIDI number/value connections valid as aliases.
+                if self.kind == "midi_output" {
+                    for (index, alias) in [(0, 5), (1, 6)] {
+                        if !connected[index]
+                            && self
+                                .bindings
+                                .iter()
+                                .any(|b| !b.parameter && b.destination == alias)
+                        {
+                            values[index] = self.input[alias][0];
+                            connected[index] = true;
+                        }
+                    }
+                }
+                let notes = self.note_inputs.tick(values, connected);
+                if self.kind == "poly_sampler" {
+                    for note in notes.into_iter().flatten() {
+                        if clock.running || note.velocity == 0 {
+                            self.sampler
+                                .as_mut()
+                                .unwrap()
+                                .note(note.pitch, note.velocity);
+                        }
+                    }
+                    let (root, amplitude, looping, release) = (
+                        self.p("root_note"),
+                        self.p("amplitude"),
+                        self.p("loop") > 0.,
+                        self.p("release"),
+                    );
+                    self.output = self.sampler.as_mut().unwrap().render(
+                        &self.sample,
+                        root,
+                        amplitude,
+                        looping,
+                        release,
+                        sr,
+                        clock.running,
+                    );
+                } else {
+                    self.outgoing_notes = notes;
+                }
+            }
             "clock" => {
                 scalar =
                     if clock.running && (clock.beat.floor() != self.previous || clock.beat == 0.) {
@@ -252,9 +319,10 @@ impl RuntimeNode {
                 self.control[2] = clock.bpm;
             }
             "clock_ratio" => {
-                self.control =
+                let values =
                     self.clock_ratio
                         .tick_clock(clock, self.p("multiply"), self.p("divide"));
+                self.control[..3].copy_from_slice(&values);
                 scalar = self.control[0];
             }
             "metro" => {
@@ -737,7 +805,17 @@ impl Engine {
                 latency: 0,
                 input: [[0.; MAX_CHANNELS]; 8],
                 output: [0.; MAX_CHANNELS],
-                control: [0.; 3],
+                control: [0.; 8],
+                part_id: n.part_id.clone(),
+                io: n.io.clone(),
+                note_inputs: note_inputs::NoteInputs::default(),
+                outgoing_notes: [None; 2],
+                sampler: (n.kind == "poly_sampler").then(|| Box::new(sampler::Sampler::default())),
+                midi_controls: (matches!(
+                    n.kind.as_str(),
+                    "part_midi" | "midi_input" | "osc_to_midi"
+                ))
+                .then(|| Box::new(midi_controls::MidiControls::new())),
                 control_text: None,
                 input_text: None,
                 fallback: if n.kind == "control_input"
@@ -878,6 +956,8 @@ impl Engine {
             };
             let source = &previous.nodes[source_index];
             let compatible = target.kind == source.kind
+                && target.part_id == source.part_id
+                && target.io == source.io
                 && target.channels == source.channels
                 && target.defaults == source.defaults
                 && target.fallback == source.fallback
@@ -898,6 +978,17 @@ impl Engine {
                             && target.compensations[i].len() == source.compensations[i].len()
                     });
             if !compatible {
+                let target = &mut self.nodes[index];
+                let source = &mut previous.nodes[source_index];
+                if target.kind == source.kind && target.midi_controls.is_some() {
+                    std::mem::swap(&mut target.midi_controls, &mut source.midi_controls);
+                    if target.part_id != source.part_id
+                        || target.io != source.io
+                        || target.defaults != source.defaults
+                    {
+                        target.midi_controls.as_mut().unwrap().release();
+                    }
+                }
                 continue;
             }
             let target = &mut self.nodes[index];
@@ -943,6 +1034,69 @@ impl Engine {
                 *slot = *voice;
             }
         }
+    }
+    pub fn part_note(&mut self, part: &str, pitch: u8, velocity: u8) {
+        for node in &mut self.nodes {
+            if node.kind == "part_midi" && node.part_id.as_deref() == Some(part) {
+                node.midi_controls.as_mut().unwrap().note(pitch, velocity);
+            }
+        }
+    }
+    pub fn part_notes_off(&mut self, part: &str) {
+        for node in &mut self.nodes {
+            if node.kind == "part_midi" && node.part_id.as_deref() == Some(part) {
+                node.midi_controls.as_mut().unwrap().release();
+            }
+        }
+    }
+    pub fn part_source(&self, id: &str) -> Option<&str> {
+        self.nodes
+            .iter()
+            .find(|n| n.id == id && n.kind == "part_midi")
+            .and_then(|n| n.part_id.as_deref())
+    }
+    /// Used only during prepared graph installation, never in render.
+    pub fn part_sources(&self) -> Vec<(String, String)> {
+        self.nodes
+            .iter()
+            .filter(|n| n.kind == "part_midi")
+            .filter_map(|n| n.part_id.as_ref().map(|p| (n.id.clone(), p.clone())))
+            .collect()
+    }
+    pub fn node_midi_note(&mut self, id: &str, pitch: u8, velocity: u8) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
+            if let Some(midi) = &mut node.midi_controls {
+                midi.note(pitch, velocity);
+            }
+        }
+    }
+    pub fn node_midi_cc(&mut self, id: &str, controller: u8, value: u8) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
+            if let Some(midi) = &mut node.midi_controls {
+                midi.cc(controller, value);
+            }
+        }
+    }
+    pub fn reset_midi_sources(&mut self) {
+        for node in &mut self.nodes {
+            if let Some(midi) = &mut node.midi_controls {
+                midi.release();
+            }
+        }
+    }
+    pub fn node_midi_reset(&mut self, id: &str) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
+            if let Some(midi) = &mut node.midi_controls {
+                midi.release();
+            }
+        }
+    }
+    pub fn take_midi_output(&mut self, id: &str) -> [Option<note_inputs::NoteEvent>; 2] {
+        self.nodes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .map(|n| std::mem::replace(&mut n.outgoing_notes, [None; 2]))
+            .unwrap_or([None; 2])
     }
     pub fn note(&mut self, node: &str, pitch: u8, velocity: u8) {
         self.note_scoped(node, 0, pitch as u32, pitch, velocity);
@@ -1270,6 +1424,18 @@ impl Engine {
                     .zip(n.values.iter().copied())
                     .collect();
                 values.insert("_out".into(), n.control[0]);
+                if matches!(n.kind.as_str(), "part_midi" | "midi_input" | "osc_to_midi") {
+                    values.insert(
+                        "_dropped".into(),
+                        n.midi_controls.as_ref().unwrap().dropped as f64,
+                    );
+                    for (name, value) in ["pitch", "velocity", "gate", "trigger", "note_off"]
+                        .into_iter()
+                        .zip(n.control)
+                    {
+                        values.insert(name.into(), value);
+                    }
+                }
                 if n.kind == "clock" {
                     values.insert("tempo".into(), self.clock.bpm);
                 }
@@ -1351,6 +1517,61 @@ impl Fourier {
 mod tests {
     use super::*;
     use pr0_core::{Mode, demo_project};
+    #[test]
+    fn part_events_fan_out_to_sampler_and_matching_midi_osc_ports() {
+        let mut source = visual_node("notes", "part_midi", 2);
+        source.part_id = Some("part-a".into());
+        let mut sampler = visual_node("sampler", "poly_sampler", 2);
+        sampler.parameters = [
+            ("root_note".into(), 60.),
+            ("loop".into(), 1.),
+            ("release".into(), 1.),
+        ]
+        .into();
+        let graph = Graph {
+            nodes: vec![
+                source,
+                sampler,
+                visual_node("midi", "midi_output", 2),
+                visual_node("osc", "midi_to_osc", 2),
+            ],
+            edges: ["sampler", "midi", "osc"]
+                .into_iter()
+                .flat_map(|target| {
+                    ["pitch", "velocity", "gate", "trigger", "note_off"]
+                        .into_iter()
+                        .map(move |port| pr0_core::Edge {
+                            id: format!("{target}-{port}"),
+                            source: "notes".into(),
+                            source_port: port.into(),
+                            target: target.into(),
+                            target_port: port.into(),
+                        })
+                })
+                .collect(),
+        };
+        let mut engine = Engine::prepare(graph, 48000.).unwrap();
+        engine.clock.running = true;
+        engine.set_sample("sampler", vec![[1.; 8]; 1024]);
+        engine.part_note("part-b", 72, 127);
+        engine.part_note("part-a", 60, 100);
+        engine.part_note("part-a", 64, 80);
+        engine.part_note("part-a", 60, 0);
+        engine.part_note("part-a", 64, 0);
+        let mut events = vec![];
+        let mut audible = false;
+        for _ in 0..60 {
+            engine.render(&[], &mut [[0.; 8]]);
+            let midi = engine.take_midi_output("midi");
+            let osc = engine.take_midi_output("osc");
+            assert_eq!(midi, osc);
+            events.extend(midi.into_iter().flatten().map(|n| (n.pitch, n.velocity)));
+            audible |= engine.audio_frame("sampler", "out")[0] > 0.;
+        }
+        assert_eq!(events, vec![(60, 100), (64, 80), (60, 0), (64, 0)]);
+        assert!(audible);
+        assert_eq!(engine.audio_frame("sampler", "out"), [0.; 8]);
+    }
     #[test]
     fn graphical_control_bang_is_one_sample_and_input_overrides_manual_value() {
         let mut node = visual_node("gui", "control_input", 1);
@@ -1701,11 +1922,11 @@ mod tests {
         assert_eq!(e.nodes[0].control[0], 1.);
         e.clock.beat = 0.125;
         e.render(&[], &mut [[0.; 8]; 1]);
-        assert_eq!(e.nodes[0].control, [0., 0.5, 0.]);
+        assert_eq!(e.nodes[0].control[..3], [0., 0.5, 0.]);
         e.clock.set_tempo(60.);
         e.clock.beat = 0.25;
         e.render(&[], &mut [[0.; 8]; 1]);
-        assert_eq!(e.nodes[0].control, [1., 0., 1.]);
+        assert_eq!(e.nodes[0].control[..3], [1., 0., 1.]);
     }
     #[test]
     fn dedicated_monitor_is_isolated_from_speakers_and_duplicates_mono() {
@@ -1889,17 +2110,17 @@ mod tests {
         };
         let mut e = Engine::prepare(graph, 48000.).unwrap();
         e.render(&[], &mut [[0.; 8]; 1]);
-        assert_eq!(e.nodes[1].control, [60., 0., 1.]);
+        assert_eq!(e.nodes[1].control[..3], [60., 0., 1.]);
         e.render(&[], &mut [[0.; 8]; 64]);
-        assert_eq!(e.nodes[1].control, [60., 0., 0.]);
+        assert_eq!(e.nodes[1].control[..3], [60., 0., 0.]);
         e.parameter("trigger", "value", 0.).unwrap();
         e.render(&[], &mut [[0.; 8]; 1]);
         e.parameter("trigger", "value", 1.).unwrap();
         e.render(&[], &mut [[0.; 8]; 1]);
-        assert_eq!(e.nodes[1].control, [67., 1., 1.]);
+        assert_eq!(e.nodes[1].control[..3], [67., 1., 1.]);
         e.parameter("steps", "step_2", 69.).unwrap();
         e.render(&[], &mut [[0.; 8]; 1]);
-        assert_eq!(e.nodes[1].control, [69., 1., 0.]);
+        assert_eq!(e.nodes[1].control[..3], [69., 1., 0.]);
     }
     #[test]
     fn adsr_graph_drives_connected_parameter_through_attack_and_release() {

@@ -75,7 +75,10 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
     let mut engine = pr0_dsp::Engine::prepare(project.graph.clone(), rate as f64)?;
     let mut total = 0;
     for node in &project.graph.nodes {
-        if !matches!(node.kind.as_str(), "sample" | "phase_vocoder") {
+        if !matches!(
+            node.kind.as_str(),
+            "sample" | "phase_vocoder" | "poly_sampler"
+        ) {
             continue;
         }
         let asset = node.parameters.get("asset").copied().unwrap_or(0.) as u32;
@@ -157,7 +160,10 @@ pub fn cache_project(project: &pr0_core::Project, rate: u32) -> Result<(), Strin
         }
     }
     for node in &project.graph.nodes {
-        if matches!(node.kind.as_str(), "sample" | "phase_vocoder") {
+        if matches!(
+            node.kind.as_str(),
+            "sample" | "phase_vocoder" | "poly_sampler"
+        ) {
             let asset = node.parameters.get("asset").copied().unwrap_or(0.) as u32;
             if asset != 0 {
                 assets.insert(asset);

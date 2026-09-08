@@ -112,6 +112,9 @@ pub struct IoConfig {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
+    /// Source score part for a part_midi control node; absent means silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io: Option<IoConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,6 +506,23 @@ pub fn catalog() -> Vec<Descriptor> {
         vec![param("open", "Open", "", 0., 1., 1.)],
         &["spigot"],
     );
+    add(
+        "part_midi",
+        "Part MIDI",
+        "♪",
+        "Control",
+        "Note events from only the assigned score part: MIDI pitch and velocity (0–127), gate while any notes are held, note-on trigger and note-off trigger. Pitch identifies the event, including releases. Chords are serialized at one event per two engine samples, with a low sample between pulses. Select the source part in this modal.",
+        vec![],
+        vec![
+            port("pitch", Control),
+            port("velocity", Control),
+            port("gate", Control),
+            port("trigger", Control),
+            port("note_off", Control),
+        ],
+        vec![],
+        &["score", "notes", "part input"],
+    );
     for input in [true, false] {
         let structural = |mut p: Parameter| {
             p.structural = true;
@@ -514,24 +534,32 @@ pub fn catalog() -> Vec<Descriptor> {
             "♪",
             "External",
             if input {
-                "Server MIDI Note or CC input. Select a port, message type and channel in the modal. Outputs number, value and a one-sample message trigger."
+                "Physical MIDI keyboard Note or CC input. Select a port, message type and channel in the modal. Note outputs match Part MIDI: pitch, velocity, held gate, note-on trigger and note-off trigger; number/value are legacy aliases. Chords are serialized at one event per two engine samples."
             } else {
-                "Send MIDI notes or CC to a server port. Rising trigger sends number/value; falling trigger releases a Note. Values are rounded to 0–127."
+                "Send note-on/off events to a physical MIDI port using pitch, velocity, gate, trigger and note_off. Connect trigger and note_off for polyphony. Number/value are legacy aliases; CC mode sends controller/value on trigger."
             },
             if input {
                 vec![]
             } else {
                 vec![
+                    port("pitch", Control),
+                    port("velocity", Control),
+                    port("gate", Control),
+                    port("trigger", Control),
+                    port("note_off", Control),
                     port("number", Control),
                     port("value", Control),
-                    port("trigger", Control),
                 ]
             },
             if input {
                 vec![
+                    port("pitch", Control),
+                    port("velocity", Control),
+                    port("gate", Control),
+                    port("trigger", Control),
+                    port("note_off", Control),
                     port("number", Control),
                     port("value", Control),
-                    port("trigger", Control),
                 ]
             } else {
                 vec![]
@@ -582,6 +610,43 @@ pub fn catalog() -> Vec<Descriptor> {
                 ))]
             },
             &[],
+        );
+    }
+    for input in [true, false] {
+        add(
+            if input { "osc_to_midi" } else { "midi_to_osc" },
+            if input { "OSC to MIDI" } else { "MIDI to OSC" },
+            "↔",
+            "External",
+            if input {
+                "Decode note messages at an exact OSC address into pitch, velocity, held gate, note-on trigger and note-off trigger. Messages have two integer arguments: pitch and velocity (0–127); velocity zero means note-off. Enable OSC reception in System settings. Connect these outputs to a sampler or MIDI output."
+            } else {
+                "Encode pitch/velocity note-on and note-off events as OSC messages at the configured destination/address. Two integer arguments: pitch and velocity; velocity zero means note-off. Connect trigger and note_off for polyphony. Enable OSC sending in System settings."
+            },
+            if input {
+                vec![]
+            } else {
+                vec![
+                    port("pitch", Control),
+                    port("velocity", Control),
+                    port("gate", Control),
+                    port("trigger", Control),
+                    port("note_off", Control),
+                ]
+            },
+            if input {
+                vec![
+                    port("pitch", Control),
+                    port("velocity", Control),
+                    port("gate", Control),
+                    port("trigger", Control),
+                    port("note_off", Control),
+                ]
+            } else {
+                vec![]
+            },
+            vec![],
+            &["notes", "converter"],
         );
     }
     add(
@@ -1219,6 +1284,32 @@ pub fn catalog() -> Vec<Descriptor> {
             &[],
         );
     }
+    add(
+        "poly_sampler",
+        "Polyphonic sampler",
+        "▶",
+        "Audio",
+        "64-voice pitched WAV sampler. Pitch and velocity take MIDI values (0–127); trigger starts a note and note_off releases the matching pitch. Repeated pitches release oldest-held-first. Gate can drive simple monophonic patches when triggers are unconnected. Upload a WAV and set its root MIDI note in the modal. Oldest voices are stolen at capacity.",
+        vec![
+            port("pitch", Control),
+            port("velocity", Control),
+            port("gate", Control),
+            port("trigger", Control),
+            port("note_off", Control),
+        ],
+        vec![port("out", Audio)],
+        vec![
+            Parameter {
+                structural: true,
+                ..param("asset", "Sample ID", "", 0., 1000000000., 0.)
+            },
+            param("root_note", "Root MIDI note", "", 0., 127., 60.),
+            param("amplitude", "Amplitude", "", 0., 1., 0.5),
+            param("loop", "Loop while held", "", 0., 1., 0.),
+            param("release", "Release", "ms", 1., 2000., 80.),
+        ],
+        &["sampler", "polyphonic sample"],
+    );
     for (kind, label) in [
         ("sample", "Sample player"),
         ("phase_vocoder", "Phase vocoder"),
@@ -1372,10 +1463,20 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
+            if let Some(part) = &n.part_id {
+                if n.kind != "part_midi" || part.is_empty() || part.len() > 256 {
+                    return Err("A source part belongs only to a Part MIDI node and must be a valid part ID".into());
+                }
+            }
             if let Some(io) = &n.io {
                 if !matches!(
                     n.kind.as_str(),
-                    "midi_input" | "midi_output" | "osc_input" | "osc_output"
+                    "midi_input"
+                        | "midi_output"
+                        | "osc_input"
+                        | "osc_output"
+                        | "midi_to_osc"
+                        | "osc_to_midi"
                 ) {
                     return Err("I/O routes belong to MIDI/OSC nodes".into());
                 }
@@ -1752,6 +1853,15 @@ impl Project {
                 }
             }
         }
+        for node in &self.graph.nodes {
+            if node
+                .part_id
+                .as_ref()
+                .is_some_and(|id| !self.parts.iter().any(|p| &p.id == id))
+            {
+                return Err("Part MIDI source must be a part in this project".into());
+            }
+        }
         self.graph.validate()?;
         Ok(())
     }
@@ -1772,6 +1882,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         .map(|(id, kind, x, y)| {
             let d = catalog.iter().find(|d| d.kind == *kind).unwrap();
             Node {
+                part_id: None,
                 io: None,
                 library: None,
                 parent: None,
@@ -1859,6 +1970,44 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn part_note_contract_requires_a_local_part_and_numeric_ports() {
+        let mut p = demo_project("x".into(), "x".into(), Mode::Structured);
+        let mut node = p.graph.nodes[0].clone();
+        node.id = "notes".into();
+        node.kind = "part_midi".into();
+        node.parameters.clear();
+        node.part_id = Some(p.parts[0].id.clone());
+        p.graph.nodes.push(node);
+        assert!(p.validate().is_ok());
+        p.graph.nodes.last_mut().unwrap().part_id = Some("another-project-part".into());
+        assert!(p.validate().is_err());
+        p.graph.nodes.last_mut().unwrap().part_id = None;
+        assert!(p.validate().is_ok());
+        p.graph.nodes[0].part_id = Some(p.parts[0].id.clone());
+        assert!(p.validate().is_err());
+        let catalog = catalog();
+        for kind in ["part_midi", "midi_input", "osc_to_midi"] {
+            let d = catalog.iter().find(|d| d.kind == kind).unwrap();
+            for name in ["pitch", "velocity", "gate", "trigger", "note_off"] {
+                assert!(
+                    d.outputs
+                        .iter()
+                        .any(|p| p.id == name && p.signal == Signal::Control)
+                );
+            }
+        }
+        for kind in ["poly_sampler", "midi_output", "midi_to_osc"] {
+            let d = catalog.iter().find(|d| d.kind == kind).unwrap();
+            for name in ["pitch", "velocity", "gate", "trigger", "note_off"] {
+                assert!(
+                    d.inputs
+                        .iter()
+                        .any(|p| p.id == name && p.signal == Signal::Control)
+                );
+            }
+        }
+    }
     #[test]
     fn control_text_contract_is_validated_through_visualizers() {
         let mut source = demo_project("x".into(), "x".into(), Mode::Structured)

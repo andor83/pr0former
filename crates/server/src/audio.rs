@@ -52,7 +52,10 @@ pub enum Command {
         value: f64,
         revision: u64,
     },
-    Transport(String),
+    Transport {
+        action: String,
+        count_in_beats: u8,
+    },
     Tempo(f64),
     Control {
         node: String,
@@ -92,6 +95,9 @@ fn run(
     osc: Arc<crate::osc::Runtime>,
 ) {
     let io = crate::performance::external_worker(osc.clone());
+    let node_outputs = crate::node_io::Outputs::new(osc.clone());
+    let mut midi_inputs = crate::node_io::Inputs::default();
+    let mut node_routes: Vec<(String, crate::node_io::Route, bool)> = Vec::new();
     let mut sequencer: Option<crate::performance::Sequencer> = None;
     let mut engine: Option<Engine> = None;
     let mut project: Option<Project> = None;
@@ -116,6 +122,7 @@ fn run(
     let mut deadline = Instant::now();
     let mut seq = 0_u64;
     let mut next_tempo: Option<(f64, f64)> = None;
+    let mut count_in: Option<pr0_dsp::count_in::CountIn> = None;
     let mut device_error = String::new();
     let mut browser: std::collections::BTreeMap<String, std::collections::VecDeque<[f32; 2]>> =
         std::collections::BTreeMap::new();
@@ -138,7 +145,7 @@ fn run(
                 Command::Unload => Some("Show deactivated"),
                 Command::Replace { .. } => Some("Graph replacement queued"),
                 Command::Parameter { .. } => Some("Parameter updated"),
-                Command::Transport(a) => Some(a.as_str()),
+                Command::Transport { action, .. } => Some(action.as_str()),
                 Command::Tempo(_) => Some("Tempo change queued"),
                 Command::Clip { .. } => Some("Part cue queued"),
                 Command::Hardware(_) => Some("Output state requested"),
@@ -186,6 +193,9 @@ fn run(
                     }
                 }
                 Command::Enable(id, value, new_settings, reply) => {
+                    count_in = None;
+                    midi_inputs = crate::node_io::Inputs::default();
+                    node_outputs.reset(vec![]);
                     log_project = id;
                     outputs.clear();
                     hardware = false;
@@ -254,6 +264,24 @@ fn run(
                     project: p,
                     engine: prepared,
                 } => {
+                    // Retire changed/deleted external routes before installing their replacements.
+                    let next_routes = prepare_node_routes(&p);
+                    let retired: Vec<_> = node_routes
+                        .iter()
+                        .filter(|old| {
+                            !next_routes.contains(old)
+                                || project.as_ref().is_some_and(|previous| {
+                                    note_input_wiring(previous, &old.0)
+                                        != note_input_wiring(&p, &old.0)
+                                })
+                        })
+                        .map(|old| old.0.clone())
+                        .collect();
+                    if !retired.is_empty() {
+                        node_outputs.reset(retired);
+                    }
+                    node_routes = next_routes;
+                    midi_inputs.configure(&p.graph);
                     // Commands are handled between DSP blocks, in order. Install
                     // now so a following parameter edit targets the new graph.
                     let mut prepared = prepared;
@@ -264,6 +292,9 @@ fn run(
                             None => crate::performance::Sequencer::new(&p),
                         });
                         prepared.carry_node_state(previous);
+                        if let Some(seq) = &sequencer {
+                            seq.seed_part_nodes(previous, &mut prepared);
+                        }
                     }
                     previews.clear();
                     for out in &mut outputs {
@@ -274,6 +305,10 @@ fn run(
                 }
 
                 Command::Load(p, mut e) => {
+                    count_in = None;
+                    node_outputs.reset(vec![]);
+                    node_routes = prepare_node_routes(&p);
+                    midi_inputs.configure(&p.graph);
                     for out in &mut outputs {
                         out.meter.clear();
                     }
@@ -285,6 +320,10 @@ fn run(
                     next_tempo = None;
                 }
                 Command::Unload => {
+                    count_in = None;
+                    midi_inputs = crate::node_io::Inputs::default();
+                    node_routes.clear();
+                    node_outputs.reset(vec![]);
                     for out in &mut outputs {
                         out.meter.clear();
                     }
@@ -337,26 +376,43 @@ fn run(
                                     true
                                 }
                                 Some(crate::osc::Action::Transport(action)) => {
-                                    match action {
-                                        "play" => e.clock.running = true,
-                                        "pause" => {
-                                            if let Some(seq) = &mut sequencer {
-                                                seq.pause(e, &io);
-                                            }
-                                            e.clock.running = false;
-                                        }
-                                        "stop" => {
-                                            if let Some(seq) = &mut sequencer {
-                                                seq.reset(e, &io);
-                                            }
-                                            e.clock.stop();
-                                            next_tempo = None;
-                                        }
-                                        _ => {}
+                                    if matches!(action, "pause" | "stop") {
+                                        node_outputs.reset(vec![]);
                                     }
+                                    apply_transport(
+                                        action,
+                                        0,
+                                        project.as_ref().map_or(4, |p| p.beat_unit),
+                                        e,
+                                        &mut sequencer,
+                                        &mut count_in,
+                                        &mut next_tempo,
+                                        &io,
+                                    );
                                     true
                                 }
-                                _ => false,
+                                _ => {
+                                    let mut matched = false;
+                                    if let Some(note) = crate::node_io::osc_note(&message) {
+                                        if let Some(p) = &project {
+                                            for node in &p.graph.nodes {
+                                                if node.kind == "osc_to_midi"
+                                                    && node.io.as_ref().is_some_and(|io| {
+                                                        io.address == message.addr
+                                                    })
+                                                {
+                                                    e.node_midi_note(
+                                                        &node.id,
+                                                        note.pitch,
+                                                        note.velocity,
+                                                    );
+                                                    matched = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    matched
+                                }
                             }
                         } else {
                             false
@@ -388,25 +444,24 @@ fn run(
                         e.bang(&node);
                     }
                 }
-                Command::Transport(action) => {
+                Command::Transport {
+                    action,
+                    count_in_beats,
+                } => {
+                    if matches!(action.as_str(), "pause" | "stop") {
+                        node_outputs.reset(vec![]);
+                    }
                     if let Some(e) = engine.as_mut() {
-                        match action.as_str() {
-                            "play" => e.clock.running = true,
-                            "pause" => {
-                                if let Some(seq) = &mut sequencer {
-                                    seq.pause(e, &io);
-                                }
-                                e.clock.running = false;
-                            }
-                            "stop" => {
-                                if let Some(seq) = &mut sequencer {
-                                    seq.reset(e, &io);
-                                }
-                                e.clock.stop();
-                                next_tempo = None;
-                            }
-                            _ => {}
-                        }
+                        apply_transport(
+                            &action,
+                            count_in_beats,
+                            project.as_ref().map_or(4, |p| p.beat_unit),
+                            e,
+                            &mut sequencer,
+                            &mut count_in,
+                            &mut next_tempo,
+                            &io,
+                        );
                     }
                 }
                 Command::Tempo(bpm) => {
@@ -517,6 +572,9 @@ fn run(
             // Split rendering at the exact tempo boundary;
             // No browser timer drives DSP.
             for frame in output.iter_mut() {
+                if let Some(p) = &project {
+                    midi_inputs.drain(&p.graph, e);
+                }
                 for (node, q) in &mut browser {
                     let sample = q.pop_front().unwrap_or([0.; 2]);
                     let mut audio = [0.; MAX_CHANNELS];
@@ -529,6 +587,7 @@ fn run(
                         next_tempo = None;
                     }
                 }
+                let click = advance_count_in(&mut count_in, e);
                 if let Some(seq) = &mut sequencer {
                     seq.tick(e, &io);
                 }
@@ -547,6 +606,13 @@ fn run(
                     }
                 }
                 e.render(&[], std::slice::from_mut(frame));
+                for (node, route, cc) in &node_routes {
+                    for event in e.take_midi_output(node).into_iter().flatten() {
+                        if e.clock.running || (!cc && event.velocity == 0) {
+                            node_outputs.note(node, route, event, *cc);
+                        }
+                    }
+                }
                 for preview in &mut previews {
                     if preview.frames.len() < 256 {
                         preview
@@ -578,11 +644,20 @@ fn run(
                 }
 
                 for (id, pcm) in &mut monitors {
-                    pcm.extend_from_slice(&if e.clock.running {
+                    pcm.extend_from_slice(&if let Some(click) = click {
+                        [click; 2]
+                    } else if e.clock.running {
                         e.monitor_frame(id)
                     } else {
                         [0.; 2]
                     });
+                }
+                // Gate per sample, including the block crossing into playback.
+                // Hardware routing above never receives count-in clicks.
+                if let Some(click) = click {
+                    *frame = [click; MAX_CHANNELS];
+                } else if !e.clock.running {
+                    *frame = [0.; MAX_CHANNELS];
                 }
             }
 
@@ -595,16 +670,7 @@ fn run(
             });
             if media.receiver_count() > 0 {
                 if let Some(p) = &project {
-                    let raw: Vec<f32> = output
-                        .iter()
-                        .flat_map(|f| {
-                            if e.clock.running {
-                                [f[0], f[1]]
-                            } else {
-                                [0.; 2]
-                            }
-                        })
-                        .collect();
+                    let raw: Vec<f32> = output.iter().flat_map(|f| [f[0], f[1]]).collect();
                     let pcm = media_rates
                         .entry(String::new())
                         .or_insert_with(|| {
@@ -653,7 +719,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
 ));
                 }
             }
@@ -1006,4 +1072,162 @@ struct Preview {
     channels: usize,
     reply: Option<oneshot::Sender<Result<Value, String>>>,
     frames: Vec<[f32; MAX_CHANNELS]>,
+}
+
+// Shared by HTTP and OSC so pause/stop cannot leave a pending auto-start.
+#[allow(clippy::too_many_arguments)]
+fn apply_transport(
+    action: &str,
+    beats: u8,
+    beat_unit: u8,
+    engine: &mut Engine,
+    sequencer: &mut Option<crate::performance::Sequencer>,
+    count_in: &mut Option<pr0_dsp::count_in::CountIn>,
+    next_tempo: &mut Option<(f64, f64)>,
+    io: &SyncSender<crate::performance::External>,
+) {
+    match action {
+        "play" if !engine.clock.running && count_in.is_none() => {
+            // Resume directly; count only when starting from rewind.
+            *count_in = if engine.clock.beat == 0. {
+                pr0_dsp::count_in::CountIn::new(beats, beat_unit)
+            } else {
+                None
+            };
+            engine.clock.running = count_in.is_none();
+        }
+        "pause" => {
+            *count_in = None;
+            engine.reset_midi_sources();
+            if let Some(seq) = sequencer {
+                seq.pause(engine, io);
+            }
+            engine.clock.running = false;
+        }
+        "stop" => {
+            *count_in = None;
+            engine.reset_midi_sources();
+            if let Some(seq) = sequencer {
+                seq.reset(engine, io);
+            }
+            engine.clock.stop();
+            *next_tempo = None;
+        }
+        _ => {}
+    }
+}
+
+fn advance_count_in(
+    count_in: &mut Option<pr0_dsp::count_in::CountIn>,
+    engine: &mut Engine,
+) -> Option<f32> {
+    let click = count_in
+        .as_mut()
+        .and_then(|count| count.next(&engine.clock));
+    if count_in.is_some() && click.is_none() {
+        *count_in = None;
+        engine.clock.running = true;
+    }
+    click
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn changed_note_input_wiring_retires_notes_but_edge_ids_do_not() {
+        let p =
+            pr0_core::demo_project("wiring".into(), "Wiring".into(), pr0_core::Mode::Structured);
+        let target = p.graph.edges[0].target.clone();
+        let original = note_input_wiring(&p, &target);
+        let mut edited = p.clone();
+        edited.graph.edges.reverse();
+        for edge in &mut edited.graph.edges {
+            edge.id.push_str("-new");
+        }
+        assert_eq!(original, note_input_wiring(&edited, &target));
+        edited.graph.edges.retain(|edge| edge.target != target);
+        assert_ne!(original, note_input_wiring(&edited, &target));
+    }
+
+    #[test]
+    fn start_boundary_cancellation_duplicate_play_and_resume() {
+        let p = pr0_core::demo_project("count".into(), "Count".into(), pr0_core::Mode::Structured);
+        let mut e = Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let mut seq = Some(crate::performance::Sequencer::new(&p));
+        let (io, _) = sync_channel(256);
+        let mut count = None;
+        let mut tempo = None;
+        apply_transport("play", 6, 8, &mut e, &mut seq, &mut count, &mut tempo, &io);
+        // Six eighth-note beats at 120 quarter BPM: 72,000 silent transport samples.
+        for i in 0..72000 {
+            if i == 12000 {
+                apply_transport("play", 6, 8, &mut e, &mut seq, &mut count, &mut tempo, &io);
+            }
+            assert!(advance_count_in(&mut count, &mut e).is_some());
+            seq.as_mut().unwrap().tick(&mut e, &io);
+            assert_eq!(seq.as_ref().unwrap().lanes[0].next, 0);
+            assert!(!e.clock.running);
+            e.render(&[], &mut [[0.; MAX_CHANNELS]]);
+            assert_eq!(e.clock.beat, 0.);
+        }
+        assert!(advance_count_in(&mut count, &mut e).is_none());
+        assert!(e.clock.running);
+        assert_eq!(e.clock.beat, 0.);
+        seq.as_mut().unwrap().tick(&mut e, &io);
+        assert!(seq.as_ref().unwrap().lanes[0].next > 0);
+        e.render(&[], &mut [[0.; MAX_CHANNELS]]);
+        apply_transport("pause", 0, 8, &mut e, &mut seq, &mut count, &mut tempo, &io);
+        let paused = e.clock.beat;
+        apply_transport("play", 6, 8, &mut e, &mut seq, &mut count, &mut tempo, &io);
+        assert!(count.is_none() && e.clock.running);
+        assert_eq!(e.clock.beat, paused);
+        for action in ["stop", "pause"] {
+            apply_transport("stop", 0, 8, &mut e, &mut seq, &mut count, &mut tempo, &io);
+            apply_transport("play", 6, 8, &mut e, &mut seq, &mut count, &mut tempo, &io);
+            assert!(count.is_some());
+            apply_transport(action, 0, 8, &mut e, &mut seq, &mut count, &mut tempo, &io);
+            assert!(advance_count_in(&mut count, &mut e).is_none());
+            assert!(!e.clock.running);
+        }
+        apply_transport("play", 0, 8, &mut e, &mut seq, &mut count, &mut tempo, &io);
+        assert!(count.is_none() && e.clock.running);
+    }
+}
+
+fn prepare_node_routes(project: &Project) -> Vec<(String, crate::node_io::Route, bool)> {
+    project
+        .graph
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            crate::node_io::Route::from_node(n).map(|route| {
+                (
+                    n.id.clone(),
+                    route,
+                    n.kind == "midi_output" && n.parameters.get("mode") == Some(&1.),
+                )
+            })
+        })
+        .collect()
+}
+
+// Ignore edge IDs/order: only changed inlet contracts retire held external notes.
+fn note_input_wiring(project: &Project, node: &str) -> Vec<(String, String, String)> {
+    let mut inputs: Vec<_> = project
+        .graph
+        .edges
+        .iter()
+        .filter(|edge| edge.target == node)
+        .map(|edge| {
+            (
+                edge.target_port.clone(),
+                edge.source.clone(),
+                edge.source_port.clone(),
+            )
+        })
+        .collect();
+    inputs.sort();
+    inputs
 }

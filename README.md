@@ -17,6 +17,12 @@ The interactive script checks dependencies, offers installation, installs the lo
 After changing or pulling source, rebuild with `./init.sh --update`. This noninteractive command installs the locked frontend dependencies, rebuilds the frontend, and builds the release server, reusing up-to-date Cargo artifacts. Existing build tools are required. It does not pull source, alter startup configuration, or restart a running server; restart the server after a successful update.
 
 ```sh
+./init.sh --uas
+```
+
+Pulls the current branch from its configured Git upstream with `--ff-only`, runs the update build, and starts the rebuilt server in the foreground. Pull or build failures prevent startup. It supports `--host` and `--port` and reuses saved launch settings. It does not stop an already running server or change startup services.
+
+```sh
 ./init.sh --start
 ```
 

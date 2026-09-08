@@ -24,6 +24,8 @@ test('live graph editing, FM conversion, context menus and keyboard transport in
     const graphNode = (id: string) => page.locator(`.vue-flow__node[data-id="${id}"]`)
     const focusGraph = async () => { await graphNode('Carrier').locator('.patch-node').focus() }
     await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled()
+    // This 1 BPM test exercises immediate playback; count-in is covered separately.
+    await page.getByLabel('Count in', { exact: true }).selectOption('0')
     const before = commands.length
     await focusGraph()
     await page.keyboard.down('Space')

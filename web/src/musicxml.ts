@@ -1,3 +1,4 @@
+import { newId } from './id'
 import type { Part } from './types'
 
 const escape = (s: string) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
@@ -39,7 +40,7 @@ export function importMusicXML(xml: string): { parts: Part[]; warnings: string[]
   for (const element of Array.from(document.documentElement.children).filter(el => el.tagName === 'part')) {
     if (parts.length >= 32) throw new Error('At most 32 parts are supported')
     const nameElement = Array.from(document.querySelectorAll('score-part')).find(p => p.getAttribute('id') === element.getAttribute('id'))
-    const part: Part = { id: crypto.randomUUID(), name: nameElement ? text(nameElement, 'part-name', 'Imported part') : 'Imported part', performer: null, view: 'notation', clef: 'treble', key_signature: null, show_time_signature: true, notes: [], loop_beats: 4, instrument_node: null, midi_port: null, osc_destination: null, osc_address: '/pr0former/note' }
+    const part: Part = { id: newId(), name: nameElement ? text(nameElement, 'part-name', 'Imported part') : 'Imported part', performer: null, view: 'notation', clef: 'treble', key_signature: null, show_time_signature: true, notes: [], loop_beats: 4, instrument_node: null, midi_port: null, osc_destination: null, osc_address: '/pr0former/note' }
     let divisions = 1, measureStart = 0, barLength = beatsPerBar * 4 / beatUnit
     for (const measure of Array.from(element.children).filter(el => el.tagName === 'measure')) {
       let position = measureStart, furthest = measureStart, previousStart = measureStart
@@ -79,7 +80,7 @@ export function importMusicXML(xml: string): { parts: Part[]; warnings: string[]
           const base: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }
           const pitch = (octave + 1) * 12 + (base[step] ?? 0) + alter
           if (!Number.isInteger(pitch) || pitch < 0 || pitch > 127 || duration <= 0 || !Number.isFinite(duration) || beat < 0) throw new Error('Unsupported pitch or note timing')
-          part.notes.push({ id: crypto.randomUUID(), pitch, beat, duration, velocity: Math.max(0, Math.min(127, Math.round(Number(item.getAttribute('dynamics') || '71') * 127 / 100))), rest: !!item.querySelector('rest'), tied: !!item.querySelector('tie[type="start"]') })
+          part.notes.push({ id: newId(), pitch, beat, duration, velocity: Math.max(0, Math.min(127, Math.round(Number(item.getAttribute('dynamics') || '71') * 127 / 100))), rest: !!item.querySelector('rest'), tied: !!item.querySelector('tie[type="start"]') })
           if (!chord) { previousStart = position; position += duration }
           furthest = Math.max(furthest, beat + duration)
         }

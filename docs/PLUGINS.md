@@ -66,3 +66,8 @@ Route a custom mix into `monitor_output`, then choose that node under Monitor fe
 `clock_ratio` derives pulses from the project quarter-note clock. Multiply/Divide parameters (each 1–16, including fractional ratios) set cycles per quarter note; for sixteenth notes use 4/1, for one pulse every two quarters use 1/2. Outputs are Tick, fractional Phase, and completed Count. Connect Tick to a step sequencer or trigger input.
 
 The first running sample emits a tick. Pause holds phase; tempo and ratio edits preserve accumulated phase. Stop or rewind resets phase and count. The clock carries a reset generation so Stop/Play at beat zero also resets the node. Like the existing global clock, pulses are one-sample numeric controls, not typed message queues; a discontinuous position jump coalesces crossed cycles into one pulse while Count records the crossings.
+
+
+## Note-control nodes
+
+Use the numeric `pitch`, `velocity`, `gate`, `trigger`, `note_off` contract for Part MIDI, MIDI input/output, the polyphonic sampler and the two MIDI/OSC converters. A trigger/release is one sample wide with a low sample between events; read pitch and velocity on that same sample. Gate reports any held notes and does not encode individual polyphonic releases. `crates/dsp/src/midi_controls.rs` provides the bounded event source; `note_inputs.rs` decodes consumer edges. Keep MIDI callbacks, device connections and OSC encoding in `pr0-server`, outside DSP rendering. See ARCHITECTURE.md for the exact OSC wire protocol and queue/voice limits.

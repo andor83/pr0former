@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { newId } from '../id'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { Renderer, Stave, StaveNote, Voice, Formatter, Accidental, Dot, StaveTie } from 'vexflow'
 import { Plus, Trash2 } from '@lucide/vue'
@@ -31,7 +32,7 @@ function setupPart(patch: Partial<Part>) {
   if (!Number.isFinite(next.loop_beats) || next.loop_beats < 0.25 || next.loop_beats > 4096) { partError.value = 'Loop length must be between 0.25 and 4096 quarter beats.'; return }
   update(next)
 }
-function add(pitch: number, beat: number) { if (!props.editable) return; const n: Note = { id: crypto.randomUUID(), pitch, beat, duration: 1, velocity: 90, rest: false, tied: false }; selected.value = n.id; update({ ...props.part, notes: [...props.part.notes, n].sort((a, b) => a.beat - b.beat) }) }
+function add(pitch: number, beat: number) { if (!props.editable) return; const n: Note = { id: newId(), pitch, beat, duration: 1, velocity: 90, rest: false, tied: false }; selected.value = n.id; update({ ...props.part, notes: [...props.part.notes, n].sort((a, b) => a.beat - b.beat) }) }
 function gridClick(event: MouseEvent, pitch: number) { const rect = (event.currentTarget as HTMLElement).getBoundingClientRect(); add(pitch, Math.floor(((event.clientX - rect.left) / rect.width * props.part.loop_beats) * 4) / 4) }
 function edit(key: keyof Note, value: number | boolean) { if (!note.value) return; update({ ...props.part, notes: props.part.notes.map(n => n.id === selected.value ? { ...n, [key]: value } : n) }) }
 function remove() { update({ ...props.part, notes: props.part.notes.filter(n => n.id !== selected.value) }); selected.value = null }

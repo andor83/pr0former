@@ -138,7 +138,7 @@ pub async fn save(
     let assets: BTreeSet<u32> = graph
         .nodes
         .iter()
-        .filter(|n| matches!(n.kind.as_str(), "sample" | "phase_vocoder"))
+        .filter(|n| matches!(n.kind.as_str(), "sample" | "phase_vocoder" | "poly_sampler"))
         .filter_map(|n| n.parameters.get("asset"))
         .map(|v| *v as u32)
         .filter(|v| *v != 0)
@@ -272,6 +272,8 @@ pub async fn insert(
         .map(|n| n.id.clone())
         .collect();
     for n in &mut graph.nodes {
+        // Library copies cannot inherit a source part from another performance.
+        n.part_id = None;
         if n.id == root {
             n.parent = c.parent.clone();
             n.x = c.x;
@@ -329,7 +331,7 @@ pub async fn insert(
             use tokio::io::AsyncWriteExt;
             file.write_all(&bytes).await.map_err(internal)?;
             for n in &mut graph.nodes {
-                if matches!(n.kind.as_str(), "sample" | "phase_vocoder")
+                if matches!(n.kind.as_str(), "sample" | "phase_vocoder" | "poly_sampler")
                     && n.parameters.get("asset").copied() == Some(old as f64)
                 {
                     n.parameters.insert("asset".into(), asset as f64);

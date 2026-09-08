@@ -15,6 +15,7 @@ test('spectral math and drawn curves modify live frames and persist through undo
   let latest: any
   page.on('websocket', socket => socket.on('framereceived', ({ payload }) => { const m = JSON.parse(String(payload)); if (m.type === 'telemetry') latest = m }))
   await page.goto('/')
+  await page.getByLabel('Count in', { exact: true }).selectOption('0')
   await page.getByRole('button', { name: 'Play', exact: true }).click()
   await expect.poll(() => latest?.visualizations?.spectral_visualizer?.channels?.[0]?.magnitude[4]).toBeGreaterThan(10)
   await page.getByRole('button', { name: 'Edit spectral_math', exact: true }).click()

@@ -51,6 +51,8 @@ test('private/public library permissions, immutable versions, forks and bundled 
 })
 
 test('library panel save, version selection, drag placement and multiple-node selection',async({page})=>{
+  // LAN HTTP exposes getRandomValues but may not expose randomUUID.
+  await page.addInitScript(() => Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: undefined }))
   const headers={'X-Pr0former':'1'}, status=await(await page.request.get('/api/status')).json()
   await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
   let p=await(await page.request.post('/api/projects',{headers,data:{name:'Library UI',mode:'freeform'}})).json()
@@ -115,4 +117,13 @@ test('library panel save, version selection, drag placement and multiple-node se
   await a.locator('.patch-node').focus()
   await page.keyboard.press('Backspace')
   await expect.poll(async()=>(await load()).graph.nodes.length).toBe(0)
+  await page.getByLabel('Search nodes').fill('Value')
+  await page.locator('.library-node').filter({hasText:'Value'}).first().click()
+  await expect.poll(async()=>(await load()).graph.nodes.length).toBe(1)
+  await expect(page.locator('.library-node').first()).toBeEnabled()
+  const malformed = await page.evaluateHandle(() => { const data = new DataTransfer(); data.setData('application/pr0former', '{broken'); return data })
+  await canvas.locator('.vue-flow').dispatchEvent('drop', { dataTransfer: malformed })
+  await expect(page.getByRole('alert')).toContainText('Invalid library drag data')
+  expect((await load()).graph.nodes.length).toBe(1)
+
 })
