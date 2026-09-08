@@ -4,14 +4,14 @@ import { VueFlow, useVueFlow, SelectionMode } from '@vue-flow/core'
 import type { Connection, Node as FlowNode, Edge as FlowEdge } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
-import { Activity, AudioLines, ChevronDown, ChevronRight, Disc3, FolderOpen, Headphones, LayoutGrid, LogOut, Maximize, Music2, Network, Pause, Play, Plus, Radio, Search, Settings, Settings2, Square, Users, X, Download, Upload, Undo2 } from '@lucide/vue'
+import { Activity, AudioLines, ChevronDown, ChevronRight, Disc3, FolderOpen, Headphones, LayoutGrid, LogOut, Maximize, Music2, Network, Pause, Play, Plus, Radio, Search, Settings, Settings2, Square, Users, X, Download, Upload, Undo2, Save } from '@lucide/vue'
 import SubgraphLibrary from './components/SubgraphLibrary.vue'
 import SaveSubgraphDialog from './components/SaveSubgraphDialog.vue'
 import PatchNode from './components/PatchNode.vue'
 import SignalEdge from './components/SignalEdge.vue'
 import NodeModal from './components/NodeModal.vue'
 const ScoreEditor = defineAsyncComponent(() => import('./components/ScoreEditor.vue'))
-import MonitorPanel from './components/MonitorPanel.vue'
+import MonitorWorkspace from './components/MonitorWorkspace.vue'
 import StageView from './components/StageView.vue'
 import ProjectSettings from './components/ProjectSettings.vue'
 import SystemSettings from './components/SystemSettings.vue'
@@ -43,6 +43,35 @@ const telemetry = shallowRef<Telemetry | null>(null), receivedAt = ref(0), now =
 const tempoSource = computed(() => project.value?.graph.edges.find(e => e.target_port === 'tempo' && project.value?.graph.nodes.some(n => n.id === e.target && n.kind === 'clock')))
 const activeId = ref<string | null>(null), bpmDraft = ref(120), saving = ref(false), fullscreen = ref(false)
 const devices = ref<any>(null), inviteLink = ref(''), inviteRole = ref('performer')
+type SaveStatus = {revision:number;change_revision:number;dirty:boolean}
+const savedRevision = ref<SaveStatus | null>(null), checkpointBusy = ref(false)
+const saveRequested = ref<string | null>(null)
+const unsaved = computed(() => !!project.value && (!savedRevision.value || project.value.revision > savedRevision.value.change_revision || parameterPending.value || saving.value))
+function acceptSaveStatus(id: string, saved: SaveStatus) {
+  if (project.value?.id === id && (!savedRevision.value || saved.change_revision >= savedRevision.value.change_revision)) savedRevision.value = saved
+}
+watch(() => project.value?.id, () => { savedRevision.value = null; saveRequested.value = null })
+function requestSave() {
+  if (!project.value || !editable.value || checkpointBusy.value) return
+  saveRequested.value = project.value.id
+  void flushManualSave()
+}
+async function flushManualSave() {
+  const id = saveRequested.value
+  if (!id || checkpointBusy.value || saving.value || parameterFlush || controlsBusy) return
+  if (project.value?.id !== id || !editable.value) { saveRequested.value = null; return }
+  if (queuedParameters.size) { clearTimeout(saveTimer); await flushParameters(); return }
+  if (pendingControls.size) { await flushControls(); return }
+  if (parameterPending.value) return
+  saveRequested.value = null; checkpointBusy.value = true
+  try {
+    const saved = await api<SaveStatus>(`/projects/${id}/save`, 'POST', {})
+    acceptSaveStatus(id, saved)
+    if (project.value?.id === id) notice.value = `Revision ${saved.revision} saved`
+  } catch (e) { report(e) }
+  finally { checkpointBusy.value = false }
+}
+
 const libraryPanel = ref<InstanceType<typeof SubgraphLibrary>>(), savingSubgraph = ref<string | null>(null)
 const nodeMenu = ref<{ id: string; ids: string[]; x: number; y: number } | null>(null)
 let menuOrigin: HTMLElement | null = null
@@ -158,6 +187,7 @@ function connect(id: string) {
   currentSocket.onmessage = event => {
     if (socket !== currentSocket || project.value?.id !== id) return
     const message = JSON.parse(event.data)
+    if(message.type==='project_save') acceptSaveStatus(id, message.save)
     if(message.type==='audio_engine_status'){engineEnabled.value=message.enabled;audioSettings.value.sample_rate=message.sample_rate;audioSettings.value.block_size=message.block_size}
     if(message.type==='system_audio'){audioSettings.value=message.settings}
     if (message.type === 'pong') { const rtt = performance.now() - message.client_time; if (rtt < bestRtt) { bestRtt = rtt; offset = message.server_time - (message.client_time + rtt / 2) } }
@@ -191,7 +221,7 @@ async function saveProject(next: Project, record = true) {
   const previous = clone(project.value)
   saving.value = true
   try { const saved = await api<Project>(`/projects/${next.id}`, 'PUT', next); if (record) undo.value = [...undo.value.slice(-49), previous]; if (project.value?.id === saved.id && saved.revision >= project.value.revision) project.value = saved }
-  catch (e) { report(e); const latest = await api<{ project: Project }>(`/projects/${next.id}`); if (project.value?.id === latest.project.id && latest.project.revision >= project.value.revision) project.value = latest.project }
+  catch (e) { saveRequested.value = null; report(e); const latest = await api<{ project: Project }>(`/projects/${next.id}`); if (project.value?.id === latest.project.id && latest.project.revision >= project.value.revision) project.value = latest.project }
   finally { saving.value = false }
 }
 function addNode(d: Descriptor, placement?: {x:number;y:number}) {
@@ -270,8 +300,8 @@ function editParameter(key: string, value: number) {
 async function flushParameters() {
   if (parameterFlush || !project.value) return
   parameterFlush = true; saving.value = true
-  try { while (queuedParameters.size && project.value) { const [id, value] = queuedParameters.entries().next().value!; queuedParameters.delete(id); project.value = await api<Project>(`/projects/${project.value.id}/parameter`, 'PUT', { ...value, revision: project.value.revision }) } }
-  catch (e) { queuedParameters.clear(); report(e); if (project.value) { const p = await api<{ project: Project }>(`/projects/${project.value.id}`); project.value = p.project } }
+  try { while (queuedParameters.size && project.value) { const [id, value] = queuedParameters.entries().next().value!; queuedParameters.delete(id); const saved: Project = await api<Project>(`/projects/${project.value.id}/parameter`, 'PUT', { ...value, revision: project.value.revision }); if (project.value?.id === saved.id && saved.revision >= project.value.revision) project.value = saved } }
+  catch (e) { saveRequested.value = null; queuedParameters.clear(); report(e); if (project.value) { const p = await api<{ project: Project }>(`/projects/${project.value.id}`); if (project.value?.id === p.project.id && p.project.revision >= project.value.revision) project.value = p.project } }
   finally { parameterFlush = false; saving.value = false; parameterPending.value = false }
 }
 async function undoEdit() {
@@ -313,9 +343,10 @@ async function flushControls(){
       const saved:Project=await api<Project>(`/projects/${project.value.id}/control`,'PUT',{node,value,revision:project.value.revision})
       if(project.value?.id===saved.id&&saved.revision>=project.value.revision)project.value=saved
     }
-  }catch(e){pendingControls.clear();report(e)}finally{saving.value=false;parameterPending.value=false;controlsBusy=false}
+  }catch(e){saveRequested.value=null;pendingControls.clear();report(e)}finally{saving.value=false;parameterPending.value=false;controlsBusy=false}
 }
 watch(saving,value=>{if(!value)void flushControls()})
+watch([saving, parameterPending], () => { if (saveRequested.value) void flushManualSave() })
 watch(()=>project.value?.id,()=>pendingControls.clear())
 async function bangControl(node:string){if(!project.value||!editable.value||!active.value||saving.value)return;await task(async()=>{await api(`/projects/${project.value!.id}/control`,'PUT',{node,revision:project.value!.revision})})}
 function controlValue(value:number|string){if(!project.value||!selected.value||!graphEditable.value)return;const next=clone(project.value);next.graph.nodes.find(n=>n.id===selected.value!.id)!.control_value=value;void task(()=>saveProject(next))}
@@ -413,6 +444,15 @@ async function togglePlayback() {
   } finally { transportBusy.value = false }
 }
 function keydown(event: KeyboardEvent) {
+  // Saving remains available while a node modal or text field has focus.
+  if (!event.isComposing && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's' && project.value) {
+    event.preventDefault(); event.stopPropagation()
+    if (!event.repeat) {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) event.target.blur()
+      requestSave()
+    }
+    return
+  }
   if (event.key === 'Escape') pendingPort.value = null
   if (event.defaultPrevented || event.isComposing || nodeMenu.value || savingSubgraph.value || selectedNode.value || creating.value || settingsOpen.value || systemOpen.value || consoleOpen.value || gearOpen.value || progress.value || consoleProject) return
   if (event.target instanceof Element && event.target.closest('dialog,input,textarea,select,[contenteditable]:not([contenteditable="false"]),button,a,[role="button"]:not(.vue-flow__node)')) return
@@ -445,7 +485,7 @@ onBeforeUnmount(() => { cancelAnimationFrame(frame); clearInterval(ping); clearT
     <div v-if="error" class="error-banner" role="alert">{{ error }}<button class="icon-button" aria-label="Dismiss error" @click="error = ''"><X :size="16" /></button></div>
     <main v-if="!user" class="welcome"><div class="welcome-copy"><div class="eyebrow"><span class="tiny-dot"></span> A SHARED SPACE FOR SOUND</div><h1>Compose the system.<br><em>Perform the unexpected.</em></h1><p>Scores, signals, and people.<br>One connected performance instrument.</p><div class="welcome-patch"><div class="mini-node amber">◷<small>CLOCK</small></div><span class="mini-wire"></span><div class="mini-node amber">×<small>MULTIPLY</small></div><span class="mini-wire cyan"></span><div class="mini-node cyan">∿<small>SOUND</small></div></div><span class="welcome-caption">BUILT FOR THE ROOM. OPEN TO POSSIBILITY.</span></div><form class="auth-card" @submit.prevent="authenticate"><div class="eyebrow">{{ bootstrap ? 'FIRST-TIME SETUP' : invitation ? 'YOU’RE INVITED' : 'WELCOME BACK' }}</div><h2>{{ bootstrap ? 'Create your first account' : registering ? 'Join the ensemble' : 'Enter your workspace' }}</h2><p>{{ bootstrap ? 'Your projects and audio stay on this server.' : 'Sign in to compose, connect, and perform.' }}</p><label>Username<input v-model="username" autocomplete="username" minlength="3" maxlength="64" required placeholder="Your username"></label><label>Password<input v-model="password" type="password" :autocomplete="registering || bootstrap ? 'new-password' : 'current-password'" required :minlength="registering || bootstrap ? 8 : 1" placeholder="Your password"></label><button class="button primary wide" :disabled="busy">{{ busy ? 'Connecting…' : bootstrap || registering ? 'Create account' : 'Sign in' }}<ChevronRight :size="17" /></button><button v-if="invitation && !bootstrap" type="button" class="text-button" @click="registering = !registering">{{ registering ? 'Already have an account? Sign in' : 'New here? Create an account' }}</button><div class="auth-footer"><Radio :size="14" /> Connect on the same physical network.</div></form></main>
     <template v-else>
-      <div v-show="!stage" class="workspace-header"><div class="project-heading"><button class="project-icon" @click="projectPicker = !projectPicker" aria-label="Choose project"><FolderOpen :size="21" /></button><div><div class="eyebrow">PERFORMANCE / {{ project?.mode || 'NEW PROJECT' }}</div><button class="project-title" @click="projectPicker = !projectPicker">{{ project?.name || 'Your workspace' }}<ChevronDown :size="16" /></button></div><span v-if="project" class="mode-pill">{{ active ? 'ACTIVE SHOW' : 'PREPARATION' }}</span></div><div class="workspace-actions"><button v-if="project" class="button small" @click="enterStage">Performance mode</button><span v-if="project" class="revision">{{ saving ? 'Saving…' : `Revision ${project.revision}` }}</span><button class="button small" @click="tab = 'ensemble'"><Users :size="15" /> Ensemble <span class="count-badge">{{ members.length }}</span></button></div></div>
+      <div v-show="!stage" class="workspace-header"><div class="project-heading"><button class="project-icon" @click="projectPicker = !projectPicker" aria-label="Choose project"><FolderOpen :size="21" /></button><div><div class="eyebrow">PERFORMANCE / {{ project?.mode || 'NEW PROJECT' }}</div><button class="project-title" @click="projectPicker = !projectPicker">{{ project?.name || 'Your workspace' }}<ChevronDown :size="16" /></button><span v-if="project" class="revision" role="status">{{ checkpointBusy ? 'Saving revision…' : savedRevision ? `Revision ${savedRevision.revision}${unsaved ? ' · Unsaved changes' : ' · Saved'}` : 'Loading revision…' }}</span></div><span v-if="project" class="mode-pill">{{ active ? 'ACTIVE SHOW' : 'PREPARATION' }}</span></div><div class="workspace-actions"><button v-if="project" class="button small" @click="enterStage">Performance mode</button><button v-if="project && editable" class="button small" :disabled="checkpointBusy" title="Save revision (Cmd/Ctrl+S) · Autosave every minute" @click="requestSave"><Save :size="15" />Save revision</button></div></div>
       <div v-if="projectPicker" class="project-popover"><div class="eyebrow">PROJECTS</div><button v-for="p in summaries" :key="p.id" @click="task(() => openProject(p.id))"><span>{{ p.name }}</span><small>{{ p.mode }}</small></button><button @click="creating = true; projectPicker = false"><Plus :size="16" /> New project</button></div>
       <div v-if="project" v-show="!stage" class="workspace-tabs"><nav><button :class="{ active: tab === 'graph' }" @click="tab = 'graph'"><Network :size="16" /> Signal graph</button><button :class="{ active: tab === 'score' }" @click="tab = 'score'"><Music2 :size="16" /> Score & parts</button><button :class="{ active: tab === 'ensemble' }" @click="tab = 'ensemble'"><Users :size="16" /> Ensemble</button><button :class="{ active: tab === 'monitor' }" @click="tab = 'monitor'"><Headphones :size="16" /> Monitor</button></nav><div class="graph-legend"><span><i class="legend-audio"></i>Audio</span><span><i class="legend-control"></i>Control</span><span><i class="legend-spectral"></i>Spectral</span></div></div>
       <StageView v-if="project && stage" :project="project" :part="part" :beat="partBeat" :meter-beat="meterBeat" :bpm="active && telemetry ? telemetry.bpm : project.bpm" :active="active" :stale="stale" :running="running" :status="partStatus" :can-launch="canLaunchPart" :monitor-open="stageMonitor" @select="selectedPart = $event" @launch="playing => task(() => launchPart(playing))" @exit="stage = false; fullscreen = false" @fullscreen="task(toggleFullscreen)" @monitor="stageMonitor = !stageMonitor" />
@@ -455,9 +495,8 @@ onBeforeUnmount(() => { cancelAnimationFrame(frame); clearInterval(ping); clearT
       </div>
       <div v-else-if="project && tab === 'score'" class="content-pane"><div class="part-tabs"><button v-for="p in project.parts" :key="p.id" :class="{ active: part?.id === p.id }" @click="selectedPart = p.id"><Music2 :size="15" />{{ p.name }}</button><button v-if="editable" :disabled="active || saving || project.parts.length >= 32" @click="addPart"><Plus :size="14" /> Add part</button></div><div class="score-actions"><button class="button small" @click="downloadXML"><Download :size="14" /> MusicXML</button><label class="button small">Import MusicXML<input type="file" accept=".xml,.musicxml" style="display:none" :disabled="active || !editable" @change="uploadXML"></label><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(true))"><Play :size="14" /> Launch part</button><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(false))"><Square :size="14" /> Stop part</button><output class="mode-pill" aria-label="Part playback status">{{ partStatus }}</output></div><div v-if="part && editable" class="part-routing"><label>Performer<select :value="part.performer || ''" :disabled="active" @change="updatePart({ ...part!, performer: ($event.target as HTMLSelectElement).value || null })"><option value="">Unassigned</option><option v-for="m in members" :key="m.id" :value="m.id">{{ m.username }}</option></select></label><label>Instrument / input<select :value="part.instrument_node || ''" :disabled="active" @change="updatePart({ ...part!, instrument_node: ($event.target as HTMLSelectElement).value || null })"><option value="">Acoustic / external only</option><option v-for="n in project.graph.nodes.filter(n => ['synth', 'browser_input', 'input'].includes(n.kind))" :key="n.id" :value="n.id">{{ n.label }}</option></select></label></div><ScoreEditor v-if="part" :part="part" :beat="partBeat" :editable="editable && !active && !saving" :beats-per-bar="project.beats_per_bar" :beat-unit="project.beat_unit || 4" @update="updatePart" @meter="updateMeter" /><p class="feature-note">Notation and piano roll edit the same notes. MusicXML import reports unsupported notation before replacing the score. Advanced engraving remains in development.</p></div>
       <div v-else-if="project && tab === 'ensemble'" class="content-pane"><div class="section-heading"><div><div class="eyebrow">PEOPLE IN THE PERFORMANCE</div><h2>Your ensemble</h2></div><span class="mode-pill">{{ members.length }} / 32 PLAYERS</span></div><div class="member-grid"><article v-for="m in members" :key="m.id" class="member-card"><span class="avatar">{{ m.username.slice(0, 2).toUpperCase() }}</span><div><h3>{{ m.username }}</h3><span>{{ m.role }}</span></div></article></div><section v-if="role === 'owner'" class="invite-panel"><h3>Invite a collaborator</h3><p>Create a single-use link valid for seven days.</p><div class="invite-controls"><select v-model="inviteRole"><option value="performer">Performer</option><option value="editor">Editor</option><option value="conductor">Conductor</option></select><button class="button primary" @click="task(invite)"><Plus :size="15" /> Create invitation</button></div><input v-if="inviteLink" :value="inviteLink" readonly aria-label="Invitation link" @focus="($event.target as HTMLInputElement).select()"></section></div>
-      <div v-else-if="project && tab === 'monitor'" class="content-pane"><div class="section-heading"><div><div class="eyebrow">LISTENING & TIMING</div><h2>Performance monitor</h2></div><Headphones :size="32" /></div><div class="monitor-cards"><article><Activity :size="22" /><h3>Clock synchronization</h3><strong>{{ stale ? 'Waiting for engine' : `${Math.round(now - receivedAt)} ms` }}</strong><p>{{ stale ? 'Activate the show to receive engine timing.' : 'Age of the latest engine snapshot. The score interpolates locally.' }}</p></article><article><AudioLines :size="22" /><h3>Server audio output</h3><strong>{{ telemetry?.hardware_enabled ? 'Enabled' : 'Muted' }}</strong><p>Select outputs in System settings and enable the audio engine in the footer. Start at a low listening level.</p></article><article><Headphones :size="22" /><h3>Browser monitor feed</h3><strong>WebRTC / Opus</strong><p>Connect below for the master stereo monitor and optional microphone uplink.</p></article></div></div>
-      <div v-else class="empty-workspace"><Music2 :size="40" /><h2>A new space for your ensemble.</h2><button class="button primary" @click="creating = true"><Plus :size="16" /> Create a project</button></div>
-      <div v-if="project" v-show="stage ? stageMonitor : tab === 'monitor'" class="monitor-dock"><MonitorPanel :key="project.id" :project-id="project.id" :active="active" :nodes="project.graph.nodes" /></div>
+      <div v-else-if="!project" class="empty-workspace"><Music2 :size="40" /><h2>A new space for your ensemble.</h2><button class="button primary" @click="creating = true"><Plus :size="16" /> Create a project</button></div>
+      <MonitorWorkspace v-if="project" v-show="stage ? stageMonitor : tab === 'monitor'" :key="project.id" :project-id="project.id" :active="active" :nodes="project.graph.nodes" :telemetry="telemetry" :stale="stale" :age="now-receivedAt" :sample-rate="audioSettings.sample_rate" :block-size="audioSettings.block_size" :visible="stage ? stageMonitor : tab === 'monitor'" :stage="stage" />
       <footer v-if="project" class="transport-bar"><div class="transport-controls"><button class="icon-button stop-button" :disabled="!active || !conductor" aria-label="Stop" @click="task(() => transport('stop'))"><Square :size="16" fill="currentColor" /></button><button class="play-button" :disabled="!conductor || transportBusy || !!progress" :aria-label="running ? 'Pause' : 'Play'" title="Space: activate and play / pause" @click="task(togglePlayback)"><Pause v-if="running" :size="19" fill="currentColor" /><Play v-else :size="19" fill="currentColor" /></button><div class="position-display"><strong>{{ String(Math.floor(meterBeat / project.beats_per_bar) + 1).padStart(3, '0') }}<span>:</span>{{ String(Math.floor(meterBeat % project.beats_per_bar) + 1).padStart(2, '0') }}</strong><small>BAR · BEAT</small></div></div><div class="tempo-control"><label for="tempo">TEMPO</label><input id="tempo" v-model.number="bpmDraft" type="number" min="1" max="400" :disabled="!active || !conductor || !!tempoSource" :title="tempoSource ? 'Driven by ' + (project.graph.nodes.find(n=>n.id===tempoSource?.source)?.label || tempoSource.source) : 'Project tempo'" @change="task(() => transport('tempo'))"><span title="Quarter notes per minute">♩ BPM</span><div class="beat-lights"><i v-for="b in project.beats_per_bar" :key="b" :class="{ lit: running && Math.floor(meterBeat % project.beats_per_bar) === b - 1 }"></i></div></div><div class="transport-right"><span class="engine-label"><span class="status-dot" :class="{ live: active && !stale }"></span>{{ active ? stale ? 'ENGINE STALE' : 'ENGINE RUNNING' : 'ENGINE IDLE' }}<small>{{ audioSettings.sample_rate / 1000 }} kHz · {{ audioSettings.block_size }}-frame DSP blocks</small></span><button class="button" :disabled="!conductor||active||!!progress" @click="task(toggleEngine)">{{ engineEnabled ? 'Audio engine enabled' : 'Enable audio engine' }}</button><button class="button" :class="{ primary: !active }" :disabled="!conductor||!!progress" @click="task(() => transport(active ? 'deactivate' : 'activate'))">{{ active ? 'Deactivate show' : 'Activate show' }}</button></div></footer>
     </template>
     <div v-if="nodeMenu" class="node-context-menu" role="menu" aria-label="Node actions" :style="{ left: `${nodeMenu.x}px`, top: `${nodeMenu.y}px` }" @keydown="nodeMenuKey">

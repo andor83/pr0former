@@ -8,7 +8,9 @@ mod sequence;
 mod spectral;
 pub mod stretch;
 mod visualizer;
-use pr0_core::{Graph, MAX_CHANNELS, catalog};
+use pr0_core::{
+    DEVICE_ROUTE_KEYS, Graph, MAX_CHANNELS, MAX_DEVICE_CHANNELS, catalog, device_channel,
+};
 use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
 
@@ -139,8 +141,10 @@ struct RuntimeNode {
     fallback: visualizer::Datum,
     analyzer: Option<Box<visualizer::Analyzer>>,
     voices: [Voice; 64],
-    external: [f32; MAX_CHANNELS],
+    external: [f32; MAX_DEVICE_CHANNELS],
     external_set: bool,
+    io_peak: f64,
+    io_meter: bool,
     bang: bool,
     phase: f64,
     previous: f64,
@@ -160,6 +164,15 @@ struct RuntimeNode {
     reverb: Vec<[f64; 8]>,
 }
 impl RuntimeNode {
+    fn device_frame(&self) -> [f32; MAX_DEVICE_CHANNELS] {
+        let mut frame = [0.; MAX_DEVICE_CHANNELS];
+        for (ch, key) in DEVICE_ROUTE_KEYS.iter().enumerate().take(self.channels) {
+            if let Some(destination) = device_channel(self.p(key), ch, 0) {
+                frame[destination] += self.output[ch] as f32;
+            }
+        }
+        frame
+    }
     fn p(&self, name: &str) -> f64 {
         self.names
             .iter()
@@ -327,13 +340,16 @@ impl RuntimeNode {
             }
             "input" => {
                 let offset = self.p("offset") as usize;
-                let hardware = if self.external_set || self.p("interface") != 0. {
+                let hardware: &[f32] = if self.external_set || self.p("interface") != 0. {
                     &self.external
                 } else {
                     hardware
                 };
-                for (ch, out) in self.output[..self.channels].iter_mut().enumerate() {
-                    *out = hardware.get(ch + offset).copied().unwrap_or(0.) as f64;
+                for (ch, key) in DEVICE_ROUTE_KEYS.iter().enumerate().take(self.channels) {
+                    self.output[ch] = device_channel(self.p(key), ch, offset)
+                        .and_then(|index| hardware.get(index))
+                        .copied()
+                        .unwrap_or(0.) as f64;
                 }
             }
             "oscillator" => {
@@ -743,8 +759,13 @@ impl Engine {
                     None
                 },
                 voices: [Voice::default(); 64],
-                external: [0.; MAX_CHANNELS],
+                external: [0.; MAX_DEVICE_CHANNELS],
                 external_set: false,
+                io_peak: 0.,
+                io_meter: matches!(
+                    n.kind.as_str(),
+                    "input" | "browser_input" | "output" | "monitor_output"
+                ),
                 bang: false,
                 phase: 0.,
                 previous: -1.,
@@ -1023,7 +1044,21 @@ impl Engine {
             })
             .unwrap_or([0.; 2])
     }
+    /// Apply native output routing after gain; destinations sum without normalization.
+    pub fn device_output_frame(&self, id: &str) -> [f32; MAX_DEVICE_CHANNELS] {
+        self.nodes
+            .iter()
+            .find(|n| n.id == id && n.kind == "output")
+            .map(|n| n.device_frame())
+            .unwrap_or([0.; MAX_DEVICE_CHANNELS])
+    }
+
     pub fn external(&mut self, node: &str, sample: [f32; MAX_CHANNELS]) {
+        let mut physical = [0.; MAX_DEVICE_CHANNELS];
+        physical[..MAX_CHANNELS].copy_from_slice(&sample);
+        self.device_input(node, physical);
+    }
+    pub fn device_input(&mut self, node: &str, sample: [f32; MAX_DEVICE_CHANNELS]) {
         if let Some(n) = self
             .nodes
             .iter_mut()
@@ -1173,6 +1208,24 @@ impl Engine {
                     }
                 }
                 self.nodes[idx].process(&self.clock, &hardware);
+                let node = &mut self.nodes[idx];
+                if node.io_meter {
+                    let peak = match node.kind.as_str() {
+                        "output" if self.clock.running => node
+                            .device_frame()
+                            .iter()
+                            .fold(0_f64, |m, v| m.max(v.abs() as f64)),
+                        "monitor_output" if self.clock.running => node.output
+                            [..node.channels.min(2)]
+                            .iter()
+                            .fold(0_f64, |m, v| m.max(v.abs())),
+                        "input" | "browser_input" => node.output[..node.channels]
+                            .iter()
+                            .fold(0_f64, |m, v| m.max(v.abs())),
+                        _ => 0.,
+                    };
+                    node.io_peak = node.io_peak.max(peak);
+                }
                 if self.nodes[idx].kind == "output" {
                     for (ch, sample) in out.iter_mut().enumerate() {
                         *sample += self.nodes[idx].output[ch] as f32;
@@ -1228,6 +1281,17 @@ impl Engine {
                     _ => return None,
                 };
                 Some((node.id.clone(), value))
+            })
+            .collect()
+    }
+    /// Drain sample peaks once per telemetry interval, outside render.
+    pub fn io_levels(&mut self) -> BTreeMap<String, f64> {
+        self.nodes
+            .iter_mut()
+            .filter(|n| n.io_meter)
+            .map(|n| {
+                let peak = std::mem::take(&mut n.io_peak);
+                (n.id.clone(), peak)
             })
             .collect()
     }
@@ -1528,6 +1592,142 @@ mod tests {
         edge.target = "second-clock".into();
         p.graph.edges.push(edge);
         assert!(p.graph.validate().unwrap_err().contains("Only one"));
+    }
+
+    #[test]
+    fn io_meters_capture_short_peaks_routed_sums_and_ignore_paused_outputs() {
+        let mut p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        p.graph.nodes.retain(|n| n.id == "tone" || n.id == "out");
+        p.graph.edges = vec![pr0_core::Edge {
+            id: "io".into(),
+            source: "tone".into(),
+            source_port: "out".into(),
+            target: "out".into(),
+            target_port: "in".into(),
+        }];
+        let input = p.graph.nodes.iter_mut().find(|n| n.id == "tone").unwrap();
+        input.kind = "input".into();
+        input.parameters.clear();
+        let output = p.graph.nodes.iter_mut().find(|n| n.id == "out").unwrap();
+        output.parameters = [
+            ("gain".into(), 0.),
+            ("route_1".into(), 1.),
+            ("route_2".into(), 1.),
+        ]
+        .into();
+        let mut engine = Engine::prepare(p.graph, 48000.).unwrap();
+        engine.clock.running = true;
+        engine.render(&[], &mut vec![[0.; 8]; 4800]);
+        engine.io_levels();
+        engine.external("tone", [0.75; 8]);
+        engine.render(&[], &mut [[0.; 8]; 1]);
+        engine.external("tone", [0.; 8]);
+        engine.render(&[], &mut [[0.; 8]; 1]);
+        let levels = engine.io_levels();
+        assert_eq!(levels["tone"], 0.75);
+        assert_eq!(levels["out"], 1.5);
+        assert_eq!(engine.telemetry()["out"]["_peak"], 0.);
+        assert!(engine.io_levels().values().all(|v| *v == 0.));
+        engine.clock.running = false;
+        engine.external("tone", [0.5; 8]);
+        engine.render(&[], &mut [[0.; 8]; 1]);
+        let levels = engine.io_levels();
+        assert_eq!(levels["tone"], 0.5);
+        assert_eq!(levels["out"], 0.);
+    }
+
+    #[test]
+    fn physical_routes_select_duplicate_mute_and_mix_channels() {
+        let p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        let mut input = p.graph.nodes[0].clone();
+        input.id = "physical-in".into();
+        input.kind = "input".into();
+        input.channels = 8;
+        input.parameters = [
+            ("route_1".into(), 64.),
+            ("route_2".into(), 9.),
+            ("route_3".into(), 9.),
+            ("route_4".into(), 0.),
+        ]
+        .into();
+        let mut output = input.clone();
+        output.id = "physical-out".into();
+        output.kind = "output".into();
+        output.parameters = [
+            ("gain".into(), 0.),
+            ("route_1".into(), 1.),
+            ("route_2".into(), 1.),
+            ("route_3".into(), 64.),
+            ("route_4".into(), 0.),
+        ]
+        .into();
+        let mut graph = pr0_core::Graph {
+            nodes: vec![input, output],
+            edges: vec![pr0_core::Edge {
+                id: "wire".into(),
+                source: "physical-in".into(),
+                source_port: "out".into(),
+                target: "physical-out".into(),
+                target_port: "in".into(),
+            }],
+        };
+        for invalid in [-2., 0.5, 65., f64::NAN] {
+            graph.nodes[0].parameters.insert("route_1".into(), invalid);
+            assert!(graph.validate().is_err());
+        }
+        graph.nodes[0].parameters.insert("route_1".into(), 64.);
+        let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
+        e.clock.running = true;
+        let mut physical = [0.; MAX_DEVICE_CHANNELS];
+        physical[63] = 0.25;
+        physical[8] = 0.5;
+        physical[3] = 1.;
+        physical[4] = 0.125;
+        e.device_input("physical-in", physical);
+        // Allow the existing 5 ms output-gain smoothing to settle.
+        e.render(&[], &mut vec![[0.; 8]; 4800]);
+        assert_eq!(
+            e.audio_frame("physical-in", "out"),
+            [0.25, 0.5, 0.5, 0., 0.125, 0., 0., 0.]
+        );
+        let routed = e.device_output_frame("physical-out");
+        assert_eq!(routed[0], 0.75);
+        assert_eq!(routed[63], 0.5);
+        assert_eq!(routed[4], 0.125);
+        assert_eq!(routed.iter().filter(|v| **v != 0.).count(), 3);
+        // An eight-channel full-scale bundle downmixes into exactly two channels.
+        graph.nodes[0].parameters.clear();
+        for (i, key) in DEVICE_ROUTE_KEYS.iter().enumerate() {
+            graph.nodes[1]
+                .parameters
+                .insert((*key).into(), (i % 2 + 1) as f64);
+        }
+        graph.nodes[1]
+            .parameters
+            .insert("gain".into(), -20. * 4_f64.log10());
+        let mut stereo = Engine::prepare(graph.clone(), 48000.).unwrap();
+        stereo.clock.running = true;
+        stereo.external("physical-in", [1.; 8]);
+        stereo.render(&[], &mut vec![[0.; 8]; 4800]);
+        let frame = stereo.device_output_frame("physical-out");
+        assert!((frame[0] - 1.).abs() < 1e-6 && (frame[1] - 1.).abs() < 1e-6);
+        assert!(frame[2..].iter().all(|v| *v == 0.));
+        // Live replacement preserves the new mapping rather than copying old destinations.
+        for key in DEVICE_ROUTE_KEYS {
+            graph.nodes[1].parameters.insert(key.into(), 0.);
+        }
+        let mut muted = Engine::prepare(graph, 48000.).unwrap();
+        muted.carry_node_state(&mut stereo);
+        muted.external("physical-in", [1.; 8]);
+        muted.render(&[], &mut [[0.; 8]; 1]);
+        assert_eq!(
+            muted.device_output_frame("physical-out"),
+            [0.; MAX_DEVICE_CHANNELS]
+        );
+        // Missing physical input channels remain silent even when explicitly selected.
+        e.external("physical-in", [1.; 8]);
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert_eq!(&e.audio_frame("physical-in", "out")[..4], &[0.; 4]);
     }
 
     #[test]

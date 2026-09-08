@@ -5,6 +5,8 @@ mod media;
 mod osc;
 mod output_buffer;
 mod performance;
+mod resources;
+mod revisions;
 mod samples;
 mod settings;
 mod subgraphs;
@@ -33,6 +35,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 struct App {
+    resources: Arc<Mutex<resources::Stats>>,
     osc: Arc<osc::Runtime>,
     db: Arc<Mutex<Connection>>,
     events: broadcast::Sender<Value>,
@@ -128,7 +131,7 @@ fn load(app: &App, id: &str) -> Api<Project> {
         .map_err(|_| Failure(StatusCode::NOT_FOUND, "Project not found".into()))?;
     serde_json::from_str(&body).map_err(internal)
 }
-fn save_revision(app: &App, project: &mut Project) -> Api<()> {
+fn update_working_copy(app: &App, project: &mut Project) -> Api<()> {
     let mut db = app.db.lock().unwrap();
     let tx = db.transaction().map_err(internal)?;
     let previous = project.revision;
@@ -146,20 +149,79 @@ fn save_revision(app: &App, project: &mut Project) -> Api<()> {
             "Project changed. Reload before editing.".into(),
         ));
     }
-    tx.execute(
-        "INSERT INTO revisions(project_id,revision,body) VALUES(?1,?2,?3)",
-        params![project.id, project.revision, body],
-    )
-    .map_err(internal)?;
+    revisions::schedule(&tx, &project.id, now()).map_err(internal)?;
     tx.commit().map_err(internal)?;
     Ok(())
 }
-fn publish(app: &App, p: &Project) {
+fn publish_save(app: &App, id: &str, status: &revisions::SaveStatus, automatic: bool) {
     app.logs.push(
-        &p.id,
+        id,
         "info",
-        &format!("Project revision {} saved", p.revision),
+        &format!(
+            "Revision {} {}",
+            status.revision,
+            if automatic { "autosaved" } else { "saved" }
+        ),
     );
+    let _ = app
+        .events
+        .send(json!({"type":"project_save","project_id":id,"save":status}));
+}
+async fn resource_stats(State(app): State<App>, headers: HeaderMap) -> Api<Json<resources::Stats>> {
+    user(&app, &headers)?;
+    Ok(Json(app.resources.lock().unwrap().clone()))
+}
+async fn save_status(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Api<Json<revisions::SaveStatus>> {
+    let u = user(&app, &headers)?;
+    role(&app, &id, &u)?;
+    let saved = revisions::status(&app.db.lock().unwrap(), &id).map_err(internal)?;
+    Ok(Json(saved))
+}
+async fn save_project(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Api<Json<revisions::SaveStatus>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    can_edit(&role(&app, &id, &u)?)?;
+    let _guard = app.setup.lock().await;
+    let saved = revisions::snapshot(&mut app.db.lock().unwrap(), &id).map_err(internal)?;
+    publish_save(&app, &id, &saved, false);
+    Ok(Json(saved))
+}
+fn start_autosave(app: App) {
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            timer.tick().await;
+            // SQLite serialization is off the audio worker and device callbacks.
+            let worker = app.clone();
+            let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+                let mut db = worker.db.lock().unwrap();
+                for id in revisions::due(&db, now())? {
+                    let saved = revisions::snapshot(&mut db, &id)?;
+                    publish_save(&worker, &id, &saved, true);
+                }
+                Ok(())
+            })
+            .await;
+            if !matches!(result, Ok(Ok(()))) {
+                app.logs.push(
+                    "",
+                    "error",
+                    "Automatic revision save failed; pending saves will retry",
+                );
+            }
+        }
+    });
+}
+
+fn publish(app: &App, p: &Project) {
     let _ = app
         .events
         .send(json!({"type":"project","project_id":p.id,"project":p}));
@@ -477,7 +539,7 @@ async fn update_project(
     } else {
         None
     };
-    save_revision(&app, &mut p)?;
+    update_working_copy(&app, &mut p)?;
     if let Some(engine) = prepared {
         send(
             &app,
@@ -538,7 +600,7 @@ async fn control_input(
         let value = c.value.ok_or_else(|| bad("Control value required"))?;
         node.control_value = Some(value.clone());
         p.validate().map_err(bad)?;
-        save_revision(&app, &mut p)?;
+        update_working_copy(&app, &mut p)?;
         if active {
             send(
                 &app,
@@ -602,7 +664,7 @@ async fn parameter(
     p.validate().map_err(bad)?;
     settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
     // Serialize revisions before enqueueing; failed runtime delivery is reported explicitly.
-    save_revision(&app, &mut p)?;
+    update_working_copy(&app, &mut p)?;
     if active {
         send(
             &app,
@@ -1044,6 +1106,20 @@ async fn send_project_snapshot(socket: &mut WebSocket, app: &App, id: &str, u: &
     {
         return false;
     }
+    let saved = revisions::status(&app.db.lock().unwrap(), id).ok();
+    if let Some(saved) = saved {
+        if socket
+            .send(Message::Text(
+                json!({"type":"project_save","project_id":id,"save":saved})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
     let status = engine_status(&app.active.lock().unwrap());
     socket
         .send(Message::Text(status.to_string().into()))
@@ -1112,6 +1188,7 @@ async fn main() {
         CREATE TABLE IF NOT EXISTS revisions(project_id TEXT REFERENCES projects(id),revision INTEGER,body TEXT NOT NULL,PRIMARY KEY(project_id,revision));
         CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),role TEXT,expires INTEGER,used INTEGER);").expect("Database migration");
     subgraphs::migrate(&db).expect("Subgraph library migration");
+    revisions::migrate(&db).expect("Revision save migration");
     let (events, _) = broadcast::channel(128);
     let media = Arc::new(media::Media::new());
     let logs = Arc::new(settings::Logs::default());
@@ -1124,6 +1201,7 @@ async fn main() {
     );
     let cert = std::env::var("PR0_TLS_CERT").ok();
     let app = App {
+        resources: resources::start(),
         osc,
         db: Arc::new(Mutex::new(db)),
         events,
@@ -1135,11 +1213,13 @@ async fn main() {
         media,
     };
     app.osc.listen(&app);
+    start_autosave(app.clone());
     let router = Router::new()
         .route("/api/system/osc", get(osc::get))
         .route("/api/projects/{id}/system/osc", put(osc::put))
         .route("/api/status", get(status))
         .route("/api/system/audio", get(settings::get))
+        .route("/api/system/stats", get(resource_stats))
         .route(
             "/api/projects/{id}/system/audio",
             axum::routing::put(settings::put),
@@ -1168,6 +1248,10 @@ async fn main() {
         .route("/api/join", post(join))
         .route("/api/devices", get(devices))
         .route("/api/projects/{id}", get(get_project).put(update_project))
+        .route(
+            "/api/projects/{id}/save",
+            get(save_status).post(save_project),
+        )
         .route("/api/projects/{id}/parameter", put(parameter))
         .route("/api/projects/{id}/transport", post(transport))
         .route("/api/projects/{id}/invite", post(invite))

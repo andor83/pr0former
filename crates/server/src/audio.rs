@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use pr0_core::{MAX_CHANNELS, Project};
+use pr0_core::{MAX_CHANNELS, MAX_DEVICE_CHANNELS, Project};
 use pr0_dsp::Engine;
 use serde_json::{Value, json};
 use std::{
@@ -436,9 +436,7 @@ fn run(
                         })
                         .unwrap_or_default();
                     let _=reply.send(json!({
-"input_interfaces":input_devices().iter().map(|(id,name)|json!({"id":id,"name":name})).collect::<Vec<_>>(),"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":devices.iter().map(|(id,name)|json!({
-"id":id,"name":name}
-)).collect::<Vec<_>>(),"midi_outputs":midi,"midi_inputs":midi_inputs,"midi_error":midi_error,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}
+"input_interfaces":device_details(settings.sample_rate, true),"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":device_details(settings.sample_rate, false),"midi_outputs":midi,"midi_inputs":midi_inputs,"midi_error":midi_error,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}
 ));
                 }
                 Command::Hardware(value) => {
@@ -525,7 +523,7 @@ fn run(
                     seq.tick(e, &io);
                 }
                 for input in &mut inputs {
-                    input.frame = input.queue.pop().ok().unwrap_or([0.; MAX_CHANNELS]);
+                    input.frame = input.queue.pop().ok().unwrap_or([0.; MAX_DEVICE_CHANNELS]);
                 }
                 if let Some(p) = &project {
                     for node in p.graph.nodes.iter().filter(|n| n.kind == "input") {
@@ -534,8 +532,8 @@ fn run(
                             .iter()
                             .find(|i| route == 0 || i.id == route)
                             .map(|i| i.frame)
-                            .unwrap_or([0.; MAX_CHANNELS]);
-                        e.external(&node.id, sample);
+                            .unwrap_or([0.; MAX_DEVICE_CHANNELS]);
+                        e.device_input(&node.id, sample);
                     }
                 }
                 e.render(&[], std::slice::from_mut(frame));
@@ -548,7 +546,7 @@ fn run(
                 }
 
                 for out in &mut outputs {
-                    let mut routed = [0.; MAX_CHANNELS];
+                    let mut routed = [0.; MAX_DEVICE_CHANNELS];
                     if e.clock.running {
                         if let Some(p) = &project {
                             for n in &p.graph.nodes {
@@ -556,8 +554,8 @@ fn run(
                                     let route =
                                         n.parameters.get("interface").copied().unwrap_or(0.) as u32;
                                     if route == out.id || route == 0 {
-                                        let v = e.output_frame(&n.id);
-                                        for ch in 0..MAX_CHANNELS {
+                                        let v = e.device_output_frame(&n.id);
+                                        for ch in 0..MAX_DEVICE_CHANNELS {
                                             routed[ch] += v[ch];
                                         }
                                     }
@@ -644,7 +642,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"levels":e.io_levels(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
 ));
                 }
             }
@@ -662,7 +660,7 @@ fn run(
                     0.
                 };
                 for out in &mut outputs {
-                    out.push([click; MAX_CHANNELS]);
+                    out.push([click; MAX_DEVICE_CHANNELS]);
                 }
                 test_sample += 1;
                 if test_sample >= settings.sample_rate as u64 * 60 {
@@ -699,21 +697,62 @@ fn run(
     }
 }
 
+// Discovery and stream startup use the same widest supported f32 configuration.
+fn device_config(
+    device: &cpal::Device,
+    rate: u32,
+    input: bool,
+) -> Result<cpal::StreamConfig, String> {
+    let configs: Vec<_> = if input {
+        device
+            .supported_input_configs()
+            .map_err(|e| e.to_string())?
+            .collect()
+    } else {
+        device
+            .supported_output_configs()
+            .map_err(|e| e.to_string())?
+            .collect()
+    };
+    configs
+        .into_iter()
+        .filter(|c| {
+            c.sample_format() == cpal::SampleFormat::F32
+                && (1..=MAX_DEVICE_CHANNELS).contains(&(c.channels() as usize))
+                && c.min_sample_rate().0 <= rate
+                && c.max_sample_rate().0 >= rate
+        })
+        .max_by_key(|c| c.channels())
+        .map(|c| c.with_sample_rate(cpal::SampleRate(rate)).config())
+        .ok_or_else(|| format!("No supported 1–64-channel f32 configuration at {rate} Hz"))
+}
+fn device_details(rate: u32, input: bool) -> Vec<Value> {
+    let host = cpal::default_host();
+    let devices = if input {
+        host.input_devices()
+    } else {
+        host.output_devices()
+    };
+    devices
+        .map(|devices| {
+            devices
+                .filter_map(|device| {
+                    let name = device.name().ok()?;
+                    let config = device_config(&device, rate, input);
+                    Some(json!({"id":device_id(&name), "name":name,
+            "channels":config.as_ref().map(|c|c.channels).ok(), "error":config.err()}))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn open_input(
     device: cpal::Device,
     rate: u32,
     errors: Arc<AtomicU64>,
-) -> Result<(cpal::Stream, rtrb::Consumer<[f32; MAX_CHANNELS]>), String> {
-    let supported = device
-        .supported_input_configs()
-        .map_err(|e| e.to_string())?
-        .find(|c| {
-            c.sample_format() == cpal::SampleFormat::F32
-                && c.min_sample_rate().0 <= rate
-                && c.max_sample_rate().0 >= rate
-        })
-        .ok_or("Input does not support the selected sample rate with f32 samples")?;
-    let config = supported.with_sample_rate(cpal::SampleRate(rate)).config();
+) -> Result<(cpal::Stream, rtrb::Consumer<[f32; MAX_DEVICE_CHANNELS]>), String> {
+    let config = device_config(&device, rate, true)?;
     let channels = config.channels as usize;
     let (mut producer, consumer) = rtrb::RingBuffer::new(4096);
     let stream = device
@@ -721,8 +760,8 @@ fn open_input(
             &config,
             move |data: &[f32], _| {
                 for frame in data.chunks(channels) {
-                    let mut samples = [0.; MAX_CHANNELS];
-                    for (ch, sample) in frame.iter().take(MAX_CHANNELS).enumerate() {
+                    let mut samples = [0.; MAX_DEVICE_CHANNELS];
+                    for (ch, sample) in frame.iter().take(MAX_DEVICE_CHANNELS).enumerate() {
                         samples[ch] = *sample;
                     }
                     let _ = producer.push(samples);
@@ -741,8 +780,8 @@ fn open_input(
 struct Input {
     id: u32,
     _stream: cpal::Stream,
-    queue: rtrb::Consumer<[f32; MAX_CHANNELS]>,
-    frame: [f32; MAX_CHANNELS],
+    queue: rtrb::Consumer<[f32; MAX_DEVICE_CHANNELS]>,
+    frame: [f32; MAX_DEVICE_CHANNELS],
     errors: Arc<AtomicU64>,
 }
 fn device_id(name: &str) -> u32 {
@@ -779,7 +818,7 @@ fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, Strin
             id: selected.id,
             _stream: stream,
             queue,
-            frame: [0.; MAX_CHANNELS],
+            frame: [0.; MAX_DEVICE_CHANNELS],
             errors,
         });
     }
@@ -825,12 +864,12 @@ struct Output {
     id: u32,
     _stream: cpal::Stream,
     buffer: crate::output_buffer::OutputBuffer,
-    delay: Vec<[f32; MAX_CHANNELS]>,
+    delay: Vec<[f32; MAX_DEVICE_CHANNELS]>,
     cursor: usize,
     errors: Arc<AtomicU64>,
 }
 impl Output {
-    fn push(&mut self, mut frame: [f32; MAX_CHANNELS]) {
+    fn push(&mut self, mut frame: [f32; MAX_DEVICE_CHANNELS]) {
         if !self.delay.is_empty() {
             std::mem::swap(&mut frame, &mut self.delay[self.cursor]);
             self.cursor = (self.cursor + 1) % self.delay.len();
@@ -855,23 +894,8 @@ fn open_outputs(
             .map_err(|e| e.to_string())?
             .find(|d| d.name().ok().as_deref() == Some(&selected.name))
             .ok_or_else(|| format!("Interface unavailable: {}", selected.name))?;
-        let supported = device
-            .supported_output_configs()
-            .map_err(|e| e.to_string())?
-            .find(|c| {
-                c.sample_format() == cpal::SampleFormat::F32
-                    && c.min_sample_rate().0 <= settings.sample_rate
-                    && c.max_sample_rate().0 >= settings.sample_rate
-            })
-            .ok_or_else(|| {
-                format!(
-                    "{} does not support {} Hz / f32",
-                    selected.name, settings.sample_rate
-                )
-            })?;
-        let config = supported
-            .with_sample_rate(cpal::SampleRate(settings.sample_rate))
-            .config();
+        let config = device_config(&device, settings.sample_rate, false)
+            .map_err(|e| format!("{}: {e}", selected.name))?;
         let channels = config.channels as usize;
         let (buffer, mut consumer) = crate::output_buffer::OutputBuffer::new(
             settings.block_size,
@@ -903,7 +927,7 @@ fn open_outputs(
             id: selected.id,
             _stream: stream,
             buffer,
-            delay: vec![[0.; MAX_CHANNELS]; delay],
+            delay: vec![[0.; MAX_DEVICE_CHANNELS]; delay],
             cursor: 0,
             errors,
         });

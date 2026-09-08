@@ -2012,6 +2012,7 @@ dependencies = [
  "cpal",
  "hound",
  "if-addrs",
+ "libc",
  "midir",
  "opus",
  "pr0-core",

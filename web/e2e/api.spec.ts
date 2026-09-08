@@ -22,6 +22,7 @@ test('authorization, invitations, revision conflicts, and sample preparation', a
   expect((await stranger.post('/api/register', { headers, data: { username: 'guest-performer', password: 'test5678', invite: invitation.token } })).ok()).toBeTruthy()
   expect((await stranger.post('/api/join', { headers, data: { token: invitation.token } })).ok()).toBeTruthy()
   expect((await stranger.get(`/api/projects/${id}`)).ok()).toBeTruthy()
+  expect((await stranger.post(`/api/projects/${id}/save`, {headers,data:{}})).status()).toBe(403)
   expect((await stranger.put(`/api/projects/${id}/parameter`, { headers, data: { node: 'mod', parameter: 'b', value: 6, revision: 0 } })).status()).toBe(403)
   expect((await stranger.post('/api/join', { headers, data: { token: invitation.token } })).status()).toBe(400)
   const catalog = await (await request.get('/api/catalog')).json()

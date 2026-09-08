@@ -5,6 +5,43 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const SCHEMA_VERSION: u32 = 1;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const MAX_CHANNELS: usize = 8;
+/// Native device frames are separate from the 1–8-channel graph contract.
+pub const MAX_DEVICE_CHANNELS: usize = 64;
+pub const DEVICE_ROUTE_KEYS: [&str; MAX_CHANNELS] = [
+    "route_1", "route_2", "route_3", "route_4", "route_5", "route_6", "route_7", "route_8",
+];
+
+/// -1 preserves legacy sequential routing, 0 disconnects, 1–64 select a device channel.
+pub fn device_channel(route: f64, channel: usize, offset: usize) -> Option<usize> {
+    let index = if route < 0. {
+        channel + offset
+    } else if route == 0. {
+        return None;
+    } else {
+        route as usize - 1
+    };
+    (index < MAX_DEVICE_CHANNELS).then_some(index)
+}
+
+fn device_routes(mut parameters: Vec<Parameter>) -> Vec<Parameter> {
+    parameters.extend(
+        DEVICE_ROUTE_KEYS
+            .iter()
+            .enumerate()
+            .map(|(i, key)| Parameter {
+                structural: true,
+                ..param(
+                    key,
+                    &format!("Signal {} physical channel", i + 1),
+                    "",
+                    -1.,
+                    MAX_DEVICE_CHANNELS as f64,
+                    -1.,
+                )
+            }),
+    );
+    parameters
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -616,16 +653,16 @@ pub fn catalog() -> Vec<Descriptor> {
         "Audio input",
         "↳",
         "Audio",
-        "Selected server interface input; channel index is zero-based.",
+        "Route physical interface channels into a 1–8-channel signal. Unmapped channels are silent.",
         vec![],
         vec![port("out", Audio)],
-        vec![
+        device_routes(vec![
             Parameter {
                 structural: true,
                 ..param("interface", "Input interface", "", 0., 999999999., 0.)
             },
-            param("offset", "First channel", "", 0., 63., 0.),
-        ],
+            param("offset", "Legacy channel offset", "", 0., 63., 0.),
+        ]),
         &["adc~"],
     );
     add(
@@ -710,16 +747,16 @@ pub fn catalog() -> Vec<Descriptor> {
         "Audio output",
         "↗",
         "Audio",
-        "Output to selected server interface.",
+        "Route signal channels to physical outputs. Channels sharing a destination are summed; None disconnects a channel.",
         vec![port("in", Audio)],
         vec![],
-        vec![
+        device_routes(vec![
             param("gain", "Output gain", "dB", -90., 6., -12.),
             Parameter {
                 structural: true,
                 ..param("interface", "Audio interface", "", 0., 999999999., 0.)
             },
-        ],
+        ]),
         &["dac~"],
     );
     add(
@@ -1437,6 +1474,12 @@ impl Graph {
                     .iter()
                     .find(|p| &p.id == key)
                     .ok_or(format!("Unknown parameter {key}"))?;
+                if matches!(n.kind.as_str(), "input" | "output")
+                    && DEVICE_ROUTE_KEYS.contains(&key.as_str())
+                    && value.fract() != 0.
+                {
+                    return Err("Physical channel routes must be whole numbers".into());
+                }
                 if n.kind == "oscillator" && key == "waveform" && value.fract() != 0. {
                     return Err("Waveform must be an integer from 0 to 4".into());
                 }

@@ -1,11 +1,11 @@
 //! Bounded native output buffering. DSP blocks and driver callbacks can differ.
-use pr0_core::MAX_CHANNELS;
+use pr0_core::MAX_DEVICE_CHANNELS;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
-type Frame = [f32; MAX_CHANNELS];
+type Frame = [f32; MAX_DEVICE_CHANNELS];
 const CAPACITY: usize = 16_384;
 
 pub struct OutputBuffer {
@@ -38,7 +38,7 @@ impl OutputBuffer {
         };
         // The stream starts before the worker resumes. Supply silence during setup.
         for _ in 0..buffer.target_frames() {
-            buffer.push([0.; MAX_CHANNELS]);
+            buffer.push([0.; MAX_DEVICE_CHANNELS]);
         }
         (
             buffer,
@@ -79,7 +79,7 @@ impl OutputConsumer {
         for frame in data.chunks_mut(channels) {
             let samples = self.consumer.pop().unwrap_or_else(|_| {
                 missing += 1;
-                [0.; MAX_CHANNELS]
+                [0.; MAX_DEVICE_CHANNELS]
             });
             for (ch, value) in frame.iter_mut().enumerate() {
                 *value = samples.get(ch).copied().unwrap_or(0.);
@@ -94,6 +94,25 @@ impl OutputConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_physical_channels_reach_the_callback_and_unmapped_channels_are_silent() {
+        let (mut buffer, mut consumer) = OutputBuffer::new(128, 48000, Arc::new(AtomicU64::new(0)));
+        let mut startup = vec![0.; buffer.target_frames() * 64];
+        consumer.write(&mut startup, 64);
+        let mut frame = [0.; MAX_DEVICE_CHANNELS];
+        frame[8] = 0.25;
+        frame[63] = 0.5;
+        buffer.push(frame);
+        let mut data = [1.; 64];
+        consumer.write(&mut data, 64);
+        assert_eq!(data, frame);
+        // A stereo device ignores channels addressed beyond its physical width.
+        buffer.push(frame);
+        let mut stereo = [1.; 2];
+        consumer.write(&mut stereo, 2);
+        assert_eq!(stereo, [0.; 2]);
+    }
 
     #[test]
     fn old_block_sized_target_starves_a_larger_callback() {
@@ -132,7 +151,7 @@ mod tests {
                     for _ in 0..100 {
                         while buffer.needs_frames() {
                             for _ in 0..block {
-                                buffer.push([sine(produced); MAX_CHANNELS]);
+                                buffer.push([sine(produced); MAX_DEVICE_CHANNELS]);
                                 produced += 1;
                             }
                         }
