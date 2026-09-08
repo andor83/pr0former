@@ -9,7 +9,7 @@ pub struct Text {
     len: usize,
 }
 impl Text {
-    fn new(text: &str) -> Self {
+    pub(crate) fn new(text: &str) -> Self {
         let mut value = Self {
             bytes: [0; MAX_CONTROL_TEXT_BYTES],
             len: text.len(),

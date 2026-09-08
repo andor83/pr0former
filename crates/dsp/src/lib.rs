@@ -6,8 +6,10 @@ mod effects;
 mod envelope;
 mod looper;
 mod midi_controls;
+mod named;
 pub mod note_inputs;
 mod oscillator;
+mod pitch_tracker;
 pub mod recorder;
 mod sampler;
 mod sequence;
@@ -111,10 +113,19 @@ impl Biquad {
 #[derive(Clone)]
 struct Binding {
     source: usize,
+    edge: usize,
+    merge: Option<usize>,
     source_port: usize,
     destination: usize,
     parameter: bool,
     signal: pr0_core::Signal,
+}
+struct ControlMerge {
+    members: Vec<usize>,
+    previous: Vec<visualizer::Datum>,
+    value: visualizer::Datum,
+    winner: usize,
+    event: bool,
 }
 const GRAPH_VOICE_OWNER: u64 = u64::MAX;
 #[derive(Clone, Copy, Default)]
@@ -144,6 +155,13 @@ struct RuntimeNode {
     defaults: Vec<f64>,
     limits: Vec<(f64, f64)>,
     bindings: Vec<Binding>,
+    merges: Vec<ControlMerge>,
+    route: Option<Box<named::Route>>,
+    target_text: Option<visualizer::Text>,
+    input_events: [bool; 8],
+    control_event: bool,
+    control_event_only: bool,
+    input_event_only: [bool; 8],
     compensations: Vec<Vec<[f64; 8]>>,
     compensation_cursors: Vec<usize>,
     latency: usize,
@@ -155,11 +173,13 @@ struct RuntimeNode {
     note_inputs: note_inputs::NoteInputs,
     outgoing_notes: [Option<note_inputs::NoteEvent>; 2],
     sampler: Option<Box<sampler::Sampler>>,
+    pitch_tracker: Option<Box<pitch_tracker::PitchTracker>>,
     looper: Option<Box<looper::Looper>>,
     recorder: Option<Box<recorder::Recorder>>,
     midi_controls: Option<Box<midi_controls::MidiControls>>,
     control_text: Option<visualizer::Text>,
     input_text: Option<visualizer::Text>,
+    toggle_text: Option<visualizer::Text>,
     fallback: visualizer::Datum,
     analyzer: Option<Box<visualizer::Analyzer>>,
     voices: [Voice; 64],
@@ -279,11 +299,16 @@ impl RuntimeNode {
         let mut scalar = 0.;
         self.output = [0.; MAX_CHANNELS];
         self.control_text = None;
+        if self.kind != "receive_control" {
+            self.control_event_only = false;
+        }
         match self.kind.as_str() {
             "subgraph_input_audio" | "subgraph_output_audio" => self.output = input,
             "subgraph_input_control" | "subgraph_output_control" => {
                 scalar = input[0];
                 self.control_text = self.input_text;
+                self.control_event = self.input_events[0];
+                self.control_event_only = self.input_event_only[0];
             }
             "audio_to_control" => scalar = input[0] * self.p("scale") + self.p("offset"),
             "control_visualizer" | "control_input" => {
@@ -300,6 +325,8 @@ impl RuntimeNode {
                 } else {
                     scalar = input[0];
                     self.control_text = self.input_text;
+                    self.control_event = self.input_events[0];
+                    self.control_event_only = self.input_event_only[0];
                 }
             }
             "audio_visualizer" => {
@@ -469,7 +496,39 @@ impl RuntimeNode {
                     .tick(self.p("gate") > 0., input[0] > 0., settings, sr);
             }
             "gate" => scalar = if self.p("open") > 0. { input[0] } else { 0. },
-            "value" => scalar = self.p("value"),
+            "send_control" => {
+                scalar = input[0];
+                self.control_text = self.input_text;
+                self.control_event = self.input_events[0];
+                self.control_event_only = self.input_event_only[0];
+            }
+            "receive_control" => match self.route.as_ref().unwrap().value {
+                visualizer::Datum::Number(v) => scalar = v,
+                visualizer::Datum::Text(t) => self.control_text = Some(t),
+            },
+            "send_audio" => self.output = input,
+            "receive_audio" => self.output = self.route.as_ref().unwrap().audio,
+            "send_spectral" | "receive_spectral" => {}
+            "pitch_tracker" => {
+                let slots = self.p("slots") as usize;
+                let threshold = self.p("threshold");
+                let tracker = self.pitch_tracker.as_mut().unwrap();
+                tracker.tick(&input[..self.channels], sr, slots, threshold);
+                scalar = tracker.notes[0];
+                self.control[1..4].copy_from_slice(&tracker.notes[1..4]);
+            }
+            "value" => {
+                let driven = self
+                    .bindings
+                    .iter()
+                    .any(|b| !b.parameter && b.destination == 0);
+                if !driven || input[0] != 0. {
+                    self.count = self.p("value");
+                }
+                // A triggered zero is an explicit command, not absence of a signal.
+                self.control_event = driven && input[0] != 0.;
+                scalar = self.count;
+            }
             "random" => {
                 if input[0] > 0. && self.previous <= 0. {
                     self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -748,14 +807,31 @@ impl RuntimeNode {
                     .bindings
                     .iter()
                     .any(|b| !b.parameter && b.destination == 0)
-                    && input[0] != self.previous
+                    && (!self.input_event_only[0] || self.input_events[0])
+                    && (input[0] != self.previous
+                        || self.input_text != self.toggle_text
+                        || self.input_events[0])
                 {
-                    self.count = if input[0] != 0. { 1. } else { 0. };
+                    let next = if self.input_text.is_some() || input[0] > 0. {
+                        1.
+                    } else {
+                        0.
+                    };
+                    self.bang |= next != self.count;
+                    self.count = next;
                 }
-                self.previous = input[0];
+                if !self.input_event_only[0] || self.input_events[0] {
+                    self.previous = input[0];
+                    self.toggle_text = self.input_text;
+                }
+                self.control_event_only = true;
+                self.control_event = self.bang;
+                self.bang = false;
                 scalar = self.count;
             }
             "trigger" => {
+                self.control_event_only = self.input_event_only[0];
+                self.control_event = self.bang || self.input_events[0];
                 scalar = if self.bang { 1. } else { input[0] };
                 if self.bang || (scalar != 0. && self.previous == 0.) {
                     self.count += 1.;
@@ -913,10 +989,12 @@ pub struct Engine {
     pub clock: Clock,
     pub graph_clock: Clock,
     pub graph: Graph,
+    priority: Vec<usize>,
 }
 impl Engine {
     pub fn prepare(graph: Graph, sample_rate: f64) -> Result<Self, String> {
-        let graph = graph.flatten()?;
+        let authored = graph;
+        let graph = authored.flatten()?;
         let order = graph.validate_flat()?;
         if !sample_rate.is_finite() || sample_rate <= 0. {
             return Err("Invalid engine sample rate".into());
@@ -952,7 +1030,9 @@ impl Engine {
                 steps: sequence::Steps::default(),
                 sample: vec![],
                 sample_position: 0,
-                spectral: if d.category == "Spectral" {
+                spectral: if d.category == "Spectral"
+                    || (pr0_core::named_route(&n.kind) && n.kind.ends_with("spectral"))
+                {
                     Some(Box::new(spectral::Spectral::new(
                         n.parameters.get("size").copied().unwrap_or(1024.) as usize,
                         n.parameters.get("overlap").copied().unwrap_or(4.) as usize,
@@ -963,12 +1043,49 @@ impl Engine {
                 },
                 id: n.id.clone(),
                 kind: n.kind.clone(),
-                channels: n.channels,
+                channels: if n.kind == "pitch_tracker" {
+                    graph
+                        .edges
+                        .iter()
+                        .find(|e| e.target == n.id && e.target_port == "in")
+                        .map(|edge| {
+                            let source = graph.nodes.iter().find(|s| s.id == edge.source).unwrap();
+                            descriptors
+                                .iter()
+                                .find(|d| d.kind == source.kind)
+                                .unwrap()
+                                .outputs
+                                .iter()
+                                .find(|p| p.id == edge.source_port)
+                                .unwrap()
+                                .fixed_channels
+                                .unwrap_or(source.channels)
+                        })
+                        .unwrap_or(n.channels)
+                } else {
+                    n.channels
+                },
                 names: d.parameters.iter().map(|p| p.id.clone()).collect(),
                 defaults: values.clone(),
                 values,
                 limits: d.parameters.iter().map(|p| (p.min, p.max)).collect(),
                 bindings: vec![],
+                merges: vec![],
+                route: pr0_core::named_route(&n.kind).then(|| {
+                    Box::new(named::Route::new(
+                        &n.kind,
+                        n.control_value.as_ref(),
+                        n.channels,
+                        n.parameters.get("size").copied().unwrap_or(1024.) as usize,
+                        n.parameters.get("overlap").copied().unwrap_or(4.) as usize,
+                        graph.nodes.len(),
+                    ))
+                }),
+                target_text: None,
+                input_events: [false; 8],
+                control_event: false,
+                control_event_only: n.kind == "toggle",
+                input_event_only: [false; 8],
                 compensations: vec![],
                 compensation_cursors: vec![],
                 latency: 0,
@@ -1011,6 +1128,11 @@ impl Engine {
                 } else {
                     None
                 },
+                pitch_tracker: (n.kind == "pitch_tracker").then(|| {
+                    Box::new(pitch_tracker::PitchTracker::new(
+                        n.parameters.get("fft_size").copied().unwrap_or(8192.) as usize,
+                    ))
+                }),
                 sampler: (n.kind == "poly_sampler").then(|| Box::new(sampler::Sampler::default())),
                 midi_controls: (matches!(
                     n.kind.as_str(),
@@ -1019,6 +1141,7 @@ impl Engine {
                 .then(|| Box::new(midi_controls::MidiControls::new())),
                 control_text: None,
                 input_text: None,
+                toggle_text: None,
                 fallback: if n.kind == "control_input"
                     && n.parameters.get("mode") == Some(&4.)
                     && n.control_value.is_none()
@@ -1085,7 +1208,7 @@ impl Engine {
                 },
             });
         }
-        for edge in &graph.edges {
+        for (edge_index, edge) in graph.edges.iter().enumerate() {
             let s = graph
                 .nodes
                 .iter()
@@ -1118,11 +1241,81 @@ impl Engine {
             });
             nodes[t].bindings.push(Binding {
                 source: s,
+                edge: edge_index,
+                merge: None,
                 source_port,
                 destination,
                 parameter: parameter.is_some(),
                 signal: sd.outputs[source_port].signal,
             });
+        }
+        let positions: Vec<_> = graph
+            .nodes
+            .iter()
+            .map(|n| {
+                let (mut x, mut y) = (n.x, n.y);
+                let mut parent = authored
+                    .nodes
+                    .iter()
+                    .find(|a| a.id == n.id)
+                    .and_then(|a| a.parent.as_deref());
+                while let Some(id) = parent {
+                    let p = authored.nodes.iter().find(|p| p.id == id).unwrap();
+                    x += p.x;
+                    y += p.y;
+                    parent = p.parent.as_deref();
+                }
+                (x, y)
+            })
+            .collect();
+        let mut ranked: Vec<_> = (0..nodes.len()).collect();
+        ranked.sort_by(|a, b| {
+            positions[*a]
+                .1
+                .total_cmp(&positions[*b].1)
+                .then_with(|| positions[*a].0.total_cmp(&positions[*b].0))
+                .then_with(|| graph.nodes[*a].id.cmp(&graph.nodes[*b].id))
+        });
+        let mut priority = vec![0; nodes.len()];
+        for (rank, index) in ranked.into_iter().enumerate() {
+            priority[index] = rank;
+        }
+        for node in &mut nodes {
+            for binding in 0..node.bindings.len() {
+                let b = &node.bindings[binding];
+                if b.signal != pr0_core::Signal::Control || b.merge.is_some() {
+                    continue;
+                }
+                let members: Vec<_> = node
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, other)| {
+                        other.signal == b.signal
+                            && other.destination == b.destination
+                            && other.parameter == b.parameter
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if members.len() < 2 {
+                    continue;
+                }
+                let winner = *members
+                    .iter()
+                    .min_by_key(|i| priority[node.bindings[**i].source])
+                    .unwrap();
+                let group = node.merges.len();
+                for &i in &members {
+                    node.bindings[i].merge = Some(group);
+                }
+                node.merges.push(ControlMerge {
+                    previous: vec![visualizer::Datum::Number(0.); members.len()],
+                    members,
+                    value: visualizer::Datum::Number(0.),
+                    event: false,
+                    winner,
+                });
+            }
         }
         for &idx in &order {
             let input_latency = nodes[idx]
@@ -1143,7 +1336,11 @@ impl Engine {
                 nodes[idx].compensation_cursors.push(0);
             }
             nodes[idx].latency = input_latency
-                + if matches!(nodes[idx].kind.as_str(), "fft" | "rfft") {
+                + if pr0_core::named_route(&nodes[idx].kind)
+                    && nodes[idx].kind.starts_with("receive_")
+                {
+                    1
+                } else if matches!(nodes[idx].kind.as_str(), "fft" | "rfft") {
                     nodes[idx].p("size") as usize
                 } else {
                     0
@@ -1151,6 +1348,7 @@ impl Engine {
         }
         Ok(Self {
             nodes,
+            priority,
             order,
             clock: Clock::new(sample_rate),
             graph_clock: Clock {
@@ -1276,6 +1474,13 @@ impl Engine {
             };
             let source = &previous.nodes[source_index];
             let compatible = target.kind == source.kind
+                && (target.route.is_none()
+                    || (self.nodes.len() == previous.nodes.len()
+                        && self
+                            .nodes
+                            .iter()
+                            .zip(&previous.nodes)
+                            .all(|(a, b)| a.id == b.id)))
                 && target.part_id == source.part_id
                 && target.io == source.io
                 && target.channels == source.channels
@@ -1554,6 +1759,7 @@ impl Engine {
                 if *value != 0. && *value != 1. {
                     return;
                 }
+                node.bang |= node.count != *value;
                 node.count = *value;
             }
             node.fallback = visualizer::Datum::prepare(Some(value));
@@ -1623,20 +1829,210 @@ impl Engine {
         n.values[i] = value;
         Ok(())
     }
+    fn receive_named(&mut self, idx: usize) {
+        let node = &mut self.nodes[idx];
+        let route = node.route.as_mut().unwrap();
+        let target_port = usize::from(route.send);
+        let driven = node
+            .bindings
+            .iter()
+            .any(|b| !b.parameter && b.destination == target_port);
+        let name = if driven {
+            node.target_text
+                .unwrap_or_else(|| visualizer::Text::new(""))
+        } else {
+            match node.fallback {
+                visualizer::Datum::Text(t) => t,
+                _ => visualizer::Text::new(""),
+            }
+        };
+        route.error = driven && node.target_text.is_none();
+        if route.name != name {
+            route.name = name;
+            route.seen.fill(0);
+            route.value = visualizer::Datum::Number(0.);
+        }
+        if route.send {
+            return;
+        }
+        let signal = route.signal;
+        route.connected = 0;
+        route.audio = [0.; 8];
+        let mut best = usize::MAX;
+        let mut spectrum_source = None;
+        let mut fallback: Option<(usize, usize, visualizer::Datum)> = None;
+        let mut current_present = false;
+        for source in 0..self.nodes.len() {
+            let Some(send) = self.nodes[source].route.as_ref() else {
+                continue;
+            };
+            if !send.send
+                || !send.ready
+                || send.signal != signal
+                || name.as_str().is_empty()
+                || send.published_name != name
+            {
+                continue;
+            }
+            let compatible = signal == pr0_core::Signal::Control
+                || (self.nodes[source].channels == self.nodes[idx].channels
+                    && (signal != pr0_core::Signal::Spectral
+                        || (self.nodes[source].p("size") == self.nodes[idx].p("size")
+                            && self.nodes[source].p("overlap") == self.nodes[idx].p("overlap"))));
+            if !compatible {
+                self.nodes[idx].route.as_mut().unwrap().error = true;
+                continue;
+            }
+            let serial = send.serial;
+            let value = send.published_value;
+            let audio = send.published_audio;
+            let generation = send.snapshot.as_ref().map(|s| s.generation).unwrap_or(0);
+            let rank = self.priority[source];
+            let receive = self.nodes[idx].route.as_mut().unwrap();
+            receive.connected += 1;
+            current_present |= receive.control_source == Some(source);
+            if fallback.as_ref().is_none_or(|f| rank < f.1) {
+                fallback = Some((source, rank, value));
+            }
+            match signal {
+                pr0_core::Signal::Control => {
+                    if receive.seen[source] != serial && rank < best {
+                        receive.value = value;
+                        receive.control_source = Some(source);
+                        best = rank;
+                    }
+                    receive.seen[source] = serial;
+                }
+                pr0_core::Signal::Audio => {
+                    for ch in 0..8 {
+                        receive.audio[ch] += audio[ch];
+                    }
+                }
+                pr0_core::Signal::Spectral => {
+                    if rank < best {
+                        spectrum_source = Some((source, generation));
+                        best = rank;
+                    }
+                }
+            }
+        }
+        self.nodes[idx].control_event = signal == pr0_core::Signal::Control && best != usize::MAX;
+        let receive = self.nodes[idx].route.as_mut().unwrap();
+        if receive.connected == 0 {
+            receive.value = visualizer::Datum::Number(0.);
+            receive.control_source = None;
+        } else if signal == pr0_core::Signal::Control && best == usize::MAX && !current_present {
+            if let Some((source, _, value)) = fallback {
+                receive.value = value;
+                receive.control_source = Some(source);
+            }
+        }
+        if signal == pr0_core::Signal::Spectral && receive.spectral_source != spectrum_source {
+            receive.spectral_source = spectrum_source;
+            if let Some((source, _)) = spectrum_source {
+                if source < idx {
+                    let (a, b) = self.nodes.split_at_mut(idx);
+                    b[0].spectral
+                        .as_mut()
+                        .unwrap()
+                        .route_from(a[source].route.as_ref().unwrap().snapshot.as_ref().unwrap());
+                } else {
+                    let (a, b) = self.nodes.split_at_mut(source);
+                    a[idx]
+                        .spectral
+                        .as_mut()
+                        .unwrap()
+                        .route_from(b[0].route.as_ref().unwrap().snapshot.as_ref().unwrap());
+                }
+            } else {
+                self.nodes[idx].spectral.as_mut().unwrap().route_silence();
+            }
+        }
+    }
     pub fn render(&mut self, input: &[[f32; MAX_CHANNELS]], output: &mut [[f32; MAX_CHANNELS]]) {
         for (frame_idx, out) in output.iter_mut().enumerate() {
             let hardware = input.get(frame_idx).copied().unwrap_or([0.; MAX_CHANNELS]);
             *out = [0.; MAX_CHANNELS];
-            for &idx in &self.order {
+            for order_index in 0..self.order.len() {
+                let idx = self.order[order_index];
                 self.nodes[idx].input = [[0.; MAX_CHANNELS]; 8];
                 self.nodes[idx].input_text = None;
+                self.nodes[idx].target_text = None;
+                self.nodes[idx].input_events = [false; 8];
+                self.nodes[idx].input_event_only = [false; 8];
+                self.nodes[idx].control_event = false;
+                for group in 0..self.nodes[idx].merges.len() {
+                    let mut best = usize::MAX;
+                    self.nodes[idx].merges[group].event = false;
+                    for member in 0..self.nodes[idx].merges[group].members.len() {
+                        let index = self.nodes[idx].merges[group].members[member];
+                        let b = self.nodes[idx].bindings[index].clone();
+                        let source = &self.nodes[b.source];
+                        let datum = if b.source_port == 0 {
+                            source.control_text.map(visualizer::Datum::Text)
+                        } else {
+                            None
+                        }
+                        .unwrap_or(visualizer::Datum::Number(source.control[b.source_port]));
+                        let event = b.source_port == 0 && source.control_event;
+                        if b.source_port == 0 && source.control_event_only && !event {
+                            continue;
+                        }
+                        let rank = self.priority[b.source];
+                        let merge = &mut self.nodes[idx].merges[group];
+                        if (datum != merge.previous[member] || event) && rank < best {
+                            best = rank;
+                            merge.value = datum;
+                            merge.winner = index;
+                            merge.event = event;
+                        }
+                        merge.previous[member] = datum;
+                    }
+                }
                 for j in 0..self.nodes[idx].bindings.len() {
                     let b = self.nodes[idx].bindings[j].clone();
-                    let control = self.nodes[b.source]
+                    if b.merge
+                        .is_some_and(|g| self.nodes[idx].merges[g].winner != j)
+                    {
+                        continue;
+                    }
+                    let mut control = self.nodes[b.source]
                         .control
                         .get(b.source_port)
                         .copied()
                         .unwrap_or(0.);
+                    let mut text = if b.source_port == 0 {
+                        self.nodes[b.source].control_text
+                    } else {
+                        None
+                    };
+                    if let Some(group) = b.merge {
+                        match self.nodes[idx].merges[group].value {
+                            visualizer::Datum::Number(value) => {
+                                control = value;
+                                text = None;
+                            }
+                            visualizer::Datum::Text(value) => {
+                                control = 0.;
+                                text = Some(value);
+                            }
+                        }
+                    }
+                    if b.signal == pr0_core::Signal::Control {
+                        let event_only =
+                            b.source_port == 0 && self.nodes[b.source].control_event_only;
+                        let event = b.merge.map_or(
+                            b.source_port == 0 && self.nodes[b.source].control_event,
+                            |group| self.nodes[idx].merges[group].event,
+                        );
+                        if !b.parameter {
+                            self.nodes[idx].input_events[b.destination] = event;
+                            self.nodes[idx].input_event_only[b.destination] = event_only;
+                        }
+                        if event_only && !event {
+                            continue;
+                        }
+                    }
                     let mut audio = self.nodes[b.source].output;
                     if self.nodes[b.source].kind == "channel_split" {
                         let channel = audio[b.source_port];
@@ -1675,11 +2071,16 @@ impl Engine {
                         let is_control = b.signal == pr0_core::Signal::Control;
                         if is_control {
                             self.nodes[idx].input[b.destination][0] = control;
-                            self.nodes[idx].input_text = if b.source_port == 0 {
-                                self.nodes[b.source].control_text
-                            } else {
-                                None
-                            };
+                            if b.destination == 0 {
+                                self.nodes[idx].input_text = text;
+                            }
+                            if self.nodes[idx]
+                                .route
+                                .as_ref()
+                                .is_some_and(|route| b.destination == usize::from(route.send))
+                            {
+                                self.nodes[idx].target_text = text;
+                            }
                         } else {
                             self.nodes[idx].input[b.destination] = audio;
                         }
@@ -1692,10 +2093,54 @@ impl Engine {
                     }
                 }
                 self.graph_clock.set_tempo(self.clock.bpm);
+                if self.nodes[idx].route.is_some() {
+                    self.receive_named(idx);
+                    if self.nodes[idx].kind == "receive_control" {
+                        self.nodes[idx].control_event_only = self.nodes[idx]
+                            .route
+                            .as_ref()
+                            .and_then(|r| r.control_source)
+                            .is_some_and(|source| {
+                                self.nodes[source].route.as_ref().unwrap().event_only
+                            });
+                    }
+                }
                 self.nodes[idx].process(&self.graph_clock, &hardware);
                 if self.nodes[idx].kind == "output" {
                     for (ch, sample) in out.iter_mut().enumerate() {
                         *sample += self.nodes[idx].output[ch] as f32;
+                    }
+                }
+            }
+            for node in &mut self.nodes {
+                if let Some(route) = &mut node.route {
+                    if !route.send {
+                        continue;
+                    }
+                    route.event_only = node.control_event_only;
+                    if node.control_event_only && !node.control_event {
+                        route.ready = true;
+                        route.published_name = route.name;
+                        continue;
+                    }
+                    let value = node
+                        .control_text
+                        .map(visualizer::Datum::Text)
+                        .unwrap_or(visualizer::Datum::Number(node.control[0]));
+                    if node.control_event
+                        || !route.ready
+                        || route.published_name != route.name
+                        || route.published_value != value
+                    {
+                        route.serial = route.serial.wrapping_add(1).max(1);
+                    }
+                    route.ready = true;
+                    route.published_name = route.name;
+                    route.published_value = value;
+                    route.published_audio = node.output;
+                    if let (Some(snapshot), Some(spectrum)) = (&mut route.snapshot, &node.spectral)
+                    {
+                        snapshot.copy_from(spectrum);
                     }
                 }
             }
@@ -1752,6 +2197,16 @@ impl Engine {
             })
             .collect()
     }
+    pub fn route_targets(&self) -> BTreeMap<String, String> {
+        self.nodes
+            .iter()
+            .filter_map(|n| {
+                n.route
+                    .as_ref()
+                    .map(|r| (n.id.clone(), r.name.as_str().to_owned()))
+            })
+            .collect()
+    }
     pub fn telemetry(&self) -> BTreeMap<String, BTreeMap<String, f64>> {
         self.nodes
             .iter()
@@ -1762,7 +2217,42 @@ impl Engine {
                     .cloned()
                     .zip(n.values.iter().copied())
                     .collect();
-                values.insert("_out".into(), n.control[0]);
+                values.insert(
+                    "_out".into(),
+                    if n.control_event_only && !n.control_event {
+                        0.
+                    } else {
+                        n.control[0]
+                    },
+                );
+                if let Some(tracker) = &n.pitch_tracker {
+                    for slot in 0..n.p("slots") as usize {
+                        values.insert(format!("pitch{}", slot + 1), tracker.notes[slot]);
+                        values.insert(format!("_strength{}", slot + 1), tracker.strengths[slot]);
+                    }
+                }
+                if n.kind == "toggle" {
+                    values.insert("_checked".into(), n.count);
+                }
+                for (index, b) in n
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.signal == pr0_core::Signal::Control)
+                {
+                    if b.merge.is_some_and(|group| n.merges[group].winner != index) {
+                        continue;
+                    }
+                    values.insert(
+                        format!("_driver_{}", self.graph.edges[b.edge].target_port),
+                        b.edge as f64,
+                    );
+                }
+
+                if let Some(route) = &n.route {
+                    values.insert("_route_connected".into(), route.connected as f64);
+                    values.insert("_route_error".into(), route.error as u8 as f64);
+                }
                 if n.kind == "trigger" {
                     values.insert("_trigger_sequence".into(), n.count);
                 }
@@ -1791,7 +2281,7 @@ impl Engine {
                 }
                 if n.kind == "piano" {
                     let start = ((n.p("octave") + 1.) * 12.) as usize;
-                    for pitch in start..(start + 12).min(128) {
+                    for pitch in start..(start + 12 * n.p("octaves") as usize).min(128) {
                         values.insert(
                             format!("_key{pitch}"),
                             if n.midi_controls.as_ref().unwrap().held(pitch) {
@@ -1941,12 +2431,25 @@ mod tests {
         engine.render(&[], &mut [[0.; 8]; 2]);
         assert_eq!(engine.telemetry()["receive"]["_key60"], 1.);
         graph.nodes[1].parameters.insert("octave".into(), 3.);
-        let mut next = Engine::prepare(graph, 48000.).unwrap();
+        let mut next = Engine::prepare(graph.clone(), 48000.).unwrap();
         next.clock = engine.clock;
         next.carry_node_state(&mut engine);
         next.render(&[], &mut [[0.; 8]; 2]);
         assert!(!next.telemetry()["receive"].contains_key("_key60"));
         assert_eq!(next.telemetry()["receive"]["gate"], 1.);
+        graph.nodes[1].parameters.insert("octaves".into(), 2.);
+        let mut expanded = Engine::prepare(graph.clone(), 48000.).unwrap();
+        expanded.clock = next.clock;
+        expanded.carry_node_state(&mut next);
+        next = expanded;
+        assert_eq!(next.telemetry()["receive"]["_key60"], 1.);
+        assert_eq!(
+            next.telemetry()["receive"]
+                .keys()
+                .filter(|k| k.starts_with("_key"))
+                .count(),
+            24
+        );
         next.piano_note("keys", 60, 0);
         next.render(&[], &mut [[0.; 8]; 4]);
         assert_eq!(next.telemetry()["receive"]["gate"], 0.);
@@ -1956,6 +2459,17 @@ mod tests {
         next.clock.running = false;
         next.render(&[], &mut [[0.; 8]; 16]);
         assert_eq!(next.telemetry()["receive"]["gate"], 0.);
+        graph.nodes[1].parameters.insert("octave".into(), 9.);
+        graph.nodes[1].parameters.insert("octaves".into(), 8.);
+        let upper = Engine::prepare(graph, 48000.).unwrap();
+        assert_eq!(
+            upper.telemetry()["receive"]
+                .keys()
+                .filter(|k| k.starts_with("_key"))
+                .count(),
+            8
+        );
+        assert!(!upper.telemetry()["receive"].contains_key("_key128"));
     }
     #[test]
     fn part_events_fan_out_to_sampler_and_matching_midi_osc_ports() {
@@ -3540,11 +4054,11 @@ mod trigger_tests {
         let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
         let frame = &mut [[0.; 8]; 1];
         e.render(&[], frame);
-        assert_eq!(e.telemetry()["toggle"]["_out"], 1.);
+        assert_eq!(e.telemetry()["toggle"]["_checked"], 1.);
         e.control("toggle", &pr0_core::ControlValue::Number(0.));
         e.render(&[], frame);
         e.render(&[], frame);
-        assert_eq!(e.telemetry()["toggle"]["_out"], 0.);
+        assert_eq!(e.telemetry()["toggle"]["_checked"], 0.);
         graph.edges.push(pr0_core::Edge {
             id: "in".into(),
             source: "source".into(),
@@ -3554,22 +4068,22 @@ mod trigger_tests {
         });
         let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
         e.render(&[], frame);
-        assert_eq!(e.telemetry()["toggle"]["_out"], 0.);
+        assert_eq!(e.telemetry()["toggle"]["_checked"], 0.);
         e.control("toggle", &pr0_core::ControlValue::Number(1.));
         e.render(&[], &mut [[0.; 8]; 100]);
-        assert_eq!(e.telemetry()["toggle"]["_out"], 1.);
-        e.parameter("source", "value", -2.).unwrap();
+        assert_eq!(e.telemetry()["toggle"]["_checked"], 1.);
+        e.parameter("source", "value", 2.).unwrap();
         e.render(&[], frame);
-        assert_eq!(e.telemetry()["toggle"]["_out"], 1.);
+        assert_eq!(e.telemetry()["toggle"]["_checked"], 1.);
         e.control("toggle", &pr0_core::ControlValue::Number(0.));
         e.render(&[], &mut [[0.; 8]; 100]);
-        assert_eq!(e.telemetry()["toggle"]["_out"], 0.);
-        e.parameter("source", "value", -3.).unwrap();
+        assert_eq!(e.telemetry()["toggle"]["_checked"], 0.);
+        e.parameter("source", "value", 3.).unwrap();
         e.render(&[], frame);
-        assert_eq!(e.telemetry()["toggle"]["_out"], 1.);
+        assert_eq!(e.telemetry()["toggle"]["_checked"], 1.);
         e.parameter("source", "value", 0.).unwrap();
         e.render(&[], frame);
-        assert_eq!(e.telemetry()["toggle"]["_out"], 0.);
+        assert_eq!(e.telemetry()["toggle"]["_checked"], 0.);
         for value in [
             pr0_core::ControlValue::Number(0.5),
             pr0_core::ControlValue::Text("on".into()),
@@ -3633,3 +4147,6 @@ mod trigger_tests {
         assert!(!e.bang("source"));
     }
 }
+
+#[cfg(test)]
+mod routing_tests;

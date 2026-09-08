@@ -180,6 +180,10 @@ pub async fn offer(
     let registry = register_default_interceptors(Registry::new(), &mut media).map_err(bad)?;
     let mut settings = webrtc::api::setting_engine::SettingEngine::default();
     settings.set_include_loopback_candidate(true);
+    // This LAN server advertises numeric host candidates. Browsers initiate ICE
+    // checks; peer-reflexive candidates avoid resolving private .local names.
+    settings.set_lite(true);
+    settings.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
     let api = APIBuilder::new()
         .with_setting_engine(settings)
         .with_media_engine(media)

@@ -12,6 +12,15 @@ test('enabled graph runs audio and clocks while the editable show timeline stays
   await page.addInitScript(()=>{const Native=RTCPeerConnection;window.RTCPeerConnection=class extends Native{constructor(c?:RTCConfiguration){super(c);(window as any).__peer=this}}})
   let latest:any
   page.on('websocket',socket=>socket.on('framereceived',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='telemetry')latest=m}))
+  await page.route(`**/api/projects/${p.id}/media`,async route=>{
+    if(route.request().method()!=='POST'){await route.continue();return}
+    const body=route.request().postDataJSON()
+    body.sdp=body.sdp.replace(/^(a=candidate:\S+ \d+ \S+ \d+ )\S+( \d+ typ host.*)$/gm,'$1unreachable-pr0former-test.local$2')
+    expect(body.sdp).toContain('unreachable-pr0former-test.local')
+    const response=await route.fetch({postData:JSON.stringify(body)})
+    expect((await response.json()).sdp).toContain('a=ice-lite')
+    await route.fulfill({response})
+  })
   await page.goto('/')
   await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
   await expect.poll(()=>latest?.graph_beat).toBeGreaterThan(.1)

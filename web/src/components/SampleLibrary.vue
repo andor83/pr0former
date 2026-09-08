@@ -4,7 +4,7 @@ import {api} from '../api'
 import {matchesSample,type SampleEntry} from '../samples'
 import SampleEditor from './SampleEditor.vue'
 const props=defineProps<{projectId:string;open:boolean;editable:boolean}>()
-const emit=defineEmits<{toggle:[];use:[sample:SampleEntry];entries:[samples:SampleEntry[]]}>()
+const emit=defineEmits<{touch:[event:PointerEvent,sample:SampleEntry];toggle:[];use:[sample:SampleEntry];entries:[samples:SampleEntry[]]}>()
 const entries=ref<SampleEntry[]>([]),catalog=ref<SampleEntry[]>([]),search=ref(''),fullSearch=ref(''),full=ref(false),dialog=ref<HTMLDialogElement>(),editing=ref<SampleEntry>(),busy=ref(false),error=ref(''),previewId=ref('')
 const visible=computed(()=>entries.value.filter(s=>matchesSample(s,search.value))),available=computed(()=>catalog.value.filter(s=>matchesSample(s,fullSearch.value)))
 let preview:HTMLAudioElement|undefined,previewUrl='',timer:ReturnType<typeof setTimeout>|undefined;let generation=0,alive=true
@@ -15,9 +15,10 @@ async function browse(){full.value=true;await nextTick();dialog.value?.showModal
 function close(){stop();dialog.value?.close();full.value=false}
 async function upload(event:Event){const input=event.target as HTMLInputElement;busy.value=true;error.value='';try{for(const file of input.files||[]){const form=new FormData();form.append('sample',file);const response=await fetch(`/api/projects/${props.projectId}/samples`,{method:'POST',headers:{'X-Pr0former':'1'},body:form});const result=await response.json();if(!response.ok)throw new Error(result.error)}await refresh()}catch(e){error.value=String(e);await refresh()}finally{busy.value=false;input.value=''}}
 async function add(s:SampleEntry){busy.value=true;try{await api(`/projects/${props.projectId}/samples/${s.id}/add`,'POST',{});await refresh()}catch(e){error.value=String(e)}finally{busy.value=false}}
+function drag(event:DragEvent,s:SampleEntry){if(!props.editable||s.asset===null){event.preventDefault();return}event.dataTransfer?.setData('application/pr0former',JSON.stringify({sample:s.id}));if(event.dataTransfer)event.dataTransfer.effectAllowed='copy'}
 function edit(s:SampleEntry){stop();editing.value=s}
 onMounted(refresh);watch(()=>props.projectId,()=>{stop();close();editing.value=undefined;void refresh()});onBeforeUnmount(()=>{alive=false;stop()})
-defineExpose({refresh})
+defineExpose({refresh,edit})
 </script>
 <template>
 <section class="sample-library" :class="{expanded:open}" aria-label="Sample library">
@@ -26,7 +27,7 @@ defineExpose({refresh})
     <input v-model="search" aria-label="Search project samples" placeholder="Find project samples…">
     <div class="sample-library-actions"><label class="button small">Import audio<input type="file" multiple hidden :disabled="!editable||busy" aria-label="Import project audio" @change="upload"></label><button class="button small" @click="browse">Browse all</button></div>
     <p v-if="busy" role="status">Importing audio…</p><p v-if="error" role="alert" class="field-error">{{error}}</p>
-    <div class="sample-rows"><article v-for="s in visible" :key="s.id" class="sample-row"><div class="sample-row-title"><button class="text-button" :aria-label="`Preview ${s.name}`" @click="play(s)">{{previewId===s.id?'■':'▶'}}</button><button class="sample-name" :aria-label="`Edit sample ${s.name}`" @click="edit(s)">{{s.name}}</button><button :disabled="!editable||busy" :aria-label="`Add sampler for ${s.name}`" @click="emit('use',s)">＋</button></div><small>{{s.duration.toFixed(1)}} s · {{s.channels}} ch · {{s.category||s.tags||s.author}}</small></article><p v-if="!visible.length" class="feature-note">No matching project samples. Import audio or browse your library.</p></div>
+    <div class="sample-rows"><article v-for="s in visible" :key="s.id" class="sample-row"><div class="sample-row-title"><button class="text-button" :aria-label="`Preview ${s.name}`" @click="play(s)">{{previewId===s.id?'■':'▶'}}</button><button class="sample-name" :draggable="editable&&!busy" style="touch-action:none" @dragstart="drag($event,s)" @pointerdown="editable&&!busy&&emit('touch',$event,s)" :aria-label="`Edit sample ${s.name}`" @click="edit(s)">{{s.name}}</button><button :disabled="!editable||busy" :aria-label="`Add sampler for ${s.name}`" @click="emit('use',s)">＋</button></div><small>{{s.duration.toFixed(1)}} s · {{s.channels}} ch · {{s.category||s.tags||s.author}}</small></article><p v-if="!visible.length" class="feature-note">No matching project samples. Import audio or browse your library.</p></div>
     <p class="feature-note">FFmpeg audio formats · up to 30 s / 8 channels / 64 MB. Converted at the current engine rate.</p>
   </div>
 </section>

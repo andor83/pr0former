@@ -5,13 +5,23 @@ use axum::{
     http::{HeaderMap, header},
     response::{IntoResponse, Response},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
 pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS sample_library(id TEXT PRIMARY KEY,owner TEXT NOT NULL,origin TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT '',musical_key TEXT NOT NULL DEFAULT '',bpm REAL,global INTEGER NOT NULL DEFAULT 0,channels INTEGER NOT NULL,sample_rate INTEGER NOT NULL,frames INTEGER NOT NULL,revision INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS project_samples(project TEXT NOT NULL,sample TEXT NOT NULL REFERENCES sample_library(id),asset INTEGER NOT NULL,PRIMARY KEY(project,sample),UNIQUE(project,asset)); CREATE INDEX IF NOT EXISTS sample_owner ON sample_library(owner); CREATE INDEX IF NOT EXISTS sample_global ON sample_library(global);")
+    db.execute_batch("CREATE TABLE IF NOT EXISTS sample_library(id TEXT PRIMARY KEY,owner TEXT NOT NULL,origin TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT '',musical_key TEXT NOT NULL DEFAULT '',bpm REAL,global INTEGER NOT NULL DEFAULT 0,channels INTEGER NOT NULL,sample_rate INTEGER NOT NULL,frames INTEGER NOT NULL,revision INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS project_samples(project TEXT NOT NULL,sample TEXT NOT NULL REFERENCES sample_library(id),asset INTEGER NOT NULL,PRIMARY KEY(project,sample),UNIQUE(project,asset)); CREATE INDEX IF NOT EXISTS sample_owner ON sample_library(owner); CREATE INDEX IF NOT EXISTS sample_global ON sample_library(global);")?;
+    let exists: bool = db
+        .prepare("PRAGMA table_info(sample_library)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "root_note");
+    if !exists {
+        db.execute("ALTER TABLE sample_library ADD COLUMN root_note INTEGER CHECK(root_note BETWEEN 0 AND 127)", [])?;
+    }
+    Ok(())
 }
 pub fn path(id: &str) -> PathBuf {
     PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into()))
@@ -30,7 +40,7 @@ fn asset(project: &str) -> u32 {
     }
 }
 fn entry(db: &Connection, id: &str, project: &str, u: &str) -> Api<Value> {
-    let mut v: Value=db.query_row("SELECT s.id,s.owner,s.origin,s.name,s.description,s.tags,s.category,s.musical_key,s.bpm,s.global,s.channels,s.sample_rate,s.frames,s.revision,u.username,(SELECT asset FROM project_samples WHERE project=?2 AND sample=s.id) FROM sample_library s JOIN users u ON u.id=s.owner WHERE s.id=?1",params![id,project],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner":r.get::<_,String>(1)?,"origin":r.get::<_,String>(2)?,"name":r.get::<_,String>(3)?,"description":r.get::<_,String>(4)?,"tags":r.get::<_,String>(5)?,"category":r.get::<_,String>(6)?,"musical_key":r.get::<_,String>(7)?,"bpm":r.get::<_,Option<f64>>(8)?,"global":r.get::<_,bool>(9)?,"channels":r.get::<_,u32>(10)?,"sample_rate":r.get::<_,u32>(11)?,"frames":r.get::<_,u64>(12)?,"revision":r.get::<_,u64>(13)?,"author":r.get::<_,String>(14)?,"asset":r.get::<_,Option<u32>>(15)?}))).map_err(|_|bad("Sample unavailable"))?;
+    let mut v: Value=db.query_row("SELECT s.id,s.owner,s.origin,s.name,s.description,s.tags,s.category,s.musical_key,s.bpm,s.global,s.channels,s.sample_rate,s.frames,s.revision,u.username,(SELECT asset FROM project_samples WHERE project=?2 AND sample=s.id),s.root_note FROM sample_library s JOIN users u ON u.id=s.owner WHERE s.id=?1",params![id,project],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner":r.get::<_,String>(1)?,"origin":r.get::<_,String>(2)?,"name":r.get::<_,String>(3)?,"description":r.get::<_,String>(4)?,"tags":r.get::<_,String>(5)?,"category":r.get::<_,String>(6)?,"musical_key":r.get::<_,String>(7)?,"bpm":r.get::<_,Option<f64>>(8)?,"global":r.get::<_,bool>(9)?,"channels":r.get::<_,u32>(10)?,"sample_rate":r.get::<_,u32>(11)?,"frames":r.get::<_,u64>(12)?,"revision":r.get::<_,u64>(13)?,"author":r.get::<_,String>(14)?,"asset":r.get::<_,Option<u32>>(15)?,"root_note":r.get::<_,Option<u8>>(16)?}))).map_err(|_|bad("Sample unavailable"))?;
     let owned = v["owner"] == u;
     let project_edit:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM members WHERE project_id=?1 AND user_id=?2 AND role IN ('owner','conductor','editor'))",params![v["origin"].as_str().unwrap_or(""),u],|r|r.get(0)).map_err(internal)?;
     v["can_edit"] = json!(owned || project_edit);
@@ -177,6 +187,7 @@ pub struct Metadata {
     category: String,
     musical_key: String,
     bpm: Option<f64>,
+    root_note: Option<u8>,
     global: bool,
     revision: u64,
 }
@@ -195,6 +206,7 @@ pub async fn edit(
         || m.description.len() > 4096
         || m.tags.len() > 1024
         || m.category.len() > 128
+        || m.root_note.is_some_and(|note| note > 127)
         || m.musical_key.len() > 64
         || m.bpm
             .is_some_and(|v| !v.is_finite() || !(1. ..=400.).contains(&v))
@@ -215,7 +227,7 @@ pub async fn edit(
             "Only the sample owner can change global sharing".into(),
         ));
     }
-    let changed=db.execute("UPDATE sample_library SET name=?1,description=?2,tags=?3,category=?4,musical_key=?5,bpm=?6,global=?7,revision=revision+1 WHERE id=?8 AND revision=?9",params![m.name.trim(),m.description,m.tags,m.category,m.musical_key,m.bpm,m.global,id,m.revision]).map_err(internal)?;
+    let changed=db.execute("UPDATE sample_library SET name=?1,description=?2,tags=?3,category=?4,musical_key=?5,bpm=?6,global=?7,root_note=?10,revision=revision+1 WHERE id=?8 AND revision=?9",params![m.name.trim(),m.description,m.tags,m.category,m.musical_key,m.bpm,m.global,id,m.revision,m.root_note]).map_err(internal)?;
     if changed == 0 {
         return Err(crate::Failure(
             axum::http::StatusCode::CONFLICT,
@@ -286,4 +298,113 @@ pub async fn audio(
         bytes,
     )
         .into_response())
+}
+
+/// Apply metadata defaults only on new sampler/sample assignments; manual edits remain authoritative.
+pub fn assign_roots(
+    db: &Connection,
+    previous: &pr0_core::Project,
+    project: &mut pr0_core::Project,
+) -> Api<()> {
+    for node in &mut project.graph.nodes {
+        if node.kind != "poly_sampler"
+            || project
+                .graph
+                .edges
+                .iter()
+                .any(|e| e.target == node.id && e.target_port == "root_note")
+        {
+            continue;
+        }
+        let Some(asset) = node.parameters.get("asset").copied() else {
+            continue;
+        };
+        if !asset.is_finite() || asset.fract() != 0. || asset <= 0. {
+            continue;
+        }
+        if previous.graph.nodes.iter().any(|old| {
+            old.id == node.id
+                && old.kind == node.kind
+                && old.parameters.get("asset") == Some(&asset)
+        }) {
+            continue;
+        }
+        let root: Option<u8> = db.query_row("SELECT s.root_note FROM sample_library s JOIN project_samples p ON p.sample=s.id WHERE p.project=?1 AND p.asset=?2", params![project.id, asset as i64], |r| r.get(0)).optional().map_err(internal)?.flatten();
+        if let Some(root) = root {
+            node.parameters.insert("root_note".into(), root as f64);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+    #[test]
+    fn migration_adds_nullable_root_to_existing_catalog_once() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sample_library(id TEXT PRIMARY KEY,owner TEXT,global INTEGER); INSERT INTO sample_library VALUES('legacy','user',0);").unwrap();
+        migrate(&db).unwrap();
+        migrate(&db).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT root_note FROM sample_library WHERE id='legacy'",
+                [],
+                |r| r.get::<_, Option<u8>>(0)
+            )
+            .unwrap(),
+            None
+        );
+        assert!(
+            db.execute("UPDATE sample_library SET root_note=128", [])
+                .is_err()
+        );
+    }
+    #[test]
+    fn assignment_uses_project_metadata_and_preserves_manual_and_connected_roots() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        db.execute_batch("INSERT INTO sample_library(id,owner,origin,name,channels,sample_rate,frames,root_note) VALUES('a','u','p','A',2,48000,100,69),('b','u','p','B',2,48000,100,NULL),('c','u','q','C',2,48000,100,0); INSERT INTO project_samples VALUES('p','a',10),('p','b',11),('q','c',10);").unwrap();
+        let mut project =
+            pr0_core::demo_project("p".into(), "Roots".into(), pr0_core::Mode::Freeform);
+        project.graph.edges.clear();
+        project.graph.nodes.truncate(1);
+        let node = &mut project.graph.nodes[0];
+        node.kind = "poly_sampler".into();
+        node.id = "sampler".into();
+        node.parameters = [("asset".into(), 10.), ("root_note".into(), 60.)].into();
+        let mut previous = project.clone();
+        previous.graph.nodes.clear();
+        assert!(assign_roots(&db, &previous, &mut project).is_ok());
+        assert_eq!(project.graph.nodes[0].parameters["root_note"], 69.);
+        let previous_assigned = project.clone();
+        project.graph.nodes[0]
+            .parameters
+            .insert("root_note".into(), 72.);
+        assert!(assign_roots(&db, &previous_assigned, &mut project).is_ok());
+        assert_eq!(project.graph.nodes[0].parameters["root_note"], 72.);
+        project.graph.nodes[0]
+            .parameters
+            .insert("asset".into(), 11.);
+        assert!(assign_roots(&db, &previous_assigned, &mut project).is_ok());
+        assert_eq!(project.graph.nodes[0].parameters["root_note"], 72.);
+        project.id = "q".into();
+        project.graph.nodes[0]
+            .parameters
+            .insert("asset".into(), 10.);
+        assert!(assign_roots(&db, &previous, &mut project).is_ok());
+        assert_eq!(project.graph.nodes[0].parameters["root_note"], 0.);
+        project.graph.nodes[0]
+            .parameters
+            .insert("root_note".into(), 45.);
+        project.graph.edges.push(pr0_core::Edge {
+            id: "drive".into(),
+            source: "source".into(),
+            source_port: "out".into(),
+            target: "sampler".into(),
+            target_port: "root_note".into(),
+        });
+        assert!(assign_roots(&db, &previous, &mut project).is_ok());
+        assert_eq!(project.graph.nodes[0].parameters["root_note"], 45.);
+    }
 }

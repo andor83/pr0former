@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {nextTick,onBeforeUnmount,onMounted,ref} from 'vue'
 import {api} from '../api'
-import type {SampleEntry} from '../samples'
+import {midiNoteLabel,type SampleEntry} from '../samples'
 const props=defineProps<{projectId:string;sample:SampleEntry}>()
 const emit=defineEmits<{close:[];saved:[]}>()
 const dialog=ref<HTMLDialogElement>(),canvas=ref<HTMLCanvasElement>(),audio=ref<HTMLAudioElement>()
@@ -41,6 +41,8 @@ onBeforeUnmount(()=>{controller.abort();audio.value?.pause();if(context)void con
   <label>Tags<input v-model="draft.tags" placeholder="piano, soft, loop…" maxlength="1024" :disabled="!sample.can_edit||busy"></label>
   <label>Description<textarea v-model="draft.description" maxlength="4096" :disabled="!sample.can_edit||busy"></textarea></label>
   <div class="sample-musical"><label>BPM<input v-model.number="draft.bpm" type="number" min="1" max="400" :disabled="!sample.can_edit||busy" @change="draft.bpm=draft.bpm||null"></label><label>Musical key<input v-model="draft.musical_key" maxlength="64" placeholder="C minor" :disabled="!sample.can_edit||busy"></label></div>
+  <label>Root pitch<select aria-label="Root pitch" :value="draft.root_note??''" :disabled="!sample.can_edit||busy" @change="draft.root_note=($event.target as HTMLSelectElement).value===''?null:Number(($event.target as HTMLSelectElement).value)"><option value="">Not set</option><option v-for="note in 128" :key="note-1" :value="note-1">{{midiNoteLabel(note-1)}}</option></select></label>
+  <p class="feature-note">Sets the root MIDI note when this sample is assigned to a pitched sampler. Existing sampler settings and connected root-note controls are preserved.</p>
   <label class="check-label"><input v-model="draft.global" type="checkbox" :disabled="!sample.can_publish||busy">Global — available to every user and project</label>
   <p class="feature-note">Project members can access samples already added to their project. Turning Global off hides this sample from future browsing; existing project copies remain available.</p>
   <p v-if="error" class="field-error" role="alert">{{error}}</p>

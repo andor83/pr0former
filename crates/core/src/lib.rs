@@ -235,6 +235,17 @@ fn port(id: &str, signal: Signal) -> Port {
     }
 }
 
+pub fn named_route(kind: &str) -> bool {
+    matches!(
+        kind,
+        "send_control"
+            | "receive_control"
+            | "send_audio"
+            | "receive_audio"
+            | "send_spectral"
+            | "receive_spectral"
+    )
+}
 pub fn catalog() -> Vec<Descriptor> {
     use Signal::*;
     let mut result = Vec::new();
@@ -534,11 +545,38 @@ pub fn catalog() -> Vec<Descriptor> {
         &["score", "notes", "part input"],
     );
     add(
+        "pitch_tracker",
+        "Pitch tracker",
+        "♬",
+        "Analysis",
+        "Mix audio channels to mono and estimate up to four pitches using a windowed FFT. Slots rank strongest first and output integer MIDI notes; -1 means no detected pitch. Harmonic grouping is approximate, especially for octaves, missing fundamentals, noise and transients. Larger FFTs improve low-note resolution but add analysis delay.",
+        vec![port("in", Audio)],
+        (1..=4)
+            .map(|i| {
+                let mut p = port(&format!("pitch{i}"), Control);
+                p.label = format!("Pitch {i}");
+                p
+            })
+            .collect(),
+        vec![
+            Parameter {
+                structural: true,
+                ..param("slots", "Pitch slots", "", 1., 4., 1.)
+            },
+            Parameter {
+                structural: true,
+                ..param("fft_size", "FFT size", "samples", 2048., 8192., 8192.)
+            },
+            param("threshold", "Detection threshold", "dBFS", -90., -12., -55.),
+        ],
+        &["pitch detection", "audio to midi", "frequency tracker"],
+    );
+    add(
         "piano",
         "Piano",
         "♬",
         "Control",
-        "Playable one-octave MIDI keyboard. Receives and forwards pitch, velocity, gate, trigger and note_off, including notes outside the displayed octave. Held received notes light matching keys. Enable the audio engine to test outputs without playing the show; keys send velocity 100. Choose the displayed octave in the modal.",
+        "Playable MIDI keyboard with a selectable 1–8 octave span. Receives and forwards pitch, velocity, gate, trigger and note_off, including notes outside the displayed octave. Held received notes light matching keys. Enable the audio engine to test outputs without playing the show; keys send velocity 100. Choose the starting octave and octave span in the modal. Display stops at MIDI 127.",
         ["pitch", "velocity", "gate", "trigger", "note_off"]
             .into_iter()
             .map(|id| port(id, Control))
@@ -547,10 +585,16 @@ pub fn catalog() -> Vec<Descriptor> {
             .into_iter()
             .map(|id| port(id, Control))
             .collect(),
-        vec![Parameter {
-            structural: true,
-            ..param("octave", "Octave", "", -1., 9., 4.)
-        }],
+        vec![
+            Parameter {
+                structural: true,
+                ..param("octave", "Octave", "", -1., 9., 4.)
+            },
+            Parameter {
+                structural: true,
+                ..param("octaves", "Octave span", "", 1., 8., 1.)
+            },
+        ],
         &["keyboard", "midi test"],
     );
     for input in [true, false] {
@@ -708,10 +752,10 @@ pub fn catalog() -> Vec<Descriptor> {
         "Value",
         "ƒ",
         "Control",
-        "Stored numeric value or constant.",
-        vec![],
+        "Set value stores a number. With Trigger connected, any nonzero trigger emits the stored value (including zero); output holds the last emitted value between triggers. Without a Trigger connection, output is constant. The node displays the stored value.",
+        vec![port("trigger", Control)],
         vec![port("out", Control)],
-        vec![param("value", "Value", "", -100000., 100000., 0.)],
+        vec![param("value", "Set value", "", -100000., 100000., 0.)],
         &["float", "int"],
     );
     add(
@@ -1213,12 +1257,57 @@ pub fn catalog() -> Vec<Descriptor> {
         ],
         &[],
     );
+    for (suffix, signal) in [
+        ("control", Control),
+        ("audio", Audio),
+        ("spectral", Spectral),
+    ] {
+        for send in [true, false] {
+            let kind = format!("{}_{suffix}", if send { "send" } else { "receive" });
+            let label = format!("{} {}", if send { "Send" } else { "Receive" }, suffix);
+            let mut inputs = if send {
+                vec![port("in", signal)]
+            } else {
+                vec![]
+            };
+            inputs.push(port("target", Control));
+            let parameters = if signal == Spectral {
+                vec![
+                    Parameter {
+                        structural: true,
+                        ..param("size", "FFT size", "", 256., 8192., 1024.)
+                    },
+                    Parameter {
+                        structural: true,
+                        ..param("overlap", "Overlap", "", 2., 4., 4.)
+                    },
+                ]
+            } else {
+                vec![]
+            };
+            add(
+                &kind,
+                &label,
+                if send { "↗" } else { "↙" },
+                "Routing",
+                "Route data to matching target names within this project graph. Set the target in the modal or drive it with text. Named routes add one engine sample of delay. Audio sends mix; control changes use arrival order and uppermost-source priority on ties; spectral receives use the uppermost compatible sender. Empty targets disconnect. Dynamic format mismatches are reported in telemetry.",
+                inputs,
+                if send {
+                    vec![]
+                } else {
+                    vec![port("out", signal)]
+                },
+                parameters,
+                &[],
+            );
+        }
+    }
     add(
         "toggle",
         "Toggle",
         "✓",
         "Control",
-        "A latched checkbox: checked outputs 1, unchecked outputs 0. Changed numeric input sets the checkbox (zero off, nonzero on). Manual clicks override until the input changes again. Manual settings are saved; input-driven state is runtime only.",
+        "A latched checkbox that emits one event when its state changes: 1 when checked, 0 when cleared. It emits nothing while idle. Changed input sets the checkbox (positive numbers or text on; zero or negative numbers off). Manual clicks override until the input changes again. Manual settings are saved; input-driven state is runtime only.",
         vec![port("in", Control)],
         vec![port("out", Control)],
         vec![],
@@ -1480,7 +1569,7 @@ impl Graph {
         // Validate metadata and limits before resolving any references.
         let mut metadata = self.clone();
         metadata.edges.clear();
-        metadata.validate_flat()?;
+        metadata.validate_flat_inner(false)?;
         let nodes: BTreeMap<_, _> = self.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
         for node in &self.nodes {
             if let Some(reference) = &node.library {
@@ -1561,8 +1650,14 @@ impl Graph {
         Ok(flat)
     }
     pub fn validate_flat(&self) -> Result<Vec<usize>, String> {
+        self.validate_flat_inner(true)
+    }
+    fn validate_flat_inner(&self, check_routes: bool) -> Result<Vec<usize>, String> {
         if self.nodes.iter().filter(|n| n.kind == "record").count() > 16 {
             return Err("At most 16 record nodes are supported".into());
+        }
+        if self.nodes.iter().filter(|n| named_route(&n.kind)).count() > 64 {
+            return Err("At most 64 named send/receive nodes are supported".into());
         }
         if self.nodes.len() > 256 || self.edges.len() > 2048 {
             return Err("Graph exceeds 256 nodes / 2048 edges".into());
@@ -1592,7 +1687,27 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
-            if n.kind == "piano" && n.parameters.get("octave").is_some_and(|v| v.fract() != 0.) {
+            if n.kind == "pitch_tracker" {
+                let slots = n.parameters.get("slots").copied().unwrap_or(1.);
+                let size = n.parameters.get("fft_size").copied().unwrap_or(8192.);
+                if slots.fract() != 0. || size.fract() != 0. || !(size as usize).is_power_of_two() {
+                    return Err(
+                        "Choose whole pitch slots and a power-of-two tracker FFT size".into(),
+                    );
+                }
+            }
+            if n.kind == "poly_sampler"
+                && n.parameters
+                    .get("root_note")
+                    .is_some_and(|v| v.fract() != 0.)
+            {
+                return Err("Root MIDI note must be a whole number".into());
+            }
+            if n.kind == "piano"
+                && ["octave", "octaves"]
+                    .iter()
+                    .any(|key| n.parameters.get(*key).is_some_and(|v| v.fract() != 0.))
+            {
                 return Err("Piano octave must be a whole number".into());
             }
             if let Some(part) = &n.part_id {
@@ -1647,10 +1762,12 @@ impl Graph {
                 return Err("Choose numeric or text OSC input".into());
             }
             if let Some(value) = &n.control_value {
-                if !matches!(
-                    n.kind.as_str(),
-                    "control_visualizer" | "control_input" | "toggle"
-                ) {
+                if !named_route(&n.kind)
+                    && !matches!(
+                        n.kind.as_str(),
+                        "control_visualizer" | "control_input" | "toggle"
+                    )
+                {
                     return Err(
                         "Input literals belong to graphical controls or control visualizers".into(),
                     );
@@ -1664,6 +1781,13 @@ impl Graph {
                     }
                     _ => {}
                 }
+            }
+            if named_route(&n.kind)
+                && n.control_value
+                    .as_ref()
+                    .is_some_and(|v| !matches!(v, ControlValue::Text(_)))
+            {
+                return Err("Route target must be text".into());
             }
             if n.kind == "toggle"
                 && n.control_value
@@ -1701,7 +1825,10 @@ impl Graph {
                     _ => {}
                 }
             }
-            if d.category == "Spectral" || n.kind == "audio_visualizer" {
+            if d.category == "Spectral"
+                || n.kind == "audio_visualizer"
+                || (named_route(&n.kind) && n.kind.ends_with("spectral"))
+            {
                 let size = n.parameters.get("size").copied().unwrap_or(1024.);
                 let overlap = n.parameters.get("overlap").copied().unwrap_or(4.);
                 if size.fract() != 0.
@@ -1754,7 +1881,9 @@ impl Graph {
                         .iter()
                         .any(|n| n.id == e.target && n.kind == "clock")
             })
-            .count()
+            .map(|e| &e.target)
+            .collect::<BTreeSet<_>>()
+            .len()
             > 1
         {
             return Err("Only one global clock tempo input may be connected".into());
@@ -1777,6 +1906,15 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == self.nodes[t].kind)
                 .unwrap();
+            if self.nodes[s].kind == "pitch_tracker"
+                && !sd
+                    .outputs
+                    .iter()
+                    .take(self.nodes[s].parameters.get("slots").copied().unwrap_or(1.) as usize)
+                    .any(|p| p.id == edge.source_port)
+            {
+                return Err("Pitch tracker output slot is not enabled".into());
+            }
             let signal = sd
                 .outputs
                 .iter()
@@ -1821,7 +1959,7 @@ impl Graph {
                 }
             }
             if signal == Signal::Audio
-                && self.nodes[t].kind != "record"
+                && !matches!(self.nodes[t].kind.as_str(), "record" | "pitch_tracker")
                 && sd
                     .outputs
                     .iter()
@@ -1839,7 +1977,7 @@ impl Graph {
             {
                 return Err("Audio channel widths do not match".into());
             }
-            if !occupied.insert((t, edge.target_port.clone())) {
+            if !occupied.insert((t, edge.target_port.clone())) && signal != Signal::Control {
                 return Err("Input already has a driver; use a mixer or math node".into());
             }
             outgoing[s].push(t);
@@ -1872,36 +2010,113 @@ impl Graph {
         {
             return Err("At most 16 visualizers per graph".into());
         }
-        let mut text = vec![false; self.nodes.len()];
-        for &i in &order {
-            if matches!(
-                self.nodes[i].kind.as_str(),
-                "control_visualizer" | "control_input" | "osc_input"
-            ) || (self.nodes[i].kind.starts_with("subgraph_")
-                && self.nodes[i].kind.ends_with("_control"))
+        fn route_target(n: &Node) -> &str {
+            match &n.control_value {
+                Some(ControlValue::Text(value)) => value.as_str(),
+                _ => "",
+            }
+        }
+        let dynamic = |n: &Node| {
+            self.edges
+                .iter()
+                .any(|e| e.target == n.id && e.target_port == "target")
+        };
+        if check_routes {
+            for receive in self
+                .nodes
+                .iter()
+                .filter(|n| named_route(&n.kind) && n.kind.starts_with("receive_"))
             {
-                text[i] = if let Some(edge) = self
-                    .edges
-                    .iter()
-                    .find(|e| e.target == self.nodes[i].id && e.target_port == "in")
+                for send in self.nodes.iter().filter(|n| {
+                    named_route(&n.kind)
+                        && n.kind.starts_with("send_")
+                        && n.kind.strip_prefix("send_") == receive.kind.strip_prefix("receive_")
+                }) {
+                    if !dynamic(send)
+                        && !dynamic(receive)
+                        && !route_target(send).is_empty()
+                        && route_target(send) == route_target(receive)
+                    {
+                        if send.kind != "send_control" && send.channels != receive.channels {
+                            return Err(
+                                "Named audio/spectral routes must have matching channels".into()
+                            );
+                        }
+                        if send.kind == "send_spectral"
+                            && ["size", "overlap"].iter().any(|key| {
+                                send.parameters
+                                    .get(*key)
+                                    .copied()
+                                    .unwrap_or(if *key == "size" { 1024. } else { 4. })
+                                    != receive
+                                        .parameters
+                                        .get(*key)
+                                        .copied()
+                                        .unwrap_or(if *key == "size" { 1024. } else { 4. })
+                            })
+                        {
+                            return Err(
+                                "Named spectral routes must have matching FFT configurations"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let mut text = vec![false; self.nodes.len()];
+        for _ in 0..=self.nodes.len() {
+            let previous = text.clone();
+            for &i in &order {
+                let n = &self.nodes[i];
+                if n.kind == "receive_control" {
+                    text[i] |= self.nodes.iter().enumerate().any(|(j, s)| {
+                        s.kind == "send_control"
+                            && (dynamic(s)
+                                || dynamic(n)
+                                || (!route_target(s).is_empty()
+                                    && route_target(s) == route_target(n)))
+                            && text[j]
+                    });
+                } else if matches!(
+                    n.kind.as_str(),
+                    "control_visualizer" | "control_input" | "osc_input" | "send_control"
+                ) || (n.kind.starts_with("subgraph_") && n.kind.ends_with("_control"))
                 {
-                    text[*ids.get(&edge.source).unwrap()]
-                } else {
-                    matches!(self.nodes[i].control_value, Some(ControlValue::Text(_)))
-                        || (self.nodes[i].kind == "osc_input"
-                            && self.nodes[i].parameters.get("text") == Some(&1.))
-                        || (self.nodes[i].kind == "control_input"
-                            && self.nodes[i].parameters.get("mode") == Some(&4.))
-                };
+                    let incoming: Vec<_> = self
+                        .edges
+                        .iter()
+                        .filter(|e| e.target == n.id && e.target_port == "in")
+                        .collect();
+                    text[i] |= if incoming.is_empty() {
+                        (n.kind != "send_control"
+                            && matches!(n.control_value, Some(ControlValue::Text(_))))
+                            || (n.kind == "osc_input" && n.parameters.get("text") == Some(&1.))
+                            || (n.kind == "control_input" && n.parameters.get("mode") == Some(&4.))
+                    } else {
+                        incoming.iter().any(|e| text[*ids.get(&e.source).unwrap()])
+                    };
+                }
+            }
+            if previous == text {
+                break;
             }
         }
         for edge in &self.edges {
             let source = *ids.get(&edge.source).unwrap();
             let target = *ids.get(&edge.target).unwrap();
+            if named_route(&self.nodes[target].kind)
+                && edge.target_port == "target"
+                && !text[source]
+            {
+                return Err("Named route target input requires string control data".into());
+            }
             if text[source]
+                && !(named_route(&self.nodes[target].kind)
+                    && (edge.target_port == "target" || self.nodes[target].kind == "send_control"))
                 && !matches!(
                     self.nodes[target].kind.as_str(),
-                    "control_visualizer" | "control_input" | "osc_output"
+                    "control_visualizer" | "control_input" | "osc_output" | "toggle"
                 )
                 && !(self.nodes[target].kind.starts_with("subgraph_")
                     && self.nodes[target].kind.ends_with("_control"))

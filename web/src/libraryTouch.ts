@@ -1,6 +1,6 @@
 import { onBeforeUnmount, ref } from 'vue'
 
-export type LibraryItem = { kind: string } | { library: string; version: number }
+export type LibraryItem = { sample: string } | { kind: string } | { library: string; version: number }
 
 // Touch cannot rely on HTML drag-and-drop. A sideways drag places an item;
 // vertical swipes scroll the list, and holding briefly enables any-direction drag.
@@ -21,7 +21,7 @@ export function useLibraryTouch(options: {
     const origin = { x: event.clientX, y: event.clientY }
     let previousY = origin.y
     let mode: 'pending' | 'drag' | 'scroll' = 'pending'
-    const scroller = button.closest('.library-list,.subgraph-library-content') as HTMLElement | null
+    const scroller = button.closest('.library-list,.subgraph-library-content,.sample-rows') as HTMLElement | null
     const drag = (x: number, y: number) => { mode = 'drag'; preview.value = { label, x, y } }
     const hold = setTimeout(() => drag(origin.x, origin.y), 250)
     const move = (e: PointerEvent) => {

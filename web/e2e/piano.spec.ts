@@ -80,6 +80,17 @@ test('piano plays notes, forwards polyphony, highlights received keys and select
   expect(await black.evaluate(el=>getComputedStyle(el).backgroundColor)).toBe(dark)
   await note(60,100)
   await expect.poll(()=>latest?.values?.['Receive keys']?.gate).toBe(1)
+  await page.getByRole('button',{name:'Edit Receive keys',exact:true}).click()
+  await page.getByLabel('Octave span',{exact:true}).selectOption('2')
+  await page.getByRole('button',{name:'Close parameters',exact:true}).click()
+  await expect(receiver.locator('.piano-key')).toHaveCount(24)
+  await expect(receiver.getByRole('button',{name:'C4 MIDI 60',exact:true})).toHaveAttribute('aria-pressed','true')
+  await page.screenshot({path:'test-results/piano-multiple-octaves.png'})
+  for(const span of [0,1.5,9]){
+    const invalid=(await(await page.request.get(`/api/projects/${p.id}`)).json()).project
+    invalid.graph.nodes[0].parameters.octaves=span
+    expect((await page.request.put(`/api/projects/${p.id}`,{headers,data:invalid})).status()).toBe(400)
+  }
   await page.getByRole('button',{name:'Play',exact:true}).click()
   await expect.poll(()=>latest?.running).toBe(true)
   await page.getByRole('button',{name:'Pause',exact:true}).click()

@@ -2,6 +2,7 @@ import { newId } from './id'
 import type { Descriptor, GraphNode, GraphEdge, Signal } from './types'
 export function nodeDescriptor(node: GraphNode, nodes: GraphNode[], catalog: Descriptor[]): Descriptor {
   const base = catalog.find(d => d.kind === node.kind)!
+  if(node.kind==='pitch_tracker')return {...base,outputs:base.outputs.slice(0,node.parameters.slots??1)}
   if (node.kind === 'subgraph') {
     const ports = (direction: string) => nodes.filter(n => n.parent === node.id && n.kind.startsWith(`subgraph_${direction}_`)).map(n => ({ id: n.id, label: n.label, signal: n.kind.split('_').at(-1) as Signal, fixed_channels: n.channels }))
     return {...base, inputs: ports('input'), outputs: ports('output')}

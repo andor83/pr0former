@@ -189,4 +189,33 @@ Add **Looper** for eight independent loop tracks. Wire audio plus numbered (1–
 Add **Record** to archive an incoming multichannel bundle. Its channel count follows the audio input automatically. Set the node name in its settings modal, then pulse Start/Stop with a positive value (zero rearms). Each take writes a unique, timestamped 32-bit float WAV at the engine sample rate under `recordings/` in the server root, grouped by project. Large takes split into 1 GiB segments. Stop or disable the engine to finalize; stopping the show alone leaves recording running. Project ownership is stored alongside each private archive. These files are outside web static serving; a project-authorized download browser is still planned. Hardware/endurance recording remains unverified.
 
 
-**Trigger** is a compact radio-style button. Click to emit a single-sample 1 even with input connected; otherwise its output passes the input unchanged. **Toggle** is a compact checkbox that holds 1 when checked and 0 when unchecked. Changed input sets Toggle's state, while manual clicks hold until the input changes again. Manual Toggle settings are saved. Open settings through the node's context menu or keyboard.
+**Trigger** is a compact radio-style button. Click to emit a single-sample 1 even with input connected; otherwise its output passes the input unchanged. **Toggle** keeps its checkbox state but emits only once per change: 1 when checked, 0 when cleared, and nothing while idle. A connected Trigger flashes briefly; a counter advances only on checking. Changed input sets Toggle's state: positive numbers and text check it; zero and negative numbers clear it, while manual clicks hold until the input changes again. Manual Toggle settings are saved. Open settings through the node's context menu or keyboard.
+
+
+### Sample pitch and control routing
+
+Sample metadata includes an optional **Root pitch** (MIDI 0–127). Assigning a sample to a polyphonic sampler initializes its Root note from that metadata. Existing sampler overrides and connected Root note inputs are preserved; clearing sample metadata leaves the sampler default available.
+
+**Value** displays its stored number with labeled **Trigger** (top) and **Set value** (bottom) inputs. Set value updates the number; a connected nonzero Trigger emits it, including an explicit value of zero. The output holds the last emitted value between triggers. With Trigger disconnected, Value continuously outputs its number. Edit the manual number in settings.
+
+Control inputs accept multiple sources. Changed values are processed in engine-sample order, including zero. When sources change in the same sample, the visually upper source wins (horizontal position breaks a height tie). Settings show all connections and the current source. Audio and spectral inputs retain one wired source.
+
+The Routing library contains **Send** and **Receive** variants for control, audio and spectral data. Set matching Target names in their modals, or connect text to Target. Empty names disconnect. Routes stay within the active project graph and introduce one sample of delay. Audio sends mix into matching receivers; control sends use arrival order and upper-source priority; spectral receivers choose the upper compatible sender. Channel widths and spectral formats must match.
+
+Select two nodes and choose **Connect matching ports** from the context menu, or press **C**. Matching names and types connect from the first selected node to the second. Box-selected pairs connect left to right. The operation is one undo step and still requires server graph validation.
+
+Drag an input connector to move all its incoming connections together. Drop on another input to reconnect, or elsewhere to delete the bundle. Escape cancels; Undo restores the whole operation. Dragging an output always creates a new connection. Invalid input destinations are rejected by the server and retain the original connections.
+
+
+Piano settings offer a starting **Octave** and an **Octave span** dropdown (1–8). The keyboard widens to keep keys usable, lights received notes throughout its visible range, and stops at MIDI 127. Sampler **Root MIDI note** editing uses whole numbers from 0 to 127.
+
+Drag a sample name from the **Samples** sidebar onto a Polyphonic sampler, Sample player, or Phase vocoder to assign it. Dropping on empty graph space creates a polyphonic sampler at that point, using the sample's channels and root-pitch default. Touch supports sideways dragging or holding briefly before dragging; vertical swipes scroll the sample list. Unsupported nodes report an error instead of creating an overlapping sampler.
+
+WebRTC uses ICE-lite on this LAN server and advertises numeric host addresses. Browsers initiate connectivity checks, so the server no longer retries multicast lookups of browser `.local` candidates. This removes the repeating `webrtc_mdns::conn` send errors without filtering console logs. Restart the server and reconnect monitors to use this configuration; physical LAN routing and client-device behavior still require deployment testing.
+
+
+### Pitch tracker
+
+Add **Pitch tracker** from Analysis and connect audio. It automatically averages the incoming 1–8 channels to mono. Choose **Pitch slots** (1–4, default 1) in settings. Detected notes appear left to right from strongest to weakest, with individual **Pitch 1–4** outputs carrying integer MIDI note numbers. Empty slots show “—” and output **−1**. Reducing the slot count disconnects removed outputs in the same undoable edit.
+
+**FFT size** offers 2048, 4096 or 8192 samples; **Detection threshold** controls the minimum peak level. The default 8192-sample window takes about 171 ms at 48 kHz and updates every 43 ms. Outputs hold the latest analysis until the next update; these are pitch values, not MIDI note-on/off or gate events. Harmonic grouping is approximate: octave doubles, missing fundamentals, noise, transients and closely spaced low notes can be misidentified. Opposite-phase channels can cancel during mono mixing. Real-instrument accuracy and physical-device latency remain unverified.

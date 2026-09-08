@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, reactive, onBeforeUnmount, onMounted, watch } from 'vue'
-const props = defineProps<{ octave:number; values?:Record<string,number>; disabled:boolean; stale:boolean }>()
+const props = defineProps<{ octave:number; octaves:number; values?:Record<string,number>; disabled:boolean; stale:boolean }>()
 const emit = defineEmits<{ note:[pitch:number,velocity:number] }>()
 const names = ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B']
 const positions = [0,.65,1,1.65,2,3,3.65,4,4.65,5,5.65,6]
-const keys = computed(() => names.map((name,index) => ({name, pitch:(props.octave+1)*12+index, black:name.includes('♯'), left:positions[index]!/7*100})))
+const span=computed(()=>Math.min(props.octaves,10-props.octave))
+const keys = computed(() => Array.from({length:span.value*12},(_,index)=>{const name=names[index%12]!,octave=props.octave+Math.floor(index/12);return {name,octave,pitch:(props.octave+1)*12+index,black:name.includes('♯'),left:(Math.floor(index/12)*7+positions[index%12]!)/(span.value*7)*100}}))
 const held = reactive(new Map<string,number>())
 function lit(pitch:number) { return [...held.values()].includes(pitch) || (!props.stale && !!props.values?.[`_key${pitch}`]) }
 function press(token:string,pitch:number) { if (props.disabled || pitch>127 || held.has(token)) return; held.set(token,pitch); emit('note',pitch,100) }
@@ -12,13 +13,13 @@ function release(token:string) { const pitch=held.get(token); if(pitch===undefin
 function down(event:PointerEvent,pitch:number) { if(event.button!==0)return; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId); press(`p${event.pointerId}`,pitch) }
 function clear() { for(const token of [...held.keys()])release(token) }
 function visibility() { if(document.hidden)clear() }
-watch(() => [props.octave,props.disabled],clear)
+watch(() => [props.octave,props.octaves,props.disabled],clear)
 onMounted(() => { window.addEventListener('blur',clear); document.addEventListener('visibilitychange',visibility) })
 onBeforeUnmount(() => { clear(); window.removeEventListener('blur',clear); document.removeEventListener('visibilitychange',visibility) })
 </script>
 <template>
   <div class="piano-keys nodrag nopan nowheel" role="group" aria-label="Piano keyboard" @dblclick.stop @pointerdown.stop @touchstart.stop.prevent @keydown.stop @keyup.stop>
-    <button v-for="key in keys" :key="key.pitch" class="piano-key" :class="{black:key.black,lit:lit(key.pitch)}" :style="{left:`${key.left}%`}" :disabled="disabled || key.pitch>127" :aria-label="`${key.name}${octave} MIDI ${key.pitch}`" :aria-pressed="lit(key.pitch)" @pointerdown.prevent.stop="down($event,key.pitch)" @pointerup.prevent.stop="release(`p${$event.pointerId}`)" @pointercancel.stop="release(`p${$event.pointerId}`)" @lostpointercapture="release(`p${$event.pointerId}`)" @keydown.space.prevent="press(`k${key.pitch}`,key.pitch)" @keydown.enter.prevent="press(`k${key.pitch}`,key.pitch)" @keyup.space.prevent="release(`k${key.pitch}`)" @keyup.enter.prevent="release(`k${key.pitch}`)" @blur="release(`k${key.pitch}`)"><span>{{key.name==='C'?`C${octave}`:key.name}}</span></button>
+    <button v-for="key in keys" :key="key.pitch" class="piano-key" :class="{black:key.black,lit:lit(key.pitch)}" :style="{left:`${key.left}%`,width:`${(key.black?10:100/7)/span}%`}" :disabled="disabled || key.pitch>127" :aria-label="`${key.name}${key.octave} MIDI ${key.pitch}`" :aria-pressed="lit(key.pitch)" @pointerdown.prevent.stop="down($event,key.pitch)" @pointerup.prevent.stop="release(`p${$event.pointerId}`)" @pointercancel.stop="release(`p${$event.pointerId}`)" @lostpointercapture="release(`p${$event.pointerId}`)" @keydown.space.prevent="press(`k${key.pitch}`,key.pitch)" @keydown.enter.prevent="press(`k${key.pitch}`,key.pitch)" @keyup.space.prevent="release(`k${key.pitch}`)" @keyup.enter.prevent="release(`k${key.pitch}`)" @blur="release(`k${key.pitch}`)"><span>{{key.name==='C'?`C${key.octave}`:key.name}}</span></button>
   </div>
 </template>
 <style scoped>

@@ -63,6 +63,23 @@ impl Spectral {
             self.fresh = true;
         }
     }
+    // Named routes own their output generation so changing senders cannot alias generations.
+    pub fn route_from(&mut self, source: &Self) {
+        for (target, input) in self.bins.iter_mut().zip(&source.bins) {
+            target.copy_from_slice(input);
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.polar = source.polar;
+        self.fresh = true;
+    }
+    pub fn route_silence(&mut self) {
+        for bins in &mut self.bins {
+            bins.fill(Complex::new(0., 0.));
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.polar = false;
+        self.fresh = true;
+    }
     pub fn forward(&mut self, input: [f64; 8]) {
         for (ch, x) in input.iter().enumerate().take(self.channels) {
             self.history[ch][self.cursor] = *x as f32;

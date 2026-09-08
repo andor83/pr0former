@@ -509,11 +509,30 @@ async fn update_project(
     if p.id != id {
         return Err(bad("Project ID mismatch"));
     }
+    let previous = load(&app, &id)?;
+    sample_library::assign_roots(&app.db.lock().unwrap(), &previous, &mut p)?;
     p.validate().map_err(bad)?;
     let active = app.active.lock().unwrap().as_deref() == Some(&id);
-    let previous = load(&app, &id)?;
     settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
     for node in &p.graph.nodes {
+        if pr0_core::named_route(&node.kind)
+            && previous
+                .graph
+                .nodes
+                .iter()
+                .any(|old| old.id == node.id && old.control_value != node.control_value)
+            && previous
+                .graph
+                .flatten()
+                .map_err(bad)?
+                .edges
+                .iter()
+                .any(|e| e.target == node.id && e.target_port == "target")
+        {
+            return Err(bad(
+                "Connected route target is read-only; disconnect it before editing",
+            ));
+        }
         if matches!(node.kind.as_str(), "control_visualizer" | "control_input")
             && previous
                 .graph
@@ -802,6 +821,7 @@ async fn parameter(
         return Err(bad("Deactivate before changing structural parameters"));
     }
     n.parameters.insert(c.parameter.clone(), c.value);
+    sample_library::assign_roots(&app.db.lock().unwrap(), &previous, &mut p)?;
     p.validate().map_err(bad)?;
     settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
     // Serialize revisions before enqueueing; failed runtime delivery is reported explicitly.
