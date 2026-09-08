@@ -1,6 +1,7 @@
 mod audio;
 mod bind;
 mod build_info;
+mod hardware_meter;
 mod media;
 mod osc;
 mod output_buffer;
@@ -713,6 +714,7 @@ async fn transport(
         if app.active.lock().unwrap().as_deref() == Some(&id) {
             return Ok(Json(json!({"ok":true})));
         }
+        settings::discover().await?;
         app.logs.push(&id, "info", "Preparing show activation");
         let project = load(&app, &id)?;
         let prepared_project = project.clone();
@@ -890,6 +892,10 @@ async fn members(
 }
 async fn devices(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
     user(&app, &headers)?;
+    {
+        let _setup = app.setup.lock().await;
+        settings::discover().await?;
+    }
     let (tx, rx) = oneshot::channel();
     send(&app, audio::Command::Devices(tx))?;
     Ok(Json(
@@ -929,6 +935,9 @@ async fn audio_enable(
     Ok(Json(json!({"ok":true})))
 }
 async fn enable_engine(app: &App, id: &str, enabled: bool) -> Api<()> {
+    if enabled {
+        settings::discover().await?;
+    }
     let (tx, rx) = oneshot::channel();
     send(
         app,
@@ -1139,7 +1148,7 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String) {
     let mut visualizers = false;
     loop {
         tokio::select! {
-            event=events.recv()=>match event{Ok(mut v)=>{if !visualizers{if let Some(o)=v.as_object_mut(){o.remove("visualizations");}}if (v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || v.get("project_id").and_then(Value::as_str)==Some(&id))&&socket.send(Message::Text(v.to_string().into())).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
+            event=events.recv()=>match event{Ok(mut v)=>{if !visualizers{if let Some(o)=v.as_object_mut(){o.remove("visualizations");}}if (v["type"]=="hardware_levels" || v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || v.get("project_id").and_then(Value::as_str)==Some(&id))&&socket.send(Message::Text(v.to_string().into())).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
             msg=socket.recv()=>match msg{Some(Ok(Message::Text(text)))=>{if let Ok(v)=serde_json::from_str::<Value>(&text){if v["type"]=="visualizers"{visualizers=v["enabled"]==true;let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:visualizers});}if v["type"]=="ping"{if visualizers{let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:true});}let _=socket.send(Message::Text(json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string().into())).await;}}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}},
             _=check.tick()=>{if role(&app,&id,&u).is_err(){break;}}
         }
@@ -1223,6 +1232,10 @@ async fn main() {
         .route(
             "/api/projects/{id}/system/audio",
             axum::routing::put(settings::put),
+        )
+        .route(
+            "/api/projects/{id}/system/audio/device",
+            put(settings::device),
         )
         .route("/api/projects/{id}/logs", get(settings::logs))
         .route("/api/projects/{id}/preview", get(preview))

@@ -11,7 +11,10 @@ export interface Part { id: string; name: string; performer: string | null; view
 export interface Project { schema_version: number; id: string; name: string; mode: Mode; revision: number; bpm: number; beats_per_bar: number; beat_unit?: number; graph: { nodes: GraphNode[]; edges: GraphEdge[] }; parts: Part[] }
 export interface PartPlayback { id: string; playing: boolean; start: number; position: number; pending: [number, boolean] | null }
 export interface Visualization {kind:'control'|'audio'|'spectral';value?:number|string;sequence?:number;generation?:number;size?:number;ready?:boolean;polar?:boolean;channels?:{magnitude:number[];phase:number[]}[];history?:string[];columns?:number}
-export interface Telemetry { levels?:Record<string,number>; sample_rate?:number;block_size?:number;visualizations?:Record<string,Visualization>;  parts: PartPlayback[]; type: 'telemetry'; project_id: string; revision: number; epoch: string; sequence: number; server_time: number; sample: number; beat: number; bpm: number; running: boolean; hardware_enabled: boolean; underruns: number; error: string; values: Record<string, Record<string, number>> }
+export interface Telemetry { sample_rate?:number;block_size?:number;visualizations?:Record<string,Visualization>;  parts: PartPlayback[]; type: 'telemetry'; project_id: string; revision: number; epoch: string; sequence: number; server_time: number; sample: number; beat: number; bpm: number; running: boolean; hardware_enabled: boolean; underruns: number; error: string; values: Record<string, Record<string, number>> }
 export interface Summary { id: string; name: string; mode: Mode; role: string; revision: number }
 export interface Member { id: string; username: string; role: string }
 
+
+export interface HardwareDeviceLevels {id:number;name:string;channels:number;levels:{channel:number;peak?:number}[]}
+export interface HardwareLevels {project_id:string|null;inputs:HardwareDeviceLevels[];outputs:HardwareDeviceLevels[]}

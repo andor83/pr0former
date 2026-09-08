@@ -112,6 +112,7 @@ fn run(
     let mut hardware = false;
     let underruns = Arc::new(AtomicU64::new(0));
     let mut last = Instant::now();
+    let mut meter_time = Instant::now();
     let mut deadline = Instant::now();
     let mut seq = 0_u64;
     let mut next_tempo: Option<(f64, f64)> = None;
@@ -265,11 +266,17 @@ fn run(
                         prepared.carry_node_state(previous);
                     }
                     previews.clear();
+                    for out in &mut outputs {
+                        out.meter.clear();
+                    }
                     project = Some(p);
                     engine = Some(*prepared);
                 }
 
                 Command::Load(p, mut e) => {
+                    for out in &mut outputs {
+                        out.meter.clear();
+                    }
                     sequencer = Some(crate::performance::Sequencer::new(&p));
                     e.clock.bpm = p.bpm;
                     engine = Some(*e);
@@ -278,6 +285,9 @@ fn run(
                     next_tempo = None;
                 }
                 Command::Unload => {
+                    for out in &mut outputs {
+                        out.meter.clear();
+                    }
                     inputs.clear();
                     previews.clear();
                     let _ = io.try_send(crate::performance::External::Panic);
@@ -523,7 +533,7 @@ fn run(
                     seq.tick(e, &io);
                 }
                 for input in &mut inputs {
-                    input.frame = input.queue.pop().ok().unwrap_or([0.; MAX_DEVICE_CHANNELS]);
+                    input.sample();
                 }
                 if let Some(p) = &project {
                     for node in p.graph.nodes.iter().filter(|n| n.kind == "input") {
@@ -563,6 +573,7 @@ fn run(
                             }
                         }
                     }
+                    out.meter.observe(&routed);
                     out.push(routed);
                 }
 
@@ -642,7 +653,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"levels":e.io_levels(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
 ));
                 }
             }
@@ -650,6 +661,9 @@ fn run(
 
         if engine.is_none() && enabled {
             for _ in 0..settings.block_size {
+                for input in &mut inputs {
+                    input.sample();
+                }
                 let phase = test_sample % (settings.sample_rate as u64 / 2);
                 let click = if testing && phase < settings.sample_rate as u64 / 100 {
                     (phase as f32 * std::f32::consts::TAU * 1000. / settings.sample_rate as f32)
@@ -680,6 +694,22 @@ fn run(
             inputs.clear();
             device_error =
                 "Native input stream failed. Refresh devices and enable capture again.".into();
+        }
+        if meter_time.elapsed() >= Duration::from_millis(50) {
+            meter_time = Instant::now();
+            let input_levels: Vec<_> = inputs
+                .iter_mut()
+                .map(|i| i.meter.take(&[true; MAX_DEVICE_CHANNELS]))
+                .collect();
+            let output_levels: Vec<_> = outputs
+                .iter_mut()
+                .filter_map(|out| {
+                    let selected = crate::hardware_meter::output_channels(project.as_ref(), out.id);
+                    let levels = out.meter.take(&selected);
+                    (!levels.levels.is_empty()).then_some(levels)
+                })
+                .collect();
+            let _ = events.send(json!({"type":"hardware_levels","project_id":project.as_ref().map(|p|&p.id),"server_time":monotonic_ms(),"inputs":input_levels,"outputs":output_levels}));
         }
         if hardware {
             deadline = Instant::now();
@@ -727,6 +757,9 @@ fn device_config(
         .ok_or_else(|| format!("No supported 1–64-channel f32 configuration at {rate} Hz"))
 }
 fn device_details(rate: u32, input: bool) -> Vec<Value> {
+    if native_disabled() {
+        return vec![];
+    }
     let host = cpal::default_host();
     let devices = if input {
         host.input_devices()
@@ -751,7 +784,14 @@ fn open_input(
     device: cpal::Device,
     rate: u32,
     errors: Arc<AtomicU64>,
-) -> Result<(cpal::Stream, rtrb::Consumer<[f32; MAX_DEVICE_CHANNELS]>), String> {
+) -> Result<
+    (
+        cpal::Stream,
+        rtrb::Consumer<[f32; MAX_DEVICE_CHANNELS]>,
+        usize,
+    ),
+    String,
+> {
     let config = device_config(&device, rate, true)?;
     let channels = config.channels as usize;
     let (mut producer, consumer) = rtrb::RingBuffer::new(4096);
@@ -774,15 +814,22 @@ fn open_input(
         )
         .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok((stream, consumer))
+    Ok((stream, consumer, channels))
 }
 
 struct Input {
     id: u32,
+    meter: crate::hardware_meter::Meter,
     _stream: cpal::Stream,
     queue: rtrb::Consumer<[f32; MAX_DEVICE_CHANNELS]>,
     frame: [f32; MAX_DEVICE_CHANNELS],
     errors: Arc<AtomicU64>,
+}
+impl Input {
+    fn sample(&mut self) {
+        self.frame = self.queue.pop().ok().unwrap_or([0.; MAX_DEVICE_CHANNELS]);
+        self.meter.observe(&self.frame);
+    }
 }
 fn device_id(name: &str) -> u32 {
     name.bytes()
@@ -790,7 +837,13 @@ fn device_id(name: &str) -> u32 {
         % 999999999
         + 1
 }
+fn native_disabled() -> bool {
+    std::env::var("PR0_DISABLE_NATIVE_DEVICES").as_deref() == Ok("1")
+}
 pub fn input_devices() -> Vec<(u32, String)> {
+    if native_disabled() {
+        return vec![];
+    }
     cpal::default_host()
         .input_devices()
         .map(|ds| {
@@ -803,6 +856,9 @@ pub fn input_devices() -> Vec<(u32, String)> {
 fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, String> {
     let mut inputs = vec![];
     for selected in settings.input_interfaces.iter().filter(|i| i.enabled) {
+        if native_disabled() {
+            return Err("Native devices are disabled by PR0_DISABLE_NATIVE_DEVICES".into());
+        }
         let device = cpal::default_host()
             .input_devices()
             .map_err(|e| e.to_string())?
@@ -812,10 +868,11 @@ fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, Strin
             })
             .ok_or_else(|| format!("Input {} is unavailable", selected.name))?;
         let errors = Arc::new(AtomicU64::new(0));
-        let (stream, queue) = open_input(device, settings.sample_rate, errors.clone())
+        let (stream, queue, channels) = open_input(device, settings.sample_rate, errors.clone())
             .map_err(|e| format!("Input {}: {e}", selected.name))?;
         inputs.push(Input {
             id: selected.id,
+            meter: crate::hardware_meter::Meter::new(selected.id, selected.name.clone(), channels),
             _stream: stream,
             queue,
             frame: [0.; MAX_DEVICE_CHANNELS],
@@ -843,6 +900,9 @@ mod input_startup_tests {
 }
 
 pub fn output_devices() -> Vec<(u32, String)> {
+    if native_disabled() {
+        return vec![];
+    }
     cpal::default_host()
         .output_devices()
         .map(|ds| {
@@ -862,6 +922,7 @@ pub fn output_devices() -> Vec<(u32, String)> {
 }
 struct Output {
     id: u32,
+    meter: crate::hardware_meter::Meter,
     _stream: cpal::Stream,
     buffer: crate::output_buffer::OutputBuffer,
     delay: Vec<[f32; MAX_DEVICE_CHANNELS]>,
@@ -889,6 +950,9 @@ fn open_outputs(
         .map(|i| i.latency_ms)
         .fold(0_f64, f64::max);
     for selected in settings.interfaces.iter().filter(|i| i.enabled) {
+        if native_disabled() {
+            return Err("Native devices are disabled by PR0_DISABLE_NATIVE_DEVICES".into());
+        }
         let device = cpal::default_host()
             .output_devices()
             .map_err(|e| e.to_string())?
@@ -925,6 +989,7 @@ fn open_outputs(
         };
         outputs.push(Output {
             id: selected.id,
+            meter: crate::hardware_meter::Meter::new(selected.id, selected.name.clone(), channels),
             _stream: stream,
             buffer,
             delay: vec![[0.; MAX_DEVICE_CHANNELS]; delay],

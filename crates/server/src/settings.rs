@@ -54,6 +54,57 @@ pub fn read() -> Settings {
         .filter(|s| validate(s).is_ok())
         .unwrap_or_default()
 }
+/// Merge only newly discovered devices. A stored disabled choice survives
+/// disconnection/reconnection and is never overwritten by discovery.
+fn merge_discovered(s: &mut Settings, outputs: &[(u32, String)], inputs: &[(u32, String)]) -> bool {
+    let mut changed = false;
+    for (id, name) in outputs {
+        if s.interfaces.len() < 64 && name.len() <= 256 && !s.interfaces.iter().any(|i| i.id == *id)
+        {
+            s.interfaces.push(Interface {
+                id: *id,
+                name: name.clone(),
+                enabled: true,
+                correct_latency: false,
+                latency_ms: 0.,
+            });
+            changed = true;
+        }
+    }
+    for (id, name) in inputs {
+        if s.input_interfaces.len() < 64
+            && name.len() <= 256
+            && !s.input_interfaces.iter().any(|i| i.id == *id)
+        {
+            s.input_interfaces.push(InputInterface {
+                id: *id,
+                name: name.clone(),
+                enabled: true,
+            });
+            changed = true;
+        }
+    }
+    changed
+}
+/// Caller holds the setup mutex. Discovery does not open or restart streams.
+pub async fn discover() -> Api<Settings> {
+    tokio::task::spawn_blocking(|| {
+        let mut settings = read();
+        if merge_discovered(
+            &mut settings,
+            &audio::output_devices(),
+            &audio::input_devices(),
+        ) {
+            let bytes = serde_json::to_vec_pretty(&settings).map_err(internal)?;
+            let temp = path().with_extension("tmp");
+            std::fs::write(&temp, bytes).map_err(internal)?;
+            std::fs::rename(temp, path()).map_err(internal)?;
+        }
+        Ok(settings)
+    })
+    .await
+    .map_err(internal)?
+}
 pub fn validate(s: &Settings) -> Result<(), String> {
     if ![44100, 48000, 88200, 96000].contains(&s.sample_rate) {
         return Err("Choose 44.1, 48, 88.2, or 96 kHz".into());
@@ -128,7 +179,8 @@ pub fn validate_routes(p: &pr0_core::Project, s: &Settings) -> Result<(), String
 }
 pub async fn get(State(app): State<App>, headers: HeaderMap) -> Api<Json<Settings>> {
     user(&app, &headers)?;
-    Ok(Json(read()))
+    let _guard = app.setup.lock().await;
+    Ok(Json(discover().await?))
 }
 pub async fn put(
     State(app): State<App>,
@@ -142,13 +194,64 @@ pub async fn put(
         return Err(bad("Owner access required for system settings"));
     }
     let _guard = app.setup.lock().await;
+    apply(&app, &id, s, None).await
+}
+#[derive(Deserialize)]
+pub struct DeviceEdit {
+    direction: String,
+    id: u32,
+    enabled: bool,
+}
+pub async fn device(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(edit): Json<DeviceEdit>,
+) -> Api<Json<Settings>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    if role(&app, &id, &u)? != "owner" {
+        return Err(bad("Owner access required for system settings"));
+    }
+    let _guard = app.setup.lock().await;
+    let mut settings = discover().await?;
+    match edit.direction.as_str() {
+        "input" => {
+            settings
+                .input_interfaces
+                .iter_mut()
+                .find(|i| i.id == edit.id)
+                .ok_or_else(|| bad("Unknown input device"))?
+                .enabled = edit.enabled
+        }
+        "output" => {
+            settings
+                .interfaces
+                .iter_mut()
+                .find(|i| i.id == edit.id)
+                .ok_or_else(|| bad("Unknown output device"))?
+                .enabled = edit.enabled
+        }
+        _ => return Err(bad("Choose input or output")),
+    }
+    apply(&app, &id, settings, Some((&edit.direction, edit.id))).await
+}
+async fn apply(
+    app: &App,
+    id: &str,
+    s: Settings,
+    device: Option<(&str, u32)>,
+) -> Api<Json<Settings>> {
     if app.active.lock().unwrap().is_some() {
         return Err(bad("Deactivate the show before changing system audio"));
     }
     validate(&s).map_err(bad)?;
     let detected = audio::output_devices();
     for i in &s.interfaces {
-        if i.enabled && !detected.iter().any(|d| d.0 == i.id && d.1 == i.name) {
+        if i.enabled
+            && device.is_none_or(|target| target == ("output", i.id))
+            && !detected.iter().any(|d| d.0 == i.id && d.1 == i.name)
+        {
             return Err(bad(
                 "Selected interface is no longer available; refresh devices",
             ));
@@ -156,7 +259,10 @@ pub async fn put(
     }
     let detected_inputs = audio::input_devices();
     for i in &s.input_interfaces {
-        if i.enabled && !detected_inputs.iter().any(|d| d.0 == i.id && d.1 == i.name) {
+        if i.enabled
+            && device.is_none_or(|target| target == ("input", i.id))
+            && !detected_inputs.iter().any(|d| d.0 == i.id && d.1 == i.name)
+        {
             return Err(bad(
                 "Selected input is no longer available; refresh devices",
             ));
@@ -182,7 +288,7 @@ pub async fn put(
     let (tx, rx) = tokio::sync::oneshot::channel();
     send(
         &app,
-        audio::Command::Enable(id.clone(), false, s.clone(), tx),
+        audio::Command::Enable(id.to_owned(), false, s.clone(), tx),
     )?;
     rx.await.map_err(internal)?.map_err(bad)?;
     app.logs.push(
@@ -240,6 +346,28 @@ impl Logs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_enables_new_devices_and_preserves_disabled_choices_across_reconnect() {
+        let mut s = Settings::default();
+        assert!(merge_discovered(
+            &mut s,
+            &[(1, "Output".into())],
+            &[(2, "Input".into())]
+        ));
+        assert!(s.interfaces[0].enabled && s.input_interfaces[0].enabled);
+        s.interfaces[0].enabled = false;
+        s.input_interfaces[0].enabled = false;
+        let saved = serde_json::to_vec(&s).unwrap();
+        let mut restored: Settings = serde_json::from_slice(&saved).unwrap();
+        assert!(!merge_discovered(&mut restored, &[], &[]));
+        assert!(merge_discovered(
+            &mut restored,
+            &[(1, "Output".into()), (3, "New output".into())],
+            &[(2, "Input".into()), (4, "New input".into())]
+        ));
+        assert!(!restored.interfaces[0].enabled && !restored.input_interfaces[0].enabled);
+        assert!(restored.interfaces[1].enabled && restored.input_interfaces[1].enabled);
+    }
     #[test]
     fn native_input_routes_require_enabled_inputs_and_legacy_settings_load() {
         let mut settings: Settings =

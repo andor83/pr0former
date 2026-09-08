@@ -1,6 +1,6 @@
 import {test,expect} from '@playwright/test'
 
-test('monitor sidebar, process stats and one peak meter per input/output node',async({page})=>{
+test('monitor sidebar, process stats and physical device groups and individual channel peaks (simulated hardware)',async({page})=>{
   const headers={'X-Pr0former':'1'},status=await(await page.request.get('/api/status')).json()
   await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
   let p=await(await page.request.post('/api/projects',{headers,data:{name:'Monitor layout',mode:'freeform'}})).json()
@@ -9,6 +9,20 @@ test('monitor sidebar, process stats and one peak meter per input/output node',a
   p.graph={nodes:[node('Native input','input'),node('Browser input','browser_input'),node('Tone','oscillator',{frequency:440,amplitude:0.8}),node('Main output','output',{gain:-24}),node('Headphones','monitor_output',{gain:-12})],edges:[{id:'main',source:'Tone',source_port:'out',target:'Main output',target_port:'in'},{id:'phones',source:'Tone',source_port:'out',target:'Headphones',target_port:'in'}]}
   p=await(await page.request.put(`/api/projects/${p.id}`,{headers,data:p})).json()
   expect((await page.request.put(`/api/projects/${p.id}/system/audio`,{headers,data:{sample_rate:48000,block_size:128,interfaces:[],input_interfaces:[]}})).ok()).toBeTruthy()
+  // UI fixtures only: the test server explicitly disables native device access.
+  let publish=true, active=true
+  const inputDevice={id:101,name:'Eight-channel capture',channels:8,levels:Array.from({length:8},(_,i)=>({channel:i+1,peak:[0.1,0.5,1.2][i%3]}))}
+  const outputDevice={id:202,name:'Sixteen-channel output',channels:16,levels:[{channel:1,peak:0.1},{channel:9,peak:1.2}]}
+  await page.route('**/api/devices',route=>route.fulfill({json:{interfaces:[outputDevice],input_interfaces:[inputDevice,{id:102,name:'Idle microphone',channels:1}],midi_inputs:[],midi_outputs:[]}}))
+  await page.routeWebSocket('**/api/projects/*/events',ws=>{
+    const server=ws.connectToServer()
+    server.onMessage(message=>{
+      const event=JSON.parse(message.toString())
+      if(event.type==='hardware_levels'){
+        if(publish)ws.send(JSON.stringify({...event,project_id:active?p.id:null,inputs:[inputDevice],outputs:active?[outputDevice]:[]}))
+      }else ws.send(message)
+    })
+  })
   await page.goto('/')
   await page.getByRole('button',{name:'Choose project'}).click()
   await page.getByRole('button',{name:'Monitor layout',exact:true}).click()
@@ -21,7 +35,7 @@ test('monitor sidebar, process stats and one peak meter per input/output node',a
   await expect(sidebar.getByRole('heading',{name:'Clock sync'})).toBeVisible()
   await expect(sidebar.getByRole('heading',{name:'Server process'})).toBeVisible()
   await expect(sidebar.getByLabel('Monitor feed')).toBeVisible()
-  await expect(page.getByRole('region',{name:'Inputs VU meters'}).getByRole('meter')).toHaveCount(2)
+  await expect(page.getByRole('region',{name:'Inputs VU meters'}).getByRole('meter')).toHaveCount(9)
   await expect(page.getByRole('region',{name:'Outputs VU meters'}).getByRole('meter')).toHaveCount(2)
   const left=await sidebar.boundingBox(),right=await page.locator('.meter-banks').boundingBox()
   expect(right!.x).toBeGreaterThanOrEqual(left!.x+left!.width)
@@ -31,32 +45,28 @@ test('monitor sidebar, process stats and one peak meter per input/output node',a
   const resource=await(await page.request.get('/api/system/stats')).json()
   expect(resource.resident_bytes).toBeGreaterThan(0)
   await expect.poll(async()=> (await(await page.request.get('/api/system/stats')).json()).cpu_percent).toBeGreaterThanOrEqual(0)
-  await page.getByRole('button',{name:'Play',exact:true}).click()
-  const main=page.locator('.vu-strip[data-node="Main output"]')
-  await expect(main).toHaveAttribute('data-zone','normal')
-  await expect(main.getByRole('meter')).not.toHaveAttribute('aria-valuenow','-60')
-  const setGain=async(value:number)=>{
-    p=(await(await page.request.get(`/api/projects/${p.id}`)).json()).project
-    const response=await page.request.put(`/api/projects/${p.id}/parameter`,{headers,data:{node:'Main output',parameter:'gain',value,revision:p.revision}})
-    expect(response.ok()).toBeTruthy()
-  }
-  await setGain(-3)
-  await expect(main).toHaveAttribute('data-zone','warning')
-  await setGain(6)
+  await expect(page.getByRole('meter',{name:'Idle microphone input channel 1 level'})).toHaveAttribute('aria-valuetext','No current hardware data')
+  const capture=page.getByRole('region',{name:'Inputs VU meters'}).locator('.device-group[data-device="101"]')
+  await expect(capture.getByRole('meter')).toHaveCount(8)
+  await expect(capture.locator('[data-channel="1"]')).toHaveAttribute('data-zone','normal')
+  await expect(capture.locator('[data-channel="2"]')).toHaveAttribute('data-zone','warning')
+  await expect(capture.locator('[data-channel="3"]')).toHaveAttribute('data-zone','clip')
+  const main=page.getByRole('region',{name:'Outputs VU meters'}).locator('[data-channel="9"]')
   await expect(main).toHaveAttribute('data-zone','clip')
   await expect(main.getByText('CLIP',{exact:true})).toBeVisible()
   await expect(main.locator('.vu-fill')).toHaveCSS('background-color','rgb(241, 109, 105)')
   await expect(main.getByRole('meter')).toHaveAttribute('aria-valuetext',/clipping/)
+  await expect(page.getByRole('meter',{name:/Browser input|Headphones/})).toHaveCount(0)
   await page.screenshot({path:'test-results/monitor-desktop.png'})
   await page.setViewportSize({width:768,height:1024})
   await expect(sidebar).toBeVisible()
   await expect(page.locator('.project-heading .revision')).toBeVisible()
   await page.screenshot({path:'test-results/monitor-tablet.png'})
-  await page.getByRole('button',{name:'Pause',exact:true}).click()
-  await expect(main.getByRole('meter')).toHaveAttribute('aria-valuenow','-60')
-  await page.context().setOffline(true)
+  publish=false
   await expect(main).toHaveClass(/stale/)
-  await expect(main.getByRole('meter')).toHaveAttribute('aria-valuetext','No current engine data')
-  await page.context().setOffline(false)
-  await page.getByRole('button',{name:'Deactivate show',exact:true}).click()
+  await expect(main.getByRole('meter')).toHaveAttribute('aria-valuetext','No current hardware data')
+  active=false;publish=true
+  await expect(page.getByRole('region',{name:'Outputs VU meters'}).getByRole('meter')).toHaveCount(0)
+  await expect(capture.getByRole('meter')).toHaveCount(8)
+  await expect(capture.locator('[data-channel="3"]')).not.toHaveClass(/stale/)
 })

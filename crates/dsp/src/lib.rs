@@ -143,8 +143,6 @@ struct RuntimeNode {
     voices: [Voice; 64],
     external: [f32; MAX_DEVICE_CHANNELS],
     external_set: bool,
-    io_peak: f64,
-    io_meter: bool,
     bang: bool,
     phase: f64,
     previous: f64,
@@ -761,11 +759,6 @@ impl Engine {
                 voices: [Voice::default(); 64],
                 external: [0.; MAX_DEVICE_CHANNELS],
                 external_set: false,
-                io_peak: 0.,
-                io_meter: matches!(
-                    n.kind.as_str(),
-                    "input" | "browser_input" | "output" | "monitor_output"
-                ),
                 bang: false,
                 phase: 0.,
                 previous: -1.,
@@ -1208,24 +1201,6 @@ impl Engine {
                     }
                 }
                 self.nodes[idx].process(&self.clock, &hardware);
-                let node = &mut self.nodes[idx];
-                if node.io_meter {
-                    let peak = match node.kind.as_str() {
-                        "output" if self.clock.running => node
-                            .device_frame()
-                            .iter()
-                            .fold(0_f64, |m, v| m.max(v.abs() as f64)),
-                        "monitor_output" if self.clock.running => node.output
-                            [..node.channels.min(2)]
-                            .iter()
-                            .fold(0_f64, |m, v| m.max(v.abs())),
-                        "input" | "browser_input" => node.output[..node.channels]
-                            .iter()
-                            .fold(0_f64, |m, v| m.max(v.abs())),
-                        _ => 0.,
-                    };
-                    node.io_peak = node.io_peak.max(peak);
-                }
                 if self.nodes[idx].kind == "output" {
                     for (ch, sample) in out.iter_mut().enumerate() {
                         *sample += self.nodes[idx].output[ch] as f32;
@@ -1281,17 +1256,6 @@ impl Engine {
                     _ => return None,
                 };
                 Some((node.id.clone(), value))
-            })
-            .collect()
-    }
-    /// Drain sample peaks once per telemetry interval, outside render.
-    pub fn io_levels(&mut self) -> BTreeMap<String, f64> {
-        self.nodes
-            .iter_mut()
-            .filter(|n| n.io_meter)
-            .map(|n| {
-                let peak = std::mem::take(&mut n.io_peak);
-                (n.id.clone(), peak)
             })
             .collect()
     }
@@ -1592,48 +1556,6 @@ mod tests {
         edge.target = "second-clock".into();
         p.graph.edges.push(edge);
         assert!(p.graph.validate().unwrap_err().contains("Only one"));
-    }
-
-    #[test]
-    fn io_meters_capture_short_peaks_routed_sums_and_ignore_paused_outputs() {
-        let mut p = demo_project("x".into(), "x".into(), Mode::Freeform);
-        p.graph.nodes.retain(|n| n.id == "tone" || n.id == "out");
-        p.graph.edges = vec![pr0_core::Edge {
-            id: "io".into(),
-            source: "tone".into(),
-            source_port: "out".into(),
-            target: "out".into(),
-            target_port: "in".into(),
-        }];
-        let input = p.graph.nodes.iter_mut().find(|n| n.id == "tone").unwrap();
-        input.kind = "input".into();
-        input.parameters.clear();
-        let output = p.graph.nodes.iter_mut().find(|n| n.id == "out").unwrap();
-        output.parameters = [
-            ("gain".into(), 0.),
-            ("route_1".into(), 1.),
-            ("route_2".into(), 1.),
-        ]
-        .into();
-        let mut engine = Engine::prepare(p.graph, 48000.).unwrap();
-        engine.clock.running = true;
-        engine.render(&[], &mut vec![[0.; 8]; 4800]);
-        engine.io_levels();
-        engine.external("tone", [0.75; 8]);
-        engine.render(&[], &mut [[0.; 8]; 1]);
-        engine.external("tone", [0.; 8]);
-        engine.render(&[], &mut [[0.; 8]; 1]);
-        let levels = engine.io_levels();
-        assert_eq!(levels["tone"], 0.75);
-        assert_eq!(levels["out"], 1.5);
-        assert_eq!(engine.telemetry()["out"]["_peak"], 0.);
-        assert!(engine.io_levels().values().all(|v| *v == 0.));
-        engine.clock.running = false;
-        engine.external("tone", [0.5; 8]);
-        engine.render(&[], &mut [[0.; 8]; 1]);
-        let levels = engine.io_levels();
-        assert_eq!(levels["tone"], 0.5);
-        assert_eq!(levels["out"], 0.);
     }
 
     #[test]
