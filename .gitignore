@@ -8,3 +8,7 @@
 /web/test-results
 /web/playwright-report
 *.tsbuildinfo
+
+/certs/
+
+/recordings/

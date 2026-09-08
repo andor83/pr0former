@@ -4,9 +4,11 @@ mod clock_ratio;
 pub mod count_in;
 mod effects;
 mod envelope;
+mod looper;
 mod midi_controls;
 pub mod note_inputs;
 mod oscillator;
+pub mod recorder;
 mod sampler;
 mod sequence;
 mod spectral;
@@ -39,6 +41,8 @@ pub struct Clock {
     pub bpm: f64,
     pub running: bool,
     pub sample_rate: f64,
+    pub bar_beats: f64,
+    pub beat_length: f64,
 }
 impl Clock {
     pub fn new(sample_rate: f64) -> Self {
@@ -49,6 +53,8 @@ impl Clock {
             bpm: 120.,
             running: false,
             sample_rate,
+            bar_beats: 4.,
+            beat_length: 1.,
         }
     }
     pub fn advance(&mut self) {
@@ -110,10 +116,13 @@ struct Binding {
     parameter: bool,
     signal: pr0_core::Signal,
 }
+const GRAPH_VOICE_OWNER: u64 = u64::MAX;
 #[derive(Clone, Copy, Default)]
 struct Voice {
     owner: u64,
     note_id: u32,
+    order: u64,
+    mod_phase: f64,
     pitch: u8,
     phase: f64,
     level: f64,
@@ -146,12 +155,15 @@ struct RuntimeNode {
     note_inputs: note_inputs::NoteInputs,
     outgoing_notes: [Option<note_inputs::NoteEvent>; 2],
     sampler: Option<Box<sampler::Sampler>>,
+    looper: Option<Box<looper::Looper>>,
+    recorder: Option<Box<recorder::Recorder>>,
     midi_controls: Option<Box<midi_controls::MidiControls>>,
     control_text: Option<visualizer::Text>,
     input_text: Option<visualizer::Text>,
     fallback: visualizer::Datum,
     analyzer: Option<Box<visualizer::Analyzer>>,
     voices: [Voice; 64],
+    voice_order: u64,
     external: [f32; MAX_DEVICE_CHANNELS],
     external_set: bool,
     bang: bool,
@@ -173,6 +185,76 @@ struct RuntimeNode {
     reverb: Vec<[f64; 8]>,
 }
 impl RuntimeNode {
+    fn synth_note(&mut self, owner: u64, note_id: u32, pitch: u8, velocity: u8) {
+        if velocity == 0 {
+            for voice in &mut self.voices {
+                if voice.owner == owner && voice.note_id == note_id && voice.pitch == pitch {
+                    voice.releasing = true;
+                }
+            }
+            return;
+        }
+        let index = self
+            .voices
+            .iter()
+            .position(|v| v.level < 1e-5)
+            .unwrap_or_else(|| {
+                self.voices
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| a.level.total_cmp(&b.level))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            });
+        self.voice_order = self.voice_order.wrapping_add(1);
+        self.voices[index] = Voice {
+            owner,
+            note_id,
+            order: self.voice_order,
+            pitch,
+            phase: 0.,
+            mod_phase: 0.,
+            level: velocity.min(127) as f64 / 127.,
+            releasing: false,
+        };
+    }
+    fn graph_synth_notes(&mut self) {
+        let values = std::array::from_fn(|i| self.input[i][0]);
+        let connected = std::array::from_fn(|i| {
+            self.bindings
+                .iter()
+                .any(|b| !b.parameter && b.destination == i)
+        });
+        for event in self
+            .note_inputs
+            .tick(values, connected)
+            .into_iter()
+            .flatten()
+        {
+            if event.velocity == 0 {
+                if let Some(voice) = self
+                    .voices
+                    .iter_mut()
+                    .filter(|v| {
+                        v.owner == GRAPH_VOICE_OWNER
+                            && v.pitch == event.pitch
+                            && v.level > 0.
+                            && !v.releasing
+                    })
+                    .min_by_key(|v| v.order)
+                {
+                    voice.releasing = true;
+                }
+            } else {
+                self.synth_note(
+                    GRAPH_VOICE_OWNER,
+                    self.voice_order.wrapping_add(1) as u32,
+                    event.pitch,
+                    event.velocity,
+                );
+            }
+        }
+    }
     fn device_frame(&self) -> [f32; MAX_DEVICE_CHANNELS] {
         let mut frame = [0.; MAX_DEVICE_CHANNELS];
         for (ch, key) in DEVICE_ROUTE_KEYS.iter().enumerate().take(self.channels) {
@@ -451,17 +533,58 @@ impl RuntimeNode {
                 ) * self.p("amplitude");
                 self.output[..self.channels].fill(v);
             }
-            "synth" => {
+            "record" => {
+                self.recorder
+                    .as_mut()
+                    .unwrap()
+                    .tick(input, self.input[1][0], self.input[2][0]);
+            }
+            "looper" => {
+                let mode = self.p("loop_mode");
+                let commands = std::array::from_fn(|i| self.input[i + 1][0]);
+                self.output = self
+                    .looper
+                    .as_mut()
+                    .unwrap()
+                    .tick(input, commands, mode, clock);
+            }
+            "synth" | "fm_synth" => {
+                self.graph_synth_notes();
                 let mut sum = 0.;
                 let release = (-1. / (self.p("release") * 0.001 * sr)).exp();
+                let fm = self.kind == "fm_synth";
+                let (carrier, modulator, depth, carrier_shape, modulator_shape) = if fm {
+                    (
+                        self.p("carrier_frequency"),
+                        self.p("modulator_frequency"),
+                        self.p("fm_depth"),
+                        self.p("carrier_waveform").round() as u32,
+                        self.p("modulator_waveform").round() as u32,
+                    )
+                } else {
+                    (440., 0., 0., 0, 0)
+                };
                 for v in &mut self.voices {
                     if v.level < 1e-5 {
                         v.level = 0.;
                         continue;
                     }
-                    v.phase =
-                        (v.phase + 440. * 2_f64.powf((v.pitch as f64 - 69.) / 12.) / sr).fract();
-                    sum += (v.phase * TAU).sin() * v.level;
+                    let ratio = 2_f64.powf((v.pitch as f64 - 69.) / 12.);
+                    let mod_step = (modulator * ratio / sr).min(0.49);
+                    v.mod_phase = (v.mod_phase + mod_step).fract();
+                    self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let mod_noise = (self.seed >> 32) as f64 / u32::MAX as f64 * 2. - 1.;
+                    let modulation = if fm {
+                        oscillator::wave(v.mod_phase, mod_step, modulator_shape, mod_noise) * depth
+                    } else {
+                        0.
+                    };
+                    let step = ((carrier + modulation) * ratio / sr).clamp(-0.49, 0.49);
+                    v.phase = (v.phase + step).rem_euclid(1.);
+                    self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let carrier_noise = (self.seed >> 32) as f64 / u32::MAX as f64 * 2. - 1.;
+                    sum += oscillator::wave(v.phase, step.abs(), carrier_shape, carrier_noise)
+                        * v.level;
                     if v.releasing {
                         v.level *= release;
                     }
@@ -783,6 +906,24 @@ impl Engine {
     pub fn prepare(graph: Graph, sample_rate: f64) -> Result<Self, String> {
         let graph = graph.flatten()?;
         let order = graph.validate_flat()?;
+        if !sample_rate.is_finite() || sample_rate <= 0. {
+            return Err("Invalid engine sample rate".into());
+        }
+        let loop_bytes: f64 = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "looper")
+            .map(|n| {
+                n.parameters.get("max_seconds").copied().unwrap_or(30.)
+                    * sample_rate
+                    * n.channels as f64
+                    * 8.
+                    * 4.
+            })
+            .sum();
+        if loop_bytes > 512. * 1024. * 1024. {
+            return Err("Loopers exceed 512 MiB of recording memory; reduce capacity, channels or looper count".into());
+        }
         let descriptors = catalog();
         let mut nodes = Vec::new();
         for n in &graph.nodes {
@@ -826,6 +967,38 @@ impl Engine {
                 io: n.io.clone(),
                 note_inputs: note_inputs::NoteInputs::default(),
                 outgoing_notes: [None; 2],
+                recorder: if n.kind == "record" {
+                    let width = graph
+                        .edges
+                        .iter()
+                        .find(|e| e.target == n.id && e.target_port == "in")
+                        .map(|edge| {
+                            let source = graph.nodes.iter().find(|s| s.id == edge.source).unwrap();
+                            descriptors
+                                .iter()
+                                .find(|d| d.kind == source.kind)
+                                .unwrap()
+                                .outputs
+                                .iter()
+                                .find(|p| p.id == edge.source_port)
+                                .unwrap()
+                                .fixed_channels
+                                .unwrap_or(source.channels)
+                        })
+                        .unwrap_or(0);
+                    Some(Box::new(recorder::Recorder::new(width)))
+                } else {
+                    None
+                },
+                looper: if n.kind == "looper" {
+                    Some(Box::new(looper::Looper::prepare(
+                        sample_rate,
+                        n.channels,
+                        n.parameters.get("max_seconds").copied().unwrap_or(30.),
+                    )?))
+                } else {
+                    None
+                },
                 sampler: (n.kind == "poly_sampler").then(|| Box::new(sampler::Sampler::default())),
                 midi_controls: (matches!(
                     n.kind.as_str(),
@@ -851,6 +1024,7 @@ impl Engine {
                     None
                 },
                 voices: [Voice::default(); 64],
+                voice_order: 0,
                 external: [0.; MAX_DEVICE_CHANNELS],
                 external_set: false,
                 bang: false,
@@ -962,6 +1136,105 @@ impl Engine {
             graph,
         })
     }
+    pub fn take_record_events(
+        &mut self,
+    ) -> Vec<(String, String, usize, u32, Vec<recorder::Event>)> {
+        let mut chunks = Vec::new();
+        for node in &mut self.nodes {
+            if let Some(recorder) = &mut node.recorder {
+                if recorder.pending() {
+                    let name = self
+                        .graph
+                        .nodes
+                        .iter()
+                        .find(|n| n.id == node.id)
+                        .unwrap()
+                        .label
+                        .clone();
+                    chunks.push((
+                        node.id.clone(),
+                        name,
+                        recorder.channels,
+                        self.clock.sample_rate as u32,
+                        recorder.drain(),
+                    ));
+                }
+            }
+        }
+        chunks
+    }
+    pub fn finish_recordings(&mut self) {
+        for node in &mut self.nodes {
+            if let Some(recorder) = &mut node.recorder {
+                recorder.finish();
+            }
+        }
+    }
+    /// Off-render persistence API. A zero-length snapshot deletes the previous recording.
+    pub fn take_loop_snapshot(&mut self) -> Option<(String, u8, usize, u32, Vec<f32>)> {
+        for node in &mut self.nodes {
+            if let Some(looper) = &mut node.looper {
+                if let Some((track, channels, audio)) = looper.snapshot() {
+                    return Some((
+                        node.id.clone(),
+                        track,
+                        channels,
+                        self.clock.sample_rate as u32,
+                        audio,
+                    ));
+                }
+            }
+        }
+        None
+    }
+    pub fn finish_loops(&mut self) {
+        for node in &mut self.nodes {
+            if let Some(looper) = &mut node.looper {
+                looper.finish();
+            }
+        }
+    }
+    pub fn clear_loop(&mut self, node: &str, track: u8) -> Result<(), String> {
+        if !(1..=8).contains(&track) {
+            return Err("Loop track must be 1–8".into());
+        }
+        let looper = self
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == node)
+            .and_then(|n| n.looper.as_mut())
+            .ok_or("Looper node missing")?;
+        looper.clear(track as usize - 1);
+        Ok(())
+    }
+    pub fn restore_loop(
+        &mut self,
+        node: &str,
+        track: u8,
+        audio: &[f32],
+        channels: usize,
+        rate: u32,
+    ) -> Result<(), String> {
+        if !(1..=8).contains(&track) {
+            return Err("Loop track must be 1–8".into());
+        }
+        self.nodes
+            .iter_mut()
+            .find(|n| n.id == node)
+            .and_then(|n| n.looper.as_mut())
+            .ok_or("Looper node missing")?
+            .restore(
+                track as usize - 1,
+                audio,
+                channels,
+                rate,
+                self.clock.sample_rate,
+            )
+    }
+    pub fn set_meter(&mut self, beats_per_bar: u8, beat_unit: u8) {
+        self.graph_clock.beat_length = 4. / beat_unit.max(1) as f64;
+        self.graph_clock.bar_beats = beats_per_bar.max(1) as f64 * self.graph_clock.beat_length;
+    }
     /// Move state for unchanged nodes into a prepared graph. Binding indices
     /// belong to each compiled graph and must never move with runtime history.
     /// Runs between render blocks; swapping prepared storage does not allocate.
@@ -969,7 +1242,9 @@ impl Engine {
         if self.clock.sample_rate != previous.clock.sample_rate {
             return;
         }
+        let meter = (self.graph_clock.bar_beats, self.graph_clock.beat_length);
         self.graph_clock = previous.graph_clock;
+        (self.graph_clock.bar_beats, self.graph_clock.beat_length) = meter;
         for index in 0..self.nodes.len() {
             let target = &self.nodes[index];
             let Some(source_index) = previous.nodes.iter().position(|n| n.id == target.id) else {
@@ -980,6 +1255,8 @@ impl Engine {
                 && target.part_id == source.part_id
                 && target.io == source.io
                 && target.channels == source.channels
+                && target.recorder.as_ref().map(|r| r.channels)
+                    == source.recorder.as_ref().map(|r| r.channels)
                 && (target.defaults == source.defaults || target.kind == "piano")
                 && target.fallback == source.fallback
                 && target.latency == source.latency
@@ -1001,6 +1278,11 @@ impl Engine {
             if !compatible {
                 let target = &mut self.nodes[index];
                 let source = &mut previous.nodes[source_index];
+                if let (Some(a), Some(b)) = (&target.looper, &source.looper) {
+                    if a.compatible(b) {
+                        std::mem::swap(&mut target.looper, &mut source.looper);
+                    }
+                }
                 if target.kind == source.kind && target.midi_controls.is_some() {
                     std::mem::swap(&mut target.midi_controls, &mut source.midi_controls);
                     if target.part_id != source.part_id
@@ -1024,8 +1306,18 @@ impl Engine {
 
             // Sequencer migration already selected voices by surviving part.
             // Do not resurrect voices from deleted or musically changed parts.
-            if target.kind == "synth" {
+            if matches!(target.kind.as_str(), "synth" | "fm_synth") {
                 std::mem::swap(&mut target.voices, &mut source.voices);
+                // Graph MIDI is independent of score ownership and survives compatible edits.
+                for voice in source
+                    .voices
+                    .iter()
+                    .filter(|v| v.owner == GRAPH_VOICE_OWNER && v.level > 0.)
+                {
+                    if let Some(slot) = target.voices.iter_mut().find(|v| v.level == 0.) {
+                        *slot = *voice;
+                    }
+                }
             }
         }
     }
@@ -1041,17 +1333,21 @@ impl Engine {
         let Some(source) = previous
             .nodes
             .iter()
-            .find(|n| n.id == node && n.kind == "synth")
+            .find(|n| n.id == node && matches!(n.kind.as_str(), "synth" | "fm_synth"))
         else {
             return;
         };
         let Some(target) = self
             .nodes
             .iter_mut()
-            .find(|n| n.id == node && n.kind == "synth")
+            .find(|n| n.id == node && matches!(n.kind.as_str(), "synth" | "fm_synth"))
         else {
             return;
         };
+        if source.kind != target.kind {
+            return;
+        }
+        target.voice_order = target.voice_order.max(source.voice_order);
         for voice in source
             .voices
             .iter()
@@ -1139,35 +1435,8 @@ impl Engine {
     /// Voice storage is prepared with the graph; dispatch does not allocate.
     pub fn note_scoped(&mut self, node: &str, owner: u64, note_id: u32, pitch: u8, velocity: u8) {
         if let Some(n) = self.nodes.iter_mut().find(|n| n.id == node) {
-            if n.kind == "synth" {
-                if velocity == 0 {
-                    for v in &mut n.voices {
-                        if v.owner == owner && v.note_id == note_id && v.pitch == pitch {
-                            v.releasing = true;
-                        }
-                    }
-                } else {
-                    let index = n
-                        .voices
-                        .iter()
-                        .position(|v| v.level < 1e-5)
-                        .unwrap_or_else(|| {
-                            n.voices
-                                .iter()
-                                .enumerate()
-                                .min_by(|(_, a), (_, b)| a.level.total_cmp(&b.level))
-                                .map(|(i, _)| i)
-                                .unwrap_or(0)
-                        });
-                    n.voices[index] = Voice {
-                        owner,
-                        note_id,
-                        pitch,
-                        phase: 0.,
-                        level: velocity as f64 / 127.,
-                        releasing: false,
-                    };
-                }
+            if matches!(n.kind.as_str(), "synth" | "fm_synth") {
+                n.synth_note(owner, note_id, pitch, velocity);
             }
         }
     }
@@ -1460,6 +1729,29 @@ impl Engine {
                     .zip(n.values.iter().copied())
                     .collect();
                 values.insert("_out".into(), n.control[0]);
+                if let Some(recorder) = &n.recorder {
+                    values.insert("_recording".into(), recorder.active as u8 as f64);
+                    values.insert(
+                        "_record_seconds".into(),
+                        recorder.frames as f64 / self.clock.sample_rate,
+                    );
+                    values.insert("_record_overflow".into(), recorder.overflow as u8 as f64);
+                    values.insert("_record_channels".into(), recorder.channels as f64);
+                }
+                if let Some(looper) = &n.looper {
+                    for (i, t) in looper.tracks.iter().enumerate() {
+                        for (key, value) in [
+                            ("seconds", t.length as f64 / self.clock.sample_rate),
+                            ("recording", u8::from(t.recording) as f64),
+                            ("playing", u8::from(t.playing) as f64),
+                            ("pending_record", u8::from(t.record_at.is_some()) as f64),
+                            ("pending_play", u8::from(t.play_at.is_some()) as f64),
+                            ("full", u8::from(t.full) as f64),
+                        ] {
+                            values.insert(format!("_track_{}_{}", i + 1, key), value);
+                        }
+                    }
+                }
                 if n.kind == "piano" {
                     let start = ((n.p("octave") + 1.) * 12.) as usize;
                     for pitch in start..(start + 12).min(128) {
@@ -2807,5 +3099,384 @@ mod tests {
             g.nodes.iter().find(|n| n.id == "mod").unwrap().parameters["a"],
             1.
         );
+    }
+}
+
+#[cfg(test)]
+mod poly_synth_tests {
+    use super::*;
+    fn node(id: &str, kind: &str, channels: usize) -> pr0_core::Node {
+        let mut n = pr0_core::demo_project("test".into(), "test".into(), pr0_core::Mode::Freeform)
+            .graph
+            .nodes
+            .remove(0);
+        n.id = id.into();
+        n.kind = kind.into();
+        n.channels = channels;
+        n.parameters.clear();
+        n
+    }
+    fn graph(kind: &str, channels: usize) -> pr0_core::Graph {
+        pr0_core::Graph {
+            nodes: vec![node("keys", "piano", 1), node("tone", kind, channels)],
+            edges: ["pitch", "velocity", "gate", "trigger", "note_off"]
+                .into_iter()
+                .map(|p| pr0_core::Edge {
+                    id: p.into(),
+                    source: "keys".into(),
+                    source_port: p.into(),
+                    target: "tone".into(),
+                    target_port: p.into(),
+                })
+                .collect(),
+        }
+    }
+    fn tick(e: &mut Engine) {
+        e.render(&[], &mut [[0.; 8]; 16]);
+    }
+    #[test]
+    fn standard_inputs_preserve_polyphony_releases_and_score_ownership() {
+        for kind in ["synth", "fm_synth"] {
+            let mut e = Engine::prepare(graph(kind, 1), 48000.).unwrap();
+            e.note_scoped("tone", 7, 1, 60, 127);
+            for (pitch, velocity) in [(60, 100), (60, 80), (64, 90)] {
+                e.piano_note("keys", pitch, velocity);
+                tick(&mut e);
+            }
+            let held = |e: &Engine, pitch| {
+                e.nodes
+                    .iter()
+                    .find(|n| n.id == "tone")
+                    .unwrap()
+                    .voices
+                    .iter()
+                    .filter(|v| {
+                        v.owner == GRAPH_VOICE_OWNER
+                            && v.pitch == pitch
+                            && v.level > 0.
+                            && !v.releasing
+                    })
+                    .count()
+            };
+            assert_eq!(held(&e, 60), 2);
+            assert_eq!(held(&e, 64), 1);
+            e.piano_note("keys", 60, 0);
+            tick(&mut e);
+            assert_eq!(held(&e, 60), 1);
+            assert_eq!(held(&e, 64), 1);
+            assert!(
+                e.nodes
+                    .iter()
+                    .find(|n| n.id == "tone")
+                    .unwrap()
+                    .voices
+                    .iter()
+                    .any(|v| v.owner == 7 && !v.releasing)
+            );
+            e.note_scoped("tone", 7, 1, 60, 0);
+            tick(&mut e);
+            assert_eq!(held(&e, 60), 1);
+            e.piano_note("keys", 60, 0);
+            e.piano_note("keys", 64, 0);
+            tick(&mut e);
+            e.render(&[], &mut [[0.; 8]; 48000]);
+            assert_eq!(e.audio_frame("tone", "out"), [0.; 8]);
+        }
+    }
+    #[test]
+    fn fm_depth_zero_matches_sine_and_frequency_inputs_follow_every_sample() {
+        let mut plain = Engine::prepare(graph("synth", 1), 48000.).unwrap();
+        let mut fm = Engine::prepare(graph("fm_synth", 1), 48000.).unwrap();
+        fm.parameter("tone", "fm_depth", 0.).unwrap();
+        for e in [&mut plain, &mut fm] {
+            e.note("tone", 69, 127);
+        }
+        for _ in 0..256 {
+            tick(&mut plain);
+            tick(&mut fm);
+            assert!(
+                (plain.audio_frame("tone", "out")[0] - fm.audio_frame("tone", "out")[0]).abs()
+                    < 1e-6
+            );
+        }
+        let mut g = graph("fm_synth", 1);
+        for (id, key, value) in [
+            ("carrier", "carrier_frequency", 880.),
+            ("modulator", "modulator_frequency", 660.),
+        ] {
+            let mut n = node(id, "value", 1);
+            n.parameters.insert("value".into(), value);
+            g.nodes.push(n);
+            g.edges.push(pr0_core::Edge {
+                id: id.into(),
+                source: id.into(),
+                source_port: "out".into(),
+                target: "tone".into(),
+                target_port: key.into(),
+            });
+        }
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.parameter("tone", "fm_depth", 0.).unwrap();
+        e.note("tone", 69, 127);
+        e.render(&[], &mut [[0.; 8]; 12]);
+        let tone = e.nodes.iter().find(|n| n.id == "tone").unwrap();
+        assert!((tone.voices[0].phase - 880. * 12. / 48000.).abs() < 1e-10);
+        assert!((tone.voices[0].mod_phase - 660. * 12. / 48000.).abs() < 1e-10);
+        let phase = tone.voices[0].phase;
+        assert!(e.parameter("tone", "carrier_frequency", 440.).is_err());
+        e.parameter("carrier", "value", 440.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 1]);
+        assert!(
+            (e.nodes.iter().find(|n| n.id == "tone").unwrap().voices[0].phase
+                - phase
+                - 440. / 48000.)
+                .abs()
+                < 1e-10
+        );
+    }
+    #[test]
+    fn fm_waveforms_modulate_and_multichannel_output_is_bounded() {
+        let mut reference = Engine::prepare(graph("fm_synth", 8), 48000.).unwrap();
+        reference.parameter("tone", "fm_depth", 0.).unwrap();
+        reference.note("tone", 60, 127);
+        let mut modulated = Engine::prepare(graph("fm_synth", 8), 48000.).unwrap();
+        modulated.note("tone", 60, 127);
+        let mut changed = false;
+        for _ in 0..300 {
+            tick(&mut reference);
+            tick(&mut modulated);
+            changed |= (reference.audio_frame("tone", "out")[0]
+                - modulated.audio_frame("tone", "out")[0])
+                .abs()
+                > 0.01;
+        }
+        assert!(changed);
+        for shape in 0..5 {
+            let mut e = Engine::prepare(graph("fm_synth", 8), 48000.).unwrap();
+            e.parameter("tone", "carrier_waveform", shape as f64)
+                .unwrap();
+            e.parameter("tone", "modulator_waveform", shape as f64)
+                .unwrap();
+            e.note("tone", 60, 127);
+            e.note("tone", 64, 80);
+            e.note("tone", 67, 90);
+            for _ in 0..300 {
+                tick(&mut e);
+                let frame = e.audio_frame("tone", "out");
+                assert!(frame.iter().all(|v| v.is_finite() && v.abs() <= 0.61));
+                assert!(frame.iter().all(|v| *v == frame[0]));
+            }
+        }
+    }
+    #[test]
+    fn graph_voices_survive_compatible_replacement_without_resurrecting_score_notes() {
+        let g = graph("fm_synth", 1);
+        let mut old = Engine::prepare(g.clone(), 48000.).unwrap();
+        old.piano_note("keys", 69, 100);
+        old.note_scoped("tone", 3, 1, 72, 100);
+        tick(&mut old);
+        let phase = old
+            .nodes
+            .iter()
+            .find(|n| n.id == "tone")
+            .unwrap()
+            .voices
+            .iter()
+            .find(|v| v.owner == GRAPH_VOICE_OWNER)
+            .unwrap()
+            .phase;
+        let mut new = Engine::prepare(g, 48000.).unwrap();
+        new.carry_node_state(&mut old);
+        let voices = &new.nodes.iter().find(|n| n.id == "tone").unwrap().voices;
+        assert_eq!(voices.iter().filter(|v| v.level > 0.).count(), 1);
+        assert_eq!(voices.iter().find(|v| v.level > 0.).unwrap().phase, phase);
+        new.piano_note("keys", 69, 0);
+        tick(&mut new);
+        assert!(
+            new.nodes
+                .iter()
+                .find(|n| n.id == "tone")
+                .unwrap()
+                .voices
+                .iter()
+                .filter(|v| v.level > 0.)
+                .all(|v| v.releasing)
+        );
+    }
+    #[test]
+    fn gate_fallback_and_voice_capacity() {
+        for kind in ["synth", "fm_synth"] {
+            let mut g = graph(kind, 1);
+            g.edges
+                .retain(|e| e.target_port == "pitch" || e.target_port == "gate");
+            let mut e = Engine::prepare(g, 48000.).unwrap();
+            e.piano_note("keys", 60, 100);
+            tick(&mut e);
+            assert!(e.audio_frame("tone", "out")[0].abs() > 0.001);
+            e.piano_note("keys", 60, 0);
+            tick(&mut e);
+            assert!(
+                e.nodes
+                    .iter()
+                    .find(|n| n.id == "tone")
+                    .unwrap()
+                    .voices
+                    .iter()
+                    .filter(|v| v.level > 0.)
+                    .all(|v| v.releasing)
+            );
+            for pitch in 0..127 {
+                e.note_scoped("tone", 2, pitch as u32, pitch, 100);
+            }
+            assert_eq!(
+                e.nodes
+                    .iter()
+                    .find(|n| n.id == "tone")
+                    .unwrap()
+                    .voices
+                    .iter()
+                    .filter(|v| v.level > 0. && !v.releasing)
+                    .count(),
+                64
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod looper_engine_tests {
+    use super::*;
+    fn graph() -> Graph {
+        let mut node = pr0_core::demo_project("p".into(), "p".into(), pr0_core::Mode::Freeform)
+            .graph
+            .nodes
+            .remove(0);
+        node.kind = "looper".into();
+        node.id = "loop".into();
+        node.channels = 1;
+        node.parameters = [("max_seconds".into(), 1.)].into();
+        Graph {
+            nodes: vec![node],
+            edges: vec![],
+        }
+    }
+    #[test]
+    fn preparation_rejects_excessive_recording_memory() {
+        let mut g = graph();
+        g.nodes[0].channels = 8;
+        g.nodes[0].parameters.insert("max_seconds".into(), 300.);
+        assert!(
+            Engine::prepare(g, 96000.)
+                .err()
+                .unwrap()
+                .contains("512 MiB")
+        );
+    }
+    #[test]
+    fn edits_preserve_recordings_and_apply_new_meter_without_resetting_phase() {
+        let mut old = Engine::prepare(graph(), 100.).unwrap();
+        old.set_meter(3, 8);
+        old.graph_clock.beat = 0.75;
+        let clock = old.graph_clock;
+        old.nodes[0]
+            .looper
+            .as_mut()
+            .unwrap()
+            .tick([0.3; 8], [1., 0., 0., 0., 0.], 0., &clock);
+        old.nodes[0]
+            .looper
+            .as_mut()
+            .unwrap()
+            .tick([0.; 8], [0., 1., 0., 0., 0.], 0., &clock);
+        let mut changed = graph();
+        changed.nodes[0].parameters.insert("loop_mode".into(), 0.);
+        let mut next = Engine::prepare(changed, 100.).unwrap();
+        next.set_meter(5, 8);
+        next.carry_node_state(&mut old);
+        assert_eq!(next.graph_clock.beat, 0.75);
+        assert_eq!(next.graph_clock.bar_beats, 2.5);
+        assert_eq!(next.graph_clock.beat_length, 0.5);
+        let clock = next.graph_clock;
+        assert!(
+            (next.nodes[0].looper.as_mut().unwrap().tick(
+                [0.; 8],
+                [0., 0., 1., 0., 0.],
+                0.,
+                &clock
+            )[0] - 0.3)
+                .abs()
+                < 1e-6
+        );
+        let mut changed = graph();
+        changed.nodes[0].parameters.insert("max_seconds".into(), 2.);
+        let mut reset = Engine::prepare(changed, 100.).unwrap();
+        reset.carry_node_state(&mut next);
+        assert_eq!(reset.nodes[0].looper.as_ref().unwrap().tracks[0].length, 0);
+    }
+}
+
+#[cfg(test)]
+mod recording_graph_tests {
+    use super::*;
+    #[test]
+    fn record_infers_audio_width_and_retains_capture_through_unrelated_edits() {
+        let p = pr0_core::demo_project("p".into(), "Archive".into(), pr0_core::Mode::Freeform);
+        let mut tone = p.graph.nodes[0].clone();
+        tone.id = "tone".into();
+        tone.kind = "oscillator".into();
+        tone.channels = 8;
+        tone.parameters = [("frequency".into(), 440.), ("amplitude".into(), 0.25)].into();
+        let mut record = tone.clone();
+        record.id = "record".into();
+        record.kind = "record".into();
+        record.channels = 1;
+        record.parameters.clear();
+        let mut start = record.clone();
+        start.id = "start".into();
+        start.kind = "value".into();
+        start.parameters = [("value".into(), 1.)].into();
+        let graph = pr0_core::Graph {
+            nodes: vec![tone, record, start],
+            edges: vec![
+                pr0_core::Edge {
+                    id: "in".into(),
+                    source: "tone".into(),
+                    source_port: "out".into(),
+                    target: "record".into(),
+                    target_port: "in".into(),
+                },
+                pr0_core::Edge {
+                    id: "start".into(),
+                    source: "start".into(),
+                    source_port: "out".into(),
+                    target: "record".into(),
+                    target_port: "start".into(),
+                },
+            ],
+        };
+        assert!(graph.validate().is_ok());
+        let mut engine = Engine::prepare(graph.clone(), 48000.).unwrap();
+        engine.render(&[], &mut [[0.; 8]; 100]);
+        assert_eq!(engine.telemetry()["record"]["_record_channels"], 8.);
+        let mut next = Engine::prepare(graph, 48000.).unwrap();
+        next.carry_node_state(&mut engine);
+        next.render(&[], &mut [[0.; 8]; 100]);
+        next.finish_recordings();
+        let chunks = next.take_record_events();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].2, 8);
+        assert_eq!(chunks[0].4.len(), 202);
+        assert!(matches!(chunks[0].4[100], recorder::Event::Audio(a) if a[7].abs() > 0.01));
+        assert!(engine.take_record_events().is_empty());
+        let mut changed = next.graph.clone();
+        changed
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "tone")
+            .unwrap()
+            .channels = 2;
+        let mut changed = Engine::prepare(changed, 48000.).unwrap();
+        changed.carry_node_state(&mut next);
+        assert_eq!(changed.telemetry()["record"]["_record_channels"], 2.);
     }
 }

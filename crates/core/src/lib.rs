@@ -80,6 +80,8 @@ pub struct Port {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Descriptor {
+    #[serde(default = "descriptor_channels")]
+    pub default_channels: usize,
     pub kind: String,
     pub label: String,
     pub symbol: String,
@@ -89,6 +91,9 @@ pub struct Descriptor {
     pub inputs: Vec<Port>,
     pub outputs: Vec<Port>,
     pub parameters: Vec<Parameter>,
+}
+fn descriptor_channels() -> usize {
+    2
 }
 /// Control messages are separate from audio samples and spectral frames.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -243,6 +248,11 @@ pub fn catalog() -> Vec<Descriptor> {
                    parameters: Vec<Parameter>,
                    aliases: &[&str]| {
         result.push(Descriptor {
+            default_channels: if matches!(kind, "synth" | "fm_synth" | "looper") {
+                1
+            } else {
+                2
+            },
             kind: kind.into(),
             label: label.into(),
             symbol: symbol.into(),
@@ -945,14 +955,53 @@ pub fn catalog() -> Vec<Descriptor> {
         "Polyphonic synth",
         "♪",
         "Audio",
-        "64-voice sine instrument driven by scheduled part notes.",
-        vec![],
+        "64-voice sine instrument with standard MIDI pitch, velocity, gate, trigger and pitch-specific note_off controls, or direct scheduled part notes. Repeated MIDI pitches release oldest-held-first. Mono by default; the same mix is available on 1–8 output channels.",
+        ["pitch", "velocity", "gate", "trigger", "note_off"]
+            .into_iter()
+            .map(|id| port(id, Control))
+            .collect(),
         vec![port("out", Audio)],
         vec![
             param("amplitude", "Amplitude", "", 0., 1., 0.2),
             param("release", "Release", "ms", 1., 2000., 80.),
         ],
         &["poly"],
+    );
+    add(
+        "fm_synth",
+        "Polyphonic FM synth",
+        "FM",
+        "Audio",
+        "64-voice two-oscillator FM instrument with standard MIDI note inputs or direct score notes. Carrier and modulator frequencies are Hz at MIDI A4 (69); each voice transposes both and the FM depth with its MIDI pitch. Modulator output changes carrier frequency by FM depth in Hz, including through-zero FM. Choose each waveform in the modal. Repeated MIDI pitches release oldest-held-first. Mono by default; 1–8 channels carry the same polyphonic mix.",
+        ["pitch", "velocity", "gate", "trigger", "note_off"]
+            .into_iter()
+            .map(|id| port(id, Control))
+            .collect(),
+        vec![port("out", Audio)],
+        vec![
+            param(
+                "carrier_frequency",
+                "Carrier frequency",
+                "Hz at A4",
+                0.,
+                20000.,
+                440.,
+            ),
+            param(
+                "modulator_frequency",
+                "Modulator frequency",
+                "Hz at A4",
+                0.,
+                20000.,
+                880.,
+            ),
+            param("carrier_waveform", "Carrier waveform", "", 0., 4., 0.),
+            param("modulator_waveform", "Modulator waveform", "", 0., 4., 0.),
+            param("fm_depth", "FM depth", "Hz at A4", 0., 20000., 220.),
+            param("amplitude", "Amplitude", "", 0., 1., 0.2),
+            param("release", "Release", "ms", 1., 2000., 80.),
+        ],
+        &["poly", "FM", "frequency modulation", "two oscillator"],
     );
     add(
         "noise",
@@ -1305,6 +1354,52 @@ pub fn catalog() -> Vec<Descriptor> {
         );
     }
     add(
+        "record",
+        "Record",
+        "●",
+        "Audio",
+        "Archive the incoming 1–8 channel audio bundle to a timestamped WAV on this server. The node name becomes the filename prefix. Start and Stop accept positive rising edges; return to zero to rearm. Stop wins simultaneous commands. Channel count follows the audio input. Uses the current engine sample rate and 32-bit float PCM, matching project sample storage. Recordings belong to this project and are not publicly served. Stopping the show does not stop this node; send Stop or disable the engine.",
+        vec![
+            port("in", Audio),
+            port("start", Control),
+            port("stop", Control),
+        ],
+        vec![],
+        vec![],
+        &[],
+    );
+    add(
+        "looper",
+        "Looper",
+        "↻",
+        "Audio",
+        "Eight independent audio loop tracks. Send track numbers 1–8 to Start loop (record), Stop loop record, Start playback or Stop playback; 0 is idle. Return to 0 before repeating the same command. Loop mode 0 records until stopped and starts immediately; a positive beat count queues record/play for the next project bar and ends recording after that many meter beats. Stops are immediate. Playback repeats the recorded audio without tempo stretching. Starting recording replaces that track. Playback can finish an in-progress recording. Loops are saved per project and node on disk. Clear removes the selected track immediately. Capacity limits recording duration.",
+        vec![
+            port("in", Audio),
+            port("start_loop", Control),
+            port("stop_loop_record", Control),
+            port("start_playback", Control),
+            port("stop_playback", Control),
+            port("clear", Control),
+        ],
+        vec![port("out", Audio)],
+        vec![
+            param(
+                "loop_mode",
+                "Loop mode (0 = freeform)",
+                "beats",
+                0.,
+                128.,
+                4.,
+            ),
+            Parameter {
+                structural: true,
+                ..param("max_seconds", "Capacity per track", "s", 1., 300., 30.)
+            },
+        ],
+        &["loop", "record", "eight tracks"],
+    );
+    add(
         "poly_sampler",
         "Polyphonic sampler",
         "▶",
@@ -1455,6 +1550,9 @@ impl Graph {
         Ok(flat)
     }
     pub fn validate_flat(&self) -> Result<Vec<usize>, String> {
+        if self.nodes.iter().filter(|n| n.kind == "record").count() > 16 {
+            return Err("At most 16 record nodes are supported".into());
+        }
         if self.nodes.len() > 256 || self.edges.len() > 2048 {
             return Err("Graph exceeds 256 nodes / 2048 edges".into());
         }
@@ -1604,8 +1702,15 @@ impl Graph {
                 {
                     return Err("Physical channel routes must be whole numbers".into());
                 }
-                if n.kind == "oscillator" && key == "waveform" && value.fract() != 0. {
+                if ((n.kind == "oscillator" && key == "waveform")
+                    || (n.kind == "fm_synth"
+                        && matches!(key.as_str(), "carrier_waveform" | "modulator_waveform")))
+                    && value.fract() != 0.
+                {
                     return Err("Waveform must be an integer from 0 to 4".into());
+                }
+                if n.kind == "looper" && value.fract() != 0. {
+                    return Err("Looper mode and capacity must be whole numbers".into());
                 }
                 if !value.is_finite() || *value < p.min || *value > p.max {
                     return Err(format!(
@@ -1695,6 +1800,7 @@ impl Graph {
                 }
             }
             if signal == Signal::Audio
+                && self.nodes[t].kind != "record"
                 && sd
                     .outputs
                     .iter()
@@ -2214,4 +2320,41 @@ pub enum Visualization {
         history: Vec<String>,
         columns: usize,
     },
+}
+
+#[cfg(test)]
+mod synth_contract_tests {
+    use super::*;
+    #[test]
+    fn midi_contract_mono_defaults_and_fm_validation() {
+        let descriptors = catalog();
+        for kind in ["synth", "fm_synth"] {
+            let d = descriptors.iter().find(|d| d.kind == kind).unwrap();
+            assert_eq!(d.default_channels, 1);
+            assert_eq!(
+                d.inputs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+                ["pitch", "velocity", "gate", "trigger", "note_off"]
+            );
+            assert!(d.inputs.iter().all(|p| p.signal == Signal::Control));
+        }
+        let mut p = demo_project("p".into(), "p".into(), Mode::Freeform);
+        p.parts.clear();
+        p.graph.edges.clear();
+        p.graph.nodes.truncate(1);
+        let n = &mut p.graph.nodes[0];
+        n.kind = "fm_synth".into();
+        n.parameters.clear();
+        n.channels = 8;
+        assert!(p.validate().is_ok());
+        for key in ["carrier_waveform", "modulator_waveform"] {
+            for value in [-1., 0.5, 5.] {
+                p.graph.nodes[0].parameters.insert(key.into(), value);
+                assert!(p.validate().is_err());
+            }
+            p.graph.nodes[0].parameters.insert(key.into(), 4.);
+            assert!(p.validate().is_ok());
+        }
+        p.graph.nodes[0].channels = 9;
+        assert!(p.validate().is_err());
+    }
 }

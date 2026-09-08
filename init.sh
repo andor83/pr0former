@@ -49,7 +49,7 @@ then runs --update and --start. Pull/build failures prevent startup.
 It requires installed build tools and does not change startup services.
 HTTPS defaults to 443 with redirects on 80; without SSL the default is HTTP on 80.
 --setup-ssl/--remove-ssl take effect after restart and do not change startup services.
-Trust .local/ssl/ca.pem on each client. Linux may require bind-port permission
+Trust certs/ca.pem on each client. Linux may require bind-port permission
 or alternate ports: PR0_HTTP_PORT=8080 ./init.sh --start --port 8443.
 HELP
 }
@@ -231,6 +231,11 @@ check_start_version() {
   fi
 }
 
+# Move existing local certificates without changing keys or client trust.
+if [ ! -e "$PROJECT_DIR/certs" ] && [ -d "$PROJECT_DIR/.local/ssl" ]; then
+  mv -- "$PROJECT_DIR/.local/ssl" "$PROJECT_DIR/certs"
+fi
+
 if [ "$START_ONLY" = true ]; then
   if [ ! -x "$PROJECT_DIR/target/release/pr0-server" ]; then
     printf 'A release build is required. Run ./init.sh first (or cargo build --release).\n' >&2
@@ -256,10 +261,10 @@ if [ "$START_ONLY" = true ]; then
 fi
 
 if [ "$REMOVE_SSL" = true ]; then
-  mkdir -p "$PROJECT_DIR/.local/ssl"
-  chmod 700 "$PROJECT_DIR/.local/ssl"
-  rm -f -- "$PROJECT_DIR/.local/ssl/server.pem" "$PROJECT_DIR/.local/ssl/server-key.pem" "$PROJECT_DIR/.local/ssl/ca.pem" "$PROJECT_DIR/.local/ssl/ca-key.pem"
-  touch "$PROJECT_DIR/.local/ssl/disabled"
+  mkdir -p "$PROJECT_DIR/certs"
+  chmod 700 "$PROJECT_DIR/certs"
+  rm -f -- "$PROJECT_DIR/certs/server.pem" "$PROJECT_DIR/certs/server-key.pem" "$PROJECT_DIR/certs/ca.pem" "$PROJECT_DIR/certs/ca-key.pem"
+  touch "$PROJECT_DIR/certs/disabled"
   printf 'Managed certificates removed. Restart to serve HTTP on port 80. External TLS settings are disabled until --setup-ssl.\n'
   exit 0
 fi
@@ -415,7 +420,7 @@ install_dependencies() {
 
 setup_ssl() {
   required openssl
-  local directory="$PROJECT_DIR/.local/ssl" names name san index temporary default_names lan
+  local directory="$PROJECT_DIR/certs" names name san index temporary default_names lan
   if [ -f "$directory/server.pem" ] && ! ask 'Replace the existing local certificate? Clients will need to trust the new CA.'; then return; fi
   default_names="localhost 127.0.0.1 ::1 $(hostname)"
   if command -v ifconfig >/dev/null 2>&1; then
@@ -492,11 +497,11 @@ generate_startup() {
     read -r tls_key
     if [ ! -r "$tls_cert" ] || [ ! -r "$tls_key" ]; then printf 'TLS files must exist and be readable.\n' >&2; return 1; fi
     case "$tls_cert:$tls_key" in /*:/*) ;; *) printf 'Use absolute paths for TLS files.\n' >&2; return 1 ;; esac
-  elif [ ! -f "$PROJECT_DIR/.local/ssl/server.pem" ]; then
+  elif [ ! -f "$PROJECT_DIR/certs/server.pem" ]; then
     printf 'Browser microphone access on other devices requires trusted HTTPS. Configure TLS before performance use.\n'
   fi
   default_port=80
-  if [ -n "$tls_cert" ] || [ -f "$PROJECT_DIR/.local/ssl/server.pem" ]; then default_port=443; fi
+  if [ -n "$tls_cert" ] || [ -f "$PROJECT_DIR/certs/server.pem" ]; then default_port=443; fi
   bind_address="${bind_address:-0.0.0.0:$default_port}"
   mkdir -p "$PROJECT_DIR/.local" "$PROJECT_DIR/data/logs"
   chmod 700 "$PROJECT_DIR/.local"

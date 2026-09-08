@@ -3,7 +3,7 @@ export type Mode = 'structured' | 'conducted' | 'freeform'
 export type Signal = 'audio' | 'control' | 'spectral'
 export interface Parameter { id: string; label: string; unit: string; min: number; max: number; default: number; logarithmic: boolean; structural: boolean }
 export interface Port { id: string; label: string; signal: Signal; fixed_channels?: number | null }
-export interface Descriptor { kind: string; label: string; symbol: string; category: string; description: string; aliases: string[]; inputs: Port[]; outputs: Port[]; parameters: Parameter[] }
+export interface Descriptor { default_channels?: number; kind: string; label: string; symbol: string; category: string; description: string; aliases: string[]; inputs: Port[]; outputs: Port[]; parameters: Parameter[] }
 export interface IoConfig { port: string; address: string; destination: string }
 export interface GraphNode { io?: IoConfig | null; part_id?: string | null; library?:{id:string;version:number}|null; parent?: string | null; id: string; kind: string; label: string; x: number; y: number; channels: number; parameters: Record<string, number>; control_value?: number | string | null }
 export interface GraphEdge { id: string; source: string; source_port: string; target: string; target_port: string }

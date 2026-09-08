@@ -2,11 +2,13 @@ mod audio;
 mod bind;
 mod build_info;
 mod hardware_meter;
+mod loops;
 mod media;
 mod node_io;
 mod osc;
 mod output_buffer;
 mod performance;
+mod recordings;
 mod resources;
 mod revisions;
 mod sample_library;
@@ -622,6 +624,53 @@ async fn control_input(
         publish(&app, &p);
     }
     Ok(Json(p))
+}
+#[derive(Deserialize)]
+struct ClearLoop {
+    node: String,
+    track: u8,
+}
+async fn clear_loop(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(command): Json<ClearLoop>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    can_edit(&role(&app, &id, &u)?)?;
+    let _guard = app.setup.lock().await;
+    let p = load(&app, &id)?;
+    if !(1..=8).contains(&command.track) {
+        return Err(bad("Loop track must be 1–8"));
+    }
+    if !p
+        .graph
+        .nodes
+        .iter()
+        .any(|n| n.id == command.node && n.kind == "looper")
+    {
+        return Err(bad("Looper node missing"));
+    }
+    if app.graph.lock().unwrap().as_deref() == Some(&id) {
+        let (tx, rx) = oneshot::channel();
+        send(
+            &app,
+            audio::Command::ClearLoop {
+                project: id,
+                node: command.node,
+                track: command.track,
+                reply: tx,
+            },
+        )?;
+        rx.await.map_err(internal)?.map_err(bad)?;
+    } else {
+        tokio::task::spawn_blocking(move || loops::clear_saved(&id, &command.node, command.track))
+            .await
+            .map_err(internal)?
+            .map_err(bad)?;
+    }
+    Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]
 struct PianoNote {
@@ -1341,6 +1390,7 @@ async fn main() {
         .route("/api/projects/{id}/preview", get(preview))
         .route("/api/projects/{id}/control", put(control_input))
         .route("/api/projects/{id}/piano", put(piano_note))
+        .route("/api/projects/{id}/loops/clear", put(clear_loop))
         .route("/api/subgraphs", get(subgraphs::list))
         .route(
             "/api/subgraphs/{id}/versions/{version}",

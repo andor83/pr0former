@@ -10,5 +10,5 @@ export default defineConfig({
   testIgnore: load ? [] : ['**/load.spec.ts'],
   testDir: './e2e', workers: 1, reporter: 'list',
   use: { launchOptions: { args: ['--mute-audio'] }, baseURL: 'http://127.0.0.1:3101', viewport: { width: 1440, height: 960 } },
-  webServer: { command: load ? 'cargo run --release -p pr0-server' : 'cargo run -p pr0-server', cwd: '..', env: { PR0_BIND: '127.0.0.1:3101', PR0_DATA: data, PR0_DISABLE_NATIVE_DEVICES: '1' }, url: 'http://127.0.0.1:3101/api/status', reuseExistingServer: false, timeout: 300000 },
+  webServer: { command: load ? 'cargo run --release -p pr0-server' : 'cargo run -p pr0-server', cwd: '..', env: { PR0_BIND: '127.0.0.1:3101', PR0_HOST: '127.0.0.1', PR0_PORT: '3101', PR0_NO_SSL: '1', PR0_DATA: data, PR0_RECORDINGS_ROOT: join(data, 'recordings'), PR0_DISABLE_NATIVE_DEVICES: '1' }, url: 'http://127.0.0.1:3101/api/status', reuseExistingServer: false, timeout: 300000 },
 })

@@ -1,0 +1,72 @@
+import {test,expect} from '@playwright/test'
+test('looper records independent tracks, quantizes in meter, and preserves loops during edits',async({page})=>{
+  const headers={'X-Pr0former':'1'},status=await(await page.request.get('/api/status')).json()
+  await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
+  let p=await(await page.request.post('/api/projects',{headers,data:{name:'Loop workspace',mode:'freeform'}})).json()
+  p.bpm=240;p.beats_per_bar=3;p.beat_unit=8;p.parts=[]
+  let position=0
+  const node=(id:string,kind:string,parameters={})=>({id,kind,label:id,x:(position++%4)*260,y:Math.floor((position-1)/4)*260,channels:1,parameters})
+  p.graph={nodes:[node('Loop','looper',{loop_mode:0,max_seconds:2}),node('Tone','oscillator',{frequency:440,amplitude:.2}),node('Meter','audio_visualizer',{size:256}),...['Record','Stop record','Play','Stop play','Clear'].map(id=>node(id,'value',{value:0}))],edges:[{id:'audio',source:'Tone',source_port:'out',target:'Loop',target_port:'in'},{id:'meter',source:'Loop',source_port:'out',target:'Meter',target_port:'in'},...['start_loop','stop_loop_record','start_playback','stop_playback','clear'].map((target_port,i)=>({id:target_port,source:['Record','Stop record','Play','Stop play','Clear'][i],source_port:'out',target:'Loop',target_port}))]}
+  expect((await page.request.put(`/api/projects/${p.id}`,{headers,data:p})).ok()).toBe(true)
+  const load=async()=>(await(await page.request.get(`/api/projects/${p.id}`)).json()).project
+  const param=async(node:string,parameter:string,value:number)=>{const current=await load();const r=await page.request.put(`/api/projects/${p.id}/parameter`,{headers,data:{node,parameter,value,revision:current.revision}});expect(r.ok(),await r.text()).toBe(true)}
+  const command=async(node:string,track:number)=>{await param(node,'value',0);await param(node,'value',track)}
+  let latest:any
+  page.on('websocket',s=>s.on('framereceived',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='telemetry')latest=m}))
+  await page.goto('/')
+  await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
+  await command('Record',1)
+  await expect.poll(()=>latest?.values.Loop._track_1_recording).toBe(1)
+  await expect.poll(()=>latest?.values.Loop._track_1_seconds||0).toBeGreaterThan(.1)
+  await command('Stop record',1)
+  await expect.poll(()=>latest?.values.Loop._track_1_recording).toBe(0)
+  const length=latest.values.Loop._track_1_seconds
+  await command('Play',1)
+  await expect.poll(()=>latest?.values.Loop._track_1_playing).toBe(1)
+  await expect.poll(()=>Math.max(...(latest?.visualizations.Meter.channels[0].magnitude||[0]))).toBeGreaterThan(.01)
+  expect(latest.running).toBe(false);expect(latest.beat).toBe(0)
+  const current=await load();current.graph.nodes.find((n:any)=>n.id==='Loop').label='Loop recorder'
+  expect((await page.request.put(`/api/projects/${p.id}`,{headers,data:current})).ok()).toBe(true)
+  await expect.poll(()=>latest?.values.Loop._track_1_seconds).toBe(length)
+  await command('Stop play',1)
+  await expect.poll(()=>latest?.values.Loop._track_1_playing).toBe(0)
+  await param('Loop','loop_mode',2)
+  await command('Record',8)
+  await expect.poll(()=>latest?.values.Loop._track_8_seconds||0).toBeGreaterThan(.1)
+  await expect.poll(()=>latest?.values.Loop._track_8_recording).toBe(0)
+  expect(latest.values.Loop._track_8_seconds).toBeCloseTo(.25,3)
+  expect(latest.values.Loop._track_1_seconds).toBe(length)
+  await command('Play',8)
+  await expect.poll(()=>latest?.values.Loop._track_8_playing).toBe(1)
+  for(const id of ['Record','Stop record','Play','Stop play','Clear'])await param(id,'value',0)
+  await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
+  await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
+  await expect.poll(()=>latest?.values.Loop._track_1_seconds).toBe(length)
+  await expect.poll(()=>latest?.values.Loop._track_8_playing).toBe(0)
+  await command('Play',8)
+  await expect.poll(()=>latest?.values.Loop._track_8_playing).toBe(1)
+  await page.getByRole('button',{name:'Edit Loop recorder',exact:true}).click()
+  await expect(page.getByRole('row',{name:'Loop track 8',exact:true})).toContainText('Playing')
+  await expect(page.getByRole('row',{name:'Loop track 1',exact:true})).toContainText('Ready')
+  await page.screenshot({path:'test-results/looper.png'})
+  await page.getByRole('button',{name:'Clear loop track 8',exact:true}).click()
+  await expect(page.getByRole('row',{name:'Loop track 8',exact:true})).toContainText('Empty')
+  await command('Clear',1)
+  await expect.poll(()=>latest?.values.Loop._track_1_seconds).toBe(0)
+  const clearPath=`/api/projects/${p.id}/loops/clear`
+  expect((await page.request.put(clearPath,{headers,data:{node:'Loop',track:9}})).status()).toBe(400)
+  expect((await page.request.put(clearPath,{headers,data:{node:'Tone',track:1}})).status()).toBe(400)
+  expect((await page.request.put(clearPath,{data:{node:'Loop',track:1}})).ok()).toBe(false)
+  await page.getByRole('button',{name:'Close parameters'}).click()
+  const invalid=await load();invalid.graph.nodes.find((n:any)=>n.id==='Loop').channels=8;invalid.graph.nodes.find((n:any)=>n.id==='Loop').parameters.max_seconds=300
+  invalid.graph.edges=invalid.graph.edges.filter((e:any)=>!['audio','meter'].includes(e.id))
+  const rejected=await page.request.put(`/api/projects/${p.id}`,{headers,data:invalid});expect(rejected.status()).toBe(400);expect(await rejected.text()).toContain('512 MiB')
+  for(const id of ['Record','Stop record','Play','Stop play','Clear'])await param(id,'value',0)
+  await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
+  expect((await page.request.put(clearPath,{headers,data:{node:'Loop',track:1}})).ok()).toBe(true)
+  await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
+  await expect.poll(()=>latest?.values.Loop._track_8_seconds).toBe(0)
+  await expect.poll(()=>latest?.values.Loop._track_1_seconds).toBe(0)
+  for(const id of ['Record','Stop record','Play','Stop play','Clear'])await param(id,'value',0)
+  await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
+})

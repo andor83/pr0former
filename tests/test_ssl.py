@@ -43,10 +43,15 @@ class SSLTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, err.decode())
             finally:
                 os.close(master); os.close(slave)
-            certs = root / '.local/ssl'
+            certs = root / 'certs'
             self.assertEqual((certs / 'server-key.pem').stat().st_mode & 0o777, 0o600)
             subprocess.run(['openssl','verify','-CAfile',str(certs/'ca.pem'),str(certs/'server.pem')],check=True,capture_output=True)
-            context = ssl.create_default_context(cafile=str(certs / 'ca.pem'))
+            original_certificate = (certs / 'server.pem').read_bytes()
+            # Simulate certificates created by an older launcher; startup migrates
+            # the whole directory while preserving certificate identity and mode.
+            (root / '.local').mkdir(exist_ok=True)
+            certs.rename(root / '.local/ssl')
+            context = ssl.create_default_context(cafile=str(root / '.local/ssl/ca.pem'))
             # An older saved startup address must not defeat the managed TLS mode.
             (root / '.local/start-pr0former.sh').write_text('#!/bin/bash\nexport PR0_BIND=127.0.0.1:4000\nexport PR0_TLS_CERT=obsolete.pem\nexport PR0_TLS_KEY=obsolete-key.pem\nexec "$PWD/target/release/pr0-server"\n')
             for mode in ['tls', 'override', 'removed']:
@@ -73,6 +78,17 @@ class SSLTests(unittest.TestCase):
                             time.sleep(.05)
                     else: self.fail('Server did not start')
                     if mode=='tls':
+                        self.assertEqual((certs/'server.pem').read_bytes(), original_certificate)
+                        self.assertFalse((root/'.local/ssl').exists())
+                        for version in [ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3]:
+                            version_context = ssl.create_default_context(cafile=str(certs/'ca.pem'))
+                            version_context.minimum_version = version
+                            version_context.maximum_version = version
+                            conn = http.client.HTTPSConnection('localhost', https_port, context=version_context)
+                            conn.request('GET', '/api/status')
+                            response = conn.getresponse()
+                            self.assertEqual(response.status, 200)
+                            response.read(); conn.close()
                         conn=http.client.HTTPConnection('127.0.0.1',http_port)
                         conn.request('GET','/a%20b?test=1')
                         response=conn.getresponse()

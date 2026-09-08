@@ -13,7 +13,11 @@ pub struct Config {
 }
 impl Config {
     pub fn load() -> Self {
-        let directory = PathBuf::from(".local/ssl");
+        let directory = PathBuf::from("certs");
+        let legacy = PathBuf::from(".local/ssl");
+        if !directory.exists() && legacy.is_dir() {
+            std::fs::rename(&legacy, &directory).expect("Move legacy TLS certificates to certs/");
+        }
         let disabled = std::env::var("PR0_NO_SSL").is_ok_and(|s| s == "1")
             || directory.join("disabled").exists();
         let cert = directory.join("server.pem");

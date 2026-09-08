@@ -22,7 +22,7 @@ cpal = "0.16"
 midir = "0.10"
 hound = "3.5"
 rtrb = "0.3"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 webrtc = "0.14"
 opus = "0.3"

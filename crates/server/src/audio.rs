@@ -39,6 +39,12 @@ pub enum Command {
         crate::settings::Settings,
         oneshot::Sender<Result<(), String>>,
     ),
+    ClearLoop {
+        project: String,
+        node: String,
+        track: u8,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Test(bool),
     Load(Project, Box<Engine>),
     Replace {
@@ -107,6 +113,8 @@ fn run(
     let mut node_routes: Vec<(String, crate::node_io::Route, bool)> = Vec::new();
     let mut sequencer: Option<crate::performance::Sequencer> = None;
     let mut engine: Option<Engine> = None;
+    let mut loop_store = crate::loops::Store::new();
+    let mut record_store = crate::recordings::Store::new();
     let mut project: Option<Project> = None;
     let mut epoch = String::new();
     let mut log_project = String::new();
@@ -214,6 +222,18 @@ fn run(
                     media_rates.clear();
                     input_rates.clear();
 
+                    let saved = if !value {
+                        if let (Some(p), Some(e)) = (&project, &mut engine) {
+                            e.finish_loops();
+                            e.finish_recordings();
+                            let recorded = record_store.flush(&p.id, e);
+                            loop_store.flush(&p.id, e).and(recorded)
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    };
                     let result = if value {
                         open_outputs(&settings, underruns.clone()).and_then(|devices| {
                             let captured = open_inputs(&settings)?;
@@ -225,7 +245,7 @@ fn run(
                             Ok(())
                         })
                     } else {
-                        Ok(())
+                        saved
                     };
 
                     if let Err(err) = &result {
@@ -233,6 +253,25 @@ fn run(
                     }
 
                     let _=events.send(json!({"type":"audio_engine_status","enabled":enabled,"sample_rate":settings.sample_rate,"block_size":settings.block_size}));
+                    let _ = reply.send(result);
+                }
+                Command::ClearLoop {
+                    project: id,
+                    node,
+                    track,
+                    reply,
+                } => {
+                    let result = if project.as_ref().is_some_and(|p| p.id == id) {
+                        engine
+                            .as_mut()
+                            .ok_or("Engine unavailable".to_string())
+                            .and_then(|e| {
+                                e.clear_loop(&node, track)?;
+                                loop_store.flush(&id, e)
+                            })
+                    } else {
+                        Err("Project engine unavailable".into())
+                    };
                     let _ = reply.send(result);
                 }
                 Command::Test(value) => {
@@ -300,6 +339,17 @@ fn run(
                             None => crate::performance::Sequencer::new(&p),
                         });
                         prepared.carry_node_state(previous);
+                        // Only retired buffers remain in the old engine after state transfer.
+                        previous.finish_loops();
+                        previous.finish_recordings();
+                        if let Some(p) = &project {
+                            if let Err(e) = record_store.flush(&p.id, previous) {
+                                device_error = e;
+                            }
+                            if let Err(e) = loop_store.flush(&p.id, previous) {
+                                device_error = e;
+                            }
+                        }
                         if let Some(seq) = &sequencer {
                             seq.seed_part_nodes(previous, &mut prepared);
                         }
@@ -313,6 +363,17 @@ fn run(
                 }
 
                 Command::Load(p, mut e) => {
+                    if let (Some(old), Some(engine)) = (&project, &mut engine) {
+                        engine.finish_loops();
+                        engine.finish_recordings();
+                        if let Err(e) = record_store.flush(&old.id, engine) {
+                            device_error = e;
+                        }
+                        if let Err(e) = loop_store.flush(&old.id, engine) {
+                            device_error = e;
+                        }
+                    }
+                    record_store.reset_error();
                     count_in = None;
                     node_outputs.reset(vec![]);
                     node_routes = prepare_node_routes(&p);
@@ -345,6 +406,16 @@ fn run(
                     }
                 }
                 Command::Unload => {
+                    if let (Some(p), Some(e)) = (&project, &mut engine) {
+                        e.finish_loops();
+                        e.finish_recordings();
+                        if let Err(err) = record_store.flush(&p.id, e) {
+                            device_error = err;
+                        }
+                        if let Err(err) = loop_store.flush(&p.id, e) {
+                            device_error = err;
+                        }
+                    }
                     show_active = false;
                     count_in = None;
                     midi_inputs = crate::node_io::Inputs::default();
@@ -692,6 +763,10 @@ fn run(
                 }
             }
 
+            if let Some(p) = &project {
+                loop_store.poll(&p.id, e);
+                record_store.poll(&p.id, e);
+            }
             e.analyze_visualizers();
             previews.retain_mut(|preview| {
                 if preview.reply.as_ref().is_none_or(|r|r.is_closed()){return false;}
@@ -750,7 +825,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":record_store.error().or_else(|| loop_store.error()).unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
 ));
                 }
             }
