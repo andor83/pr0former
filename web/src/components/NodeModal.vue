@@ -11,6 +11,7 @@ import DeviceChannelRouting from './DeviceChannelRouting.vue'
 import DataVisualizer from './DataVisualizer.vue'
 import SpectralCurveEditor from './SpectralCurveEditor.vue'
 import LooperStatus from './LooperStatus.vue'
+import ToggleButton from './ToggleButton.vue'
 import type {Visualization} from '../types'
 const props = defineProps<{ samples?:SampleEntry[]; inputError?:string|null; ioStatus?:{error:string|null;dropped:number}; parts?: Part[]; projectId?:string; visualization?:Visualization; sampleRate?:number;blockSize?:number; interfaces?: {id:number;name:string}[]; node: GraphNode; descriptor: Descriptor; edges: GraphEdge[]; nodes: GraphNode[]; values?: Record<string, number>; stale: boolean; editable: boolean; active: boolean; saving: boolean }>()
 const emit = defineEmits<{ sample:[sample:SampleEntry]; rename: [label:string]; part: [id:string]; io: [value:IoConfig]; expand: []; close: []; change: [key: string, value: number]; disconnect: [edge: GraphEdge]; source: [id: string]; undo: []; remove: []; upload: [file: File]; control: [value:number|string]; curve: [parameters: Record<string, number>]; channels: [width: number] }>()
@@ -66,6 +67,7 @@ onBeforeUnmount(() => { dialog.value?.close(); previousFocus?.focus() })
     <p v-if="node.library" class="feature-note">Library version {{node.library.version}} · embedded copy; local edits do not change the library.</p><p class="modal-description">{{ descriptor.description }}</p>
     <div class="modal-status"><span class="status-dot" :class="{ live: active && !stale }"></span>{{ active ? stale ? 'Engine values stale' : 'Live engine · 20 updates / second' : 'Project inactive · stored values' }}<span v-if="saving" class="saving">Applying…</span></div>
     <div class="parameter-list"><section class="parameter-row"><label for="node-name">Node name</label><input id="node-name" :value="node.label" maxlength="256" :disabled="!editable || saving" @change="emit('rename',($event.target as HTMLInputElement).value)"><button v-if="node.kind==='subgraph'" class="button" @click="emit('expand')">Open subgraph</button></section>
+      <section v-if="node.kind==='toggle'" class="parameter-row"><ToggleButton :label="node.label" :checked="active&&!stale?values?._out===1:node.control_value===1" :disabled="!editable||saving||(active&&stale)" @value="value=>emit('control',value)" /><p v-if="links.in" class="feature-note">Input: {{sourceName(links.in)}} / {{links.in.source_port}}. Manual changes hold until this input changes.</p></section>
       <section v-if="node.kind==='record'" class="parameter-row" aria-label="Recording status">
         <h3>{{!active?'Engine off':stale?'Stale':values?._record_overflow?'Recording failed: buffer overflow':values?._recording?'Recording':'Stopped'}}</h3>
         <p v-if="active&&!stale">{{values?._record_channels||0}} input channels · {{(sampleRate||48000)/1000}} kHz · 32-bit float · {{(values?._record_seconds||0).toFixed(2)}} s</p>
@@ -106,7 +108,7 @@ onBeforeUnmount(() => { dialog.value?.close(); previousFocus?.focus() })
           <p v-if="errors[p.id]" class="field-error">{{ errors[p.id] }}</p>
         </template>
       </section>
-      <div v-if="!descriptor.parameters.length && !['record','browser_input','clock','subgraph','part_midi','midi_input','midi_output','midi_to_osc','osc_to_midi'].includes(node.kind) && !node.kind.startsWith('subgraph_') && !node.kind.endsWith('_visualizer')" class="empty-parameters"><Activity :size="24" /><p>This node has no editable parameters.</p><p>Output: {{ formatValue(values?._out) }}</p></div>
+      <div v-if="!descriptor.parameters.length && !['toggle','record','browser_input','clock','subgraph','part_midi','midi_input','midi_output','midi_to_osc','osc_to_midi'].includes(node.kind) && !node.kind.startsWith('subgraph_') && !node.kind.endsWith('_visualizer')" class="empty-parameters"><Activity :size="24" /><p>This node has no editable parameters.</p><p>Output: {{ formatValue(values?._out) }}</p></div>
     </div>
     <footer class="modal-footer"><button class="text-button" :disabled="!editable || saving" @click="emit('undo')"><RotateCcw :size="14" /> Undo last edit</button><span>Live edits apply immediately. Revisions autosave each minute.</span><button class="text-button danger" :disabled="!editable || saving" @click="emit('remove')">Delete node</button></footer>
   </dialog>

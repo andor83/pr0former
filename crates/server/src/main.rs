@@ -580,6 +580,46 @@ async fn control_input(
     if p.revision != c.revision {
         return Err(Failure(StatusCode::CONFLICT, "Stale control edit".into()));
     }
+    if let Some(node) = p
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == c.node && n.kind == "toggle")
+    {
+        let value = c.value.ok_or_else(|| bad("Toggle value required"))?;
+        if !matches!(&value, pr0_core::ControlValue::Number(v) if *v == 0. || *v == 1.) {
+            return Err(bad("Toggle value must be 0 or 1"));
+        }
+        node.control_value = Some(value.clone());
+        p.validate().map_err(bad)?;
+        update_working_copy(&app, &mut p)?;
+        if app.graph.lock().unwrap().as_deref() == Some(&id) {
+            send(
+                &app,
+                audio::Command::Control {
+                    node: c.node,
+                    value,
+                    revision: p.revision,
+                },
+            )?;
+        }
+        publish(&app, &p);
+        return Ok(Json(p));
+    }
+    if p.graph
+        .nodes
+        .iter()
+        .any(|n| n.id == c.node && n.kind == "trigger")
+    {
+        if c.value.is_some() {
+            return Err(bad("Trigger accepts a pulse, not a stored value"));
+        }
+        if app.graph.lock().unwrap().as_deref() != Some(&id) {
+            return Err(bad("Enable this project's audio engine before triggering"));
+        }
+        send(&app, audio::Command::Bang(c.node))?;
+        return Ok(Json(p));
+    }
     if p.graph
         .flatten()
         .map_err(bad)?

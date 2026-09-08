@@ -1214,11 +1214,22 @@ pub fn catalog() -> Vec<Descriptor> {
         &[],
     );
     add(
+        "toggle",
+        "Toggle",
+        "✓",
+        "Control",
+        "A latched checkbox: checked outputs 1, unchecked outputs 0. Changed numeric input sets the checkbox (zero off, nonzero on). Manual clicks override until the input changes again. Manual settings are saved; input-driven state is runtime only.",
+        vec![port("in", Control)],
+        vec![port("out", Control)],
+        vec![],
+        &["checkbox", "switch"],
+    );
+    add(
         "trigger",
         "Trigger",
         "!",
         "Control",
-        "Single-sample trigger on a rising edge.",
+        "Pass numeric input through unchanged. Any nonzero value lights the indicator. Clicking sends 1 for one engine sample, even with an input connected, then resumes the input (or zero when disconnected).",
         vec![port("in", Control)],
         vec![port("out", Control)],
         vec![],
@@ -1636,7 +1647,10 @@ impl Graph {
                 return Err("Choose numeric or text OSC input".into());
             }
             if let Some(value) = &n.control_value {
-                if !matches!(n.kind.as_str(), "control_visualizer" | "control_input") {
+                if !matches!(
+                    n.kind.as_str(),
+                    "control_visualizer" | "control_input" | "toggle"
+                ) {
                     return Err(
                         "Input literals belong to graphical controls or control visualizers".into(),
                     );
@@ -1650,6 +1664,13 @@ impl Graph {
                     }
                     _ => {}
                 }
+            }
+            if n.kind == "toggle"
+                && n.control_value
+                    .as_ref()
+                    .is_some_and(|v| !matches!(v, ControlValue::Number(n) if *n == 0. || *n == 1.))
+            {
+                return Err("Toggle value must be 0 or 1".into());
             }
             if n.kind == "control_input" {
                 let mode = n.parameters.get("mode").copied().unwrap_or(2.);

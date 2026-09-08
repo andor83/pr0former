@@ -419,7 +419,7 @@ function pianoNote(projectId:string,node:string,pitch:number,velocity:number) {
   void request.finally(() => { if(pianoRequests.get(key)===request)pianoRequests.delete(key) })
 }
 async function bangControl(node:string){if(!project.value||!editable.value||!graphActive.value||saving.value)return;await task(async()=>{await api(`/projects/${project.value!.id}/control`,'PUT',{node,revision:project.value!.revision})})}
-function controlValue(value:number|string){if(!project.value||!selected.value||!graphEditable.value)return;const next=clone(project.value);next.graph.nodes.find(n=>n.id===selected.value!.id)!.control_value=value;void task(()=>saveProject(next))}
+function controlValue(value:number|string){if(selected.value?.kind==='toggle'){graphControl(selected.value.id,value);return}if(!project.value||!selected.value||!graphEditable.value)return;const next=clone(project.value);next.graph.nodes.find(n=>n.id===selected.value!.id)!.control_value=value;void task(()=>saveProject(next))}
 function editCurve(parameters: Record<string, number>) {
   if (!project.value || !selected.value || !graphEditable.value) return
   const next = clone(project.value)

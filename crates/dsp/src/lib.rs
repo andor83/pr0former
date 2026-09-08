@@ -743,13 +743,25 @@ impl RuntimeNode {
                 let gain = self.p("gain");
                 self.spectral.as_mut().unwrap().transform(&self.kind, gain);
             }
-            "trigger" => {
-                scalar = if input[0] > 0. && self.previous <= 0. {
-                    1.
-                } else {
-                    0.
-                };
+            "toggle" => {
+                if self
+                    .bindings
+                    .iter()
+                    .any(|b| !b.parameter && b.destination == 0)
+                    && input[0] != self.previous
+                {
+                    self.count = if input[0] != 0. { 1. } else { 0. };
+                }
                 self.previous = input[0];
+                scalar = self.count;
+            }
+            "trigger" => {
+                scalar = if self.bang { 1. } else { input[0] };
+                if self.bang || (scalar != 0. && self.previous == 0.) {
+                    self.count += 1.;
+                }
+                self.bang = false;
+                self.previous = scalar;
             }
             "change" => {
                 scalar = if input[0] != self.previous { 1. } else { 0. };
@@ -1029,8 +1041,20 @@ impl Engine {
                 external_set: false,
                 bang: false,
                 phase: 0.,
-                previous: -1.,
-                count: 0.,
+                previous: if n.kind == "trigger" {
+                    0.
+                } else if n.kind == "toggle" {
+                    f64::NAN
+                } else {
+                    -1.
+                },
+                count: if n.kind == "toggle"
+                    && matches!(n.control_value, Some(pr0_core::ControlValue::Number(1.)))
+                {
+                    1.
+                } else {
+                    0.
+                },
                 seed: n.parameters.get("seed").copied().unwrap_or(1.) as u64,
                 envelope: 0.,
                 smooth: 0.,
@@ -1519,11 +1543,19 @@ impl Engine {
         }
     }
     pub fn control(&mut self, id: &str, value: &pr0_core::ControlValue) {
-        if let Some(node) = self
-            .nodes
-            .iter_mut()
-            .find(|n| n.id == id && n.kind == "control_input" && n.bindings.is_empty())
-        {
+        if let Some(node) = self.nodes.iter_mut().find(|n| {
+            n.id == id
+                && (n.kind == "toggle" || (n.kind == "control_input" && n.bindings.is_empty()))
+        }) {
+            if node.kind == "toggle" {
+                let pr0_core::ControlValue::Number(value) = value else {
+                    return;
+                };
+                if *value != 0. && *value != 1. {
+                    return;
+                }
+                node.count = *value;
+            }
             node.fallback = visualizer::Datum::prepare(Some(value));
         }
     }
@@ -1560,7 +1592,9 @@ impl Engine {
     }
     pub fn bang(&mut self, id: &str) -> bool {
         if let Some(node) = self.nodes.iter_mut().find(|n| {
-            n.id == id && n.kind == "control_input" && n.bindings.is_empty() && n.p("mode") == 0.
+            n.id == id
+                && (n.kind == "trigger"
+                    || (n.kind == "control_input" && n.bindings.is_empty() && n.p("mode") == 0.))
         }) {
             node.bang = true;
             return true;
@@ -1729,6 +1763,9 @@ impl Engine {
                     .zip(n.values.iter().copied())
                     .collect();
                 values.insert("_out".into(), n.control[0]);
+                if n.kind == "trigger" {
+                    values.insert("_trigger_sequence".into(), n.count);
+                }
                 if let Some(recorder) = &n.recorder {
                     values.insert("_recording".into(), recorder.active as u8 as f64);
                     values.insert(
@@ -3478,5 +3515,121 @@ mod recording_graph_tests {
         let mut changed = Engine::prepare(changed, 48000.).unwrap();
         changed.carry_node_state(&mut next);
         assert_eq!(changed.telemetry()["record"]["_record_channels"], 2.);
+    }
+}
+
+#[cfg(test)]
+mod trigger_tests {
+    use super::*;
+    #[test]
+    fn toggle_latches_manual_state_until_input_changes_and_validates_literals() {
+        let p = pr0_core::demo_project("p".into(), "Toggle".into(), pr0_core::Mode::Freeform);
+        let mut source = p.graph.nodes[0].clone();
+        source.id = "source".into();
+        source.kind = "value".into();
+        source.parameters = [("value".into(), 0.)].into();
+        let mut toggle = source.clone();
+        toggle.id = "toggle".into();
+        toggle.kind = "toggle".into();
+        toggle.parameters.clear();
+        toggle.control_value = Some(pr0_core::ControlValue::Number(1.));
+        let mut graph = pr0_core::Graph {
+            nodes: vec![source, toggle],
+            edges: vec![],
+        };
+        let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
+        let frame = &mut [[0.; 8]; 1];
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["toggle"]["_out"], 1.);
+        e.control("toggle", &pr0_core::ControlValue::Number(0.));
+        e.render(&[], frame);
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["toggle"]["_out"], 0.);
+        graph.edges.push(pr0_core::Edge {
+            id: "in".into(),
+            source: "source".into(),
+            source_port: "out".into(),
+            target: "toggle".into(),
+            target_port: "in".into(),
+        });
+        let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["toggle"]["_out"], 0.);
+        e.control("toggle", &pr0_core::ControlValue::Number(1.));
+        e.render(&[], &mut [[0.; 8]; 100]);
+        assert_eq!(e.telemetry()["toggle"]["_out"], 1.);
+        e.parameter("source", "value", -2.).unwrap();
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["toggle"]["_out"], 1.);
+        e.control("toggle", &pr0_core::ControlValue::Number(0.));
+        e.render(&[], &mut [[0.; 8]; 100]);
+        assert_eq!(e.telemetry()["toggle"]["_out"], 0.);
+        e.parameter("source", "value", -3.).unwrap();
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["toggle"]["_out"], 1.);
+        e.parameter("source", "value", 0.).unwrap();
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["toggle"]["_out"], 0.);
+        for value in [
+            pr0_core::ControlValue::Number(0.5),
+            pr0_core::ControlValue::Text("on".into()),
+        ] {
+            graph.nodes[1].control_value = Some(value);
+            assert!(graph.validate().unwrap_err().contains("Toggle value"));
+        }
+    }
+    #[test]
+    fn trigger_passes_signed_values_and_manual_pulse_overrides_for_one_sample() {
+        let p = pr0_core::demo_project("p".into(), "Triggers".into(), pr0_core::Mode::Freeform);
+        let mut source = p.graph.nodes[0].clone();
+        source.id = "source".into();
+        source.kind = "value".into();
+        source.parameters = [("value".into(), -2.)].into();
+        let mut trigger = source.clone();
+        trigger.id = "trigger".into();
+        trigger.kind = "trigger".into();
+        trigger.parameters.clear();
+        let graph = pr0_core::Graph {
+            nodes: vec![source, trigger],
+            edges: vec![pr0_core::Edge {
+                id: "input".into(),
+                source: "source".into(),
+                source_port: "out".into(),
+                target: "trigger".into(),
+                target_port: "in".into(),
+            }],
+        };
+        let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
+        let frame = &mut [[0.; 8]; 1];
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["trigger"]["_out"], -2.);
+        assert_eq!(e.telemetry()["trigger"]["_trigger_sequence"], 1.);
+        assert!(e.bang("trigger"));
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["trigger"]["_out"], 1.);
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["trigger"]["_out"], -2.);
+        for value in [0., 1., 1., 0., 3.5, 0.] {
+            e.parameter("source", "value", value).unwrap();
+            e.render(&[], frame);
+            assert_eq!(e.telemetry()["trigger"]["_out"], value);
+        }
+        let sequence = e.telemetry()["trigger"]["_trigger_sequence"];
+        assert!(sequence >= 4.);
+        // A one-sample input survives as presentation telemetry after output returns to zero.
+        e.parameter("source", "value", -1.).unwrap();
+        e.render(&[], frame);
+        e.parameter("source", "value", 0.).unwrap();
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["trigger"]["_trigger_sequence"], sequence + 1.);
+        let mut unplugged = graph;
+        unplugged.edges.clear();
+        let mut e = Engine::prepare(unplugged, 48000.).unwrap();
+        assert!(e.bang("trigger"));
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["trigger"]["_out"], 1.);
+        e.render(&[], frame);
+        assert_eq!(e.telemetry()["trigger"]["_out"], 0.);
+        assert!(!e.bang("source"));
     }
 }

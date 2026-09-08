@@ -8,6 +8,8 @@ import type { Descriptor, GraphNode, Telemetry } from '../types'
 import { formatValue } from '../api'
 import GraphControl from './GraphControl.vue'
 import PianoKeys from './PianoKeys.vue'
+import TriggerButton from './TriggerButton.vue'
+import ToggleButton from './ToggleButton.vue'
 import DataVisualizer from './DataVisualizer.vue'
 const props = defineProps<NodeProps<{ projectId:string;piano:(project:string,node:string,pitch:number,velocity:number)=>void;active:boolean;editable:boolean;driven:boolean;setControl:(id:string,value:number|string)=>void;bang:(id:string)=>void;node: GraphNode; descriptor: Descriptor; values?: Record<string, number>; edit: (id:string)=>void; open: (id: string) => void; connectPort: (id: string, port: string, direction: string) => void; toggleSelection:(id:string)=>void; contextMenu: (id: string, event: MouseEvent) => void }>>()
 const telemetry = inject<ShallowRef<Telemetry | null>>('telemetry')
@@ -27,7 +29,13 @@ function controlSelect(event: MouseEvent) {
 </script>
 
 <template>
-  <div class="patch-node" :class="[signal, { selected, 'math-node': isMath, 'visualizer-node':visualizer }]" :style="{ minHeight: `${height}px`, width: data.node.kind==='piano' ? '280px' : undefined }" tabindex="0" @mousedown="controlSelect" @click="event => { if(event.ctrlKey) event.stopPropagation() }" @contextmenu.prevent.stop="!$event.ctrlKey && data.contextMenu(id, $event)" @keydown.enter.stop="data.open(id)" @dblclick.stop="data.open(id)">
+  <div v-if="['trigger','toggle'].includes(data.node.kind)" class="patch-node control trigger-node" :class="{selected}" tabindex="0" :aria-label="`${data.node.label} node`" @mousedown="controlSelect" @contextmenu.prevent.stop="!$event.ctrlKey && data.contextMenu(id,$event)" @keydown.enter.stop.prevent="data.open(id)" @dblclick.stop="data.open(id)">
+    <Handle id="in" type="target" :position="Position.Left" class="control" aria-label="Trigger input" @click.stop="data.connectPort(id,'in','target')" />
+    <ToggleButton v-if="data.node.kind==='toggle'" :label="data.node.label" :checked="data.active&&!(telemetryStale??true)?values?._out===1:data.node.control_value===1" :disabled="!data.editable||(data.active&&(telemetryStale??true))" @value="value=>data.setControl(id,value)" />
+    <TriggerButton v-else :label="data.node.label" :values="values" :disabled="!data.active||!data.editable||(telemetryStale??true)" @trigger="data.bang(id)" />
+    <Handle id="out" type="source" :position="Position.Right" class="control" aria-label="Trigger output" @click.stop="data.connectPort(id,'out','source')" />
+  </div>
+  <div v-else class="patch-node" :class="[signal, { selected, 'math-node': isMath, 'visualizer-node':visualizer }]" :style="{ minHeight: `${height}px`, width: data.node.kind==='piano' ? '280px' : undefined }" tabindex="0" @mousedown="controlSelect" @click="event => { if(event.ctrlKey) event.stopPropagation() }" @contextmenu.prevent.stop="!$event.ctrlKey && data.contextMenu(id, $event)" @keydown.enter.stop.prevent="data.open(id)" @dblclick.stop="data.open(id)">
     <div class="node-cap"><span>{{ data.descriptor.category }}</span><button class="node-settings nodrag nopan" :aria-label="`Edit ${data.node.label}`" @click.stop="data.edit(id)"><Settings2 :size="14" /></button></div>
     <div v-if="isMath" class="math-symbol">{{ data.descriptor.symbol }}</div>
     <div v-else class="node-title"><span class="node-glyph">{{ data.descriptor.symbol }}</span>{{ data.node.label }}</div>
@@ -46,3 +54,7 @@ function controlSelect(event: MouseEvent) {
   </div>
 </template>
 
+
+<style scoped>
+.patch-node.trigger-node{width:80px;min-width:80px;min-height:64px;height:64px;padding:8px;display:flex;align-items:center;justify-content:center}
+</style>
