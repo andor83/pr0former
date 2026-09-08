@@ -134,8 +134,10 @@ pub async fn offer(
     let membership = role(&app, &id, &u)?;
     app.logs
         .push(&id, "info", "Browser audio negotiation requested");
-    if app.active.lock().unwrap().as_deref() != Some(&id) {
-        return Err(bad("Activate the show before connecting audio"));
+    if app.graph.lock().unwrap().as_deref() != Some(&id) {
+        return Err(bad(
+            "Enable the audio engine for the show before connecting audio",
+        ));
     }
     if let Some(node) = &request.monitor_node {
         let project = crate::load(&app, &id)?;
@@ -256,7 +258,7 @@ pub async fn offer(
     {
         let mut peers = app.media.peers.lock().await;
         if lease.cancelled.load(Ordering::Acquire)
-            || app.active.lock().unwrap().as_deref() != Some(&id)
+            || app.graph.lock().unwrap().as_deref() != Some(&id)
         {
             return Err(bad(
                 "Audio connection was cancelled or the show was deactivated",

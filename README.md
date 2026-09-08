@@ -28,13 +28,13 @@ Pulls the current branch from its configured Git upstream with `--ff-only`, runs
 
 Startup prints the compiled Git commit and build time. `--start` checks the tracked remote branch without pulling, with an eight-second timeout; red warnings identify stale/dirty builds or an unavailable remote check. Startup continues when offline. `target/release/pr0-server --version` and `/api/status` also expose the compiled identity.
 
-Starts the built release server in the foreground; press Ctrl-C to stop. If `.local/start-pr0former.sh` exists, its saved bind address and TLS settings are used. Otherwise, the server uses the current `PR0_` environment settings and listens on `0.0.0.0:4000` (all IPv4 interfaces) by default. Open http://127.0.0.1:4000 locally or use the server's LAN address from another device. This command skips setup and does not require an interactive terminal.
+Starts the built release server in the foreground; press Ctrl-C to stop. If `.local/start-pr0former.sh` exists, its saved bind address and TLS settings are used. Otherwise, the server uses the current `PR0_` environment settings and listens on `0.0.0.0:80` over HTTP or `0.0.0.0:443` with a certificate by default. Open http://127.0.0.1 locally or use the server's LAN address from another device. This command skips setup and does not require an interactive terminal.
 
 ```sh
 ./init.sh --start --host 127.0.0.1 --port 4500
 ```
 
-Use either flag or both. Each overrides only that component of the saved/environment address for this launch, preserving TLS and data settings. Hosts may be IPv4, IPv6 (for example `--host ::1`), or resolvable hostnames; ports must be 1–65535. These flags require the current release build (`cargo build --release --locked`). Existing saved scripts retain their configured address unless edited or regenerated.
+Use either flag or both. Each overrides only that component of the saved/environment address for this launch, preserving TLS and data settings. Hosts may be IPv4, IPv6 (for example `--host ::1`), or resolvable hostnames; ports must be 1–65535. These flags require the current release build (`cargo build --release --locked`). Managed SSL selects port 443 (or 80 when removed/overridden), including with older saved scripts; an explicit `--port` takes precedence.
 
 ```sh
 ./init.sh --stop
@@ -54,7 +54,7 @@ For moving to another server or continuing development in a new session, see [th
 
 ## Manual development
 
-Install stable Rust, Node.js 22.12+, a C/C++ toolchain, CMake, and pkg-config. A system Opus library is preferred; Cargo can build its bundled copy. Linux additionally requires ALSA development headers.
+Install stable Rust, Node.js 22.12+, a C/C++ toolchain, CMake, pkg-config, and FFmpeg (including the `fd` input protocol). A system Opus library is preferred; Cargo can build its bundled copy. Linux additionally requires ALSA development headers.
 
 ```sh
 cd web
@@ -72,7 +72,7 @@ Use **Project settings** during preparation to rename a project, choose structur
 
 Use **Performance mode** in the project header for the stage view: select a part, follow its read-only score, watch the shared clock and queued launch/stop status, and open monitor controls as needed. The monitor connection stays alive when switching views. Fullscreen is available inside the stage view; Exit performance mode returns to the workspace. A timing-loss warning holds the displayed score until engine updates resume.
 
-Create a project, activate it, and press Play. In conducted/freeform projects, open Score & parts and launch a part; structured projects start their parts together. The starter score drives a polyphonic synth through gain and output nodes. Audio starts muted. Open Monitor to connect a browser feed (master or a dedicated Monitor output), or Audio setup to enable the server's default output. Native microphone capture is enabled separately in Audio setup. Add a Browser input node, assign it to a part/performer, and select it in Monitor to route a browser microphone into the patch.
+Create a project and enable its audio engine to develop the graph and score. Graph clocks, audio, MIDI, piano keys and browser monitors run while the show timeline stays stopped. Activate the show and press Play for performance; Pause/Stop affects score playback while the graph keeps running. Disable the audio engine to silence and unload the graph. In conducted/freeform projects, open Score & parts and launch a part; structured projects start their parts together. The starter score drives a polyphonic synth through gain and output nodes. Graph audio is audible when the engine is enabled. Open Monitor to connect a browser feed (master or a dedicated Monitor output), or Audio setup to enable the server's default output. Selected native inputs start with the audio engine. Add a Browser input node, assign it to a part/performer, and select it in Monitor to route a browser microphone into the patch.
 
 ## LAN and HTTPS
 
@@ -85,16 +85,36 @@ PR0_TLS_KEY=/absolute/path/server-key.pem \
 cargo run -p pr0-server
 ```
 
-Use your own certificate authority or an existing trusted certificate. Install the CA certificate on the iPad and explicitly enable its trust. WebRTC also requires direct LAN UDP reachability; guest Wi-Fi/client isolation can prevent media connections. No external STUN/TURN service is configured.
+Initial setup offers local certificate creation. To configure an existing installation:
+
+```sh
+./init.sh --setup-ssl
+./init.sh --start
+# Temporary HTTP override, retaining the certificate:
+./init.sh --start --no-ssl
+./init.sh --uas --no-ssl
+# Remove generated certificates and switch future launches to HTTP:
+./init.sh --remove-ssl
+```
+
+Setup asks for the hostnames and IP addresses clients will use, with localhost and detected LAN addresses as defaults. It generates a self-signed local CA and a server certificate in `.local/ssl/`, with private keys readable only by the current user. Restart the server after setup/removal. With a certificate, HTTP port 80 redirects to HTTPS port 443, preserving paths and query strings. `--port` overrides the application port; `PR0_HTTP_PORT` overrides the redirect port. Without SSL the default is HTTP port 80. Existing manually supplied certificates remain supported through the environment variables above. Removal deletes only managed certificates and disables external TLS settings through `.local/ssl/disabled`; `--setup-ssl` clears that setting. It does not delete externally supplied certificate files or uninstall certificates from client devices.
+
+Copy only `.local/ssl/ca.pem` to each client and install/trust it. On iPad, install the certificate profile, then enable full trust under **Settings → General → About → Certificate Trust Settings**, as described in [Apple’s certificate trust instructions](https://support.apple.com/en-us/102390). Merely bypassing a certificate warning is insufficient for reliable browser audio. The server certificate lasts 397 days; rerun setup when it expires or when the server’s address changes, and trust the replacement CA on clients.
+
+On Linux systems restricting ports below 1024, grant the built binary bind permission (`sudo setcap cap_net_bind_service=+ep target/release/pr0-server`, reapply after rebuilding), or use unprivileged ports such as `PR0_HTTP_PORT=8080 ./init.sh --start --port 8443`. Setup does not change OS port privileges or client trust stores.
+
+Use your own certificate authority or an existing trusted certificate if preferred. WebRTC also requires direct LAN UDP reachability; guest Wi-Fi/client isolation can prevent media connections. No external STUN/TURN service is configured.
 
 Configuration:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PR0_BIND` | `0.0.0.0:4000` | HTTP/HTTPS listen address (all IPv4 interfaces) |
+| `PR0_BIND` | `0.0.0.0:80` / `0.0.0.0:443` | HTTP/HTTPS listen address (all IPv4 interfaces) |
 | `PR0_HOST`, `PR0_PORT` | unset | Override individual components of `PR0_BIND`; set by `--host` and `--port` |
 | `PR0_DATA` | `data` | SQLite storage directory |
-| `PR0_TLS_CERT`, `PR0_TLS_KEY` | unset | Enable HTTPS and Secure session cookies |
+| `PR0_TLS_CERT`, `PR0_TLS_KEY` | unset | External HTTPS certificate/key; managed certificates take precedence |
+| `PR0_NO_SSL` | unset | `1` forces HTTP, including with saved TLS settings |
+| `PR0_HTTP_PORT` | `80` | HTTP redirect listener port when HTTPS is enabled |
 | `RUST_LOG` | unset | Rust tracing filter, e.g. `warn` |
 
 The server serves `web/dist` relative to the repository root. The generated startup script sets the working directory correctly.
@@ -110,6 +130,8 @@ npm run build
 npx playwright install chromium
 npm run test:e2e
 ```
+
+For isolated launcher and certificate checks, first run `cargo build -p pr0-server`, then `python3 -m unittest discover -s tests`. The TLS check requires OpenSSL and installed Chromium; it generates temporary certificates and verifies HTTPS, redirects, cookies and HTTP overrides without changing OS trust or startup services.
 
 Browser tests start an isolated server on port 3101 with a temporary database. They do not enable hardware audio, capture a real microphone, or install a startup service. The integration test exercises a real local WebRTC connection.
 
@@ -141,3 +163,12 @@ Shortcuts leave text fields and dialogs alone. Transport still requires owner/co
 For FM, connect **Oscillator → Audio to control → another Oscillator's Frequency**. Set the modulator amplitude to 1, conversion Scale to 100 and Offset to 440 for ±100 Hz deviation around 440 Hz. The converter reads the first channel on every sample; connected frequency is not smoothed. Frequency clamps to 0–20000 Hz.
 
 For spectral editing, use **FFT → Spectral math / Spectral curve → Inverse FFT → Output**, with matching FFT size, overlap, and channels. Spectral math multiplies/adds magnitudes and phases. Spectral curve lets you draw magnitude multipliers and phase offsets from DC to Nyquist; release a stroke to apply it live. Negative-frequency bins mirror positive bins for real audio, and DC/Nyquist retain phase.
+
+
+### Sample library
+
+Open **Samples** in the left accordion to see only audio already in the project. **Import audio** accepts formats supported by the installed FFmpeg build and converts the first audio stream to 32-bit float WAV at the current engine sample rate, preserving its channel count. Existing limits remain 64 MB per upload, 30 seconds and 1–8 channels. FFmpeg conversion runs outside audio rendering; uploaded playlists cannot open network URLs or other local files.
+
+**Browse all** searches samples you own plus samples marked **Global**. Add a result to the project before using it; the sidebar’s plus button creates a polyphonic sampler. Existing sampler modals also offer a project-sample selector. Preview buttons play up to three seconds in the browser. Click a sample name for editable name, category, tags, description, BPM and key, plus a full multichannel waveform, full playback and scrubbing.
+
+Uploads begin private. Project members can access project samples even when another author uploaded them. Sample owners and editors of the originating project can edit metadata; only the sample owner controls Global sharing. Turning Global off removes future library visibility, while existing project copies remain usable. Audio assets remain immutable; metadata edits use their own revision checks.

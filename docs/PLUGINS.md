@@ -37,7 +37,7 @@ Current limitations include a closed built-in processing registry, numeric-only 
 
 The `adsr` node emits a normalized control signal (0–1). Connect its output to a synth amplitude or another normalized parameter. The modal exposes Gate, Attack, Decay, Sustain, and Release; Gate can be driven by another control node. A positive gate starts attack, and a falling gate starts release from the current level. A rising signal on the Retrigger inlet restarts attack from the current level while the gate remains positive.
 
-Attack/decay/release are linear, in milliseconds, and latch their duration at stage entry. Zero-duration stages complete immediately. Sustain is normalized and live changes use 5 ms smoothing. Processing continues on engine samples independently of musical tempo; transport output muting is separate. Unchanged-graph state migration retains the envelope. The allocation-free implementation in `crates/dsp/src/envelope.rs` is a small example of a reusable processor integrated through catalog metadata and a DSP dispatch branch.
+Attack/decay/release are linear, in milliseconds, and latch their duration at stage entry. Zero-duration stages complete immediately. Sustain is normalized and live changes use 5 ms smoothing. Processing continues on engine samples independently of musical tempo; show pause and stop leave graph processing and output running. Unchanged-graph state migration retains the envelope. The allocation-free implementation in `crates/dsp/src/envelope.rs` is a small example of a reusable processor integrated through catalog metadata and a DSP dispatch branch.
 
 ## Step sequencer
 
@@ -65,7 +65,7 @@ Route a custom mix into `monitor_output`, then choose that node under Monitor fe
 
 `clock_ratio` derives pulses from the project quarter-note clock. Multiply/Divide parameters (each 1–16, including fractional ratios) set cycles per quarter note; for sixteenth notes use 4/1, for one pulse every two quarters use 1/2. Outputs are Tick, fractional Phase, and completed Count. Connect Tick to a step sequencer or trigger input.
 
-The first running sample emits a tick. Pause holds phase; tempo and ratio edits preserve accumulated phase. Stop or rewind resets phase and count. The clock carries a reset generation so Stop/Play at beat zero also resets the node. Like the existing global clock, pulses are one-sample numeric controls, not typed message queues; a discontinuous position jump coalesces crossed cycles into one pulse while Count records the crossings.
+The first running sample emits a tick. The node follows the engine’s graph clock: show pause, stop and rewind leave its phase and count running. Tempo and ratio edits preserve accumulated phase. Loading a fresh engine resets phase and count. Like the existing global clock, pulses are one-sample numeric controls, not typed message queues; a discontinuous position jump coalesces crossed cycles into one pulse while Count records the crossings.
 
 
 ## Note-control nodes

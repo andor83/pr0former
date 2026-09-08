@@ -251,6 +251,21 @@ impl RuntimeNode {
             "atodb" => scalar = 20. * a.abs().max(1e-9).log10(),
             "clamp" => scalar = a.max(self.p("min")).min(self.p("max")),
             "scale" => scalar = self.p("min") + a * (self.p("max") - self.p("min")),
+            "piano" => {
+                let values = std::array::from_fn(|i| self.input[i][0]);
+                let connected = std::array::from_fn(|i| {
+                    self.bindings
+                        .iter()
+                        .any(|b| !b.parameter && b.destination == i)
+                });
+                let notes = self.note_inputs.tick(values, connected);
+                let midi = self.midi_controls.as_mut().unwrap();
+                for note in notes.into_iter().flatten() {
+                    midi.note(note.pitch, note.velocity);
+                }
+                self.control[..5].copy_from_slice(&midi.tick());
+                scalar = self.control[0];
+            }
             "part_midi" | "midi_input" | "osc_to_midi" => {
                 self.control[..5].copy_from_slice(&self.midi_controls.as_mut().unwrap().tick());
                 self.control[5] = self.control[0];
@@ -761,6 +776,7 @@ pub struct Engine {
     nodes: Vec<RuntimeNode>,
     order: Vec<usize>,
     pub clock: Clock,
+    pub graph_clock: Clock,
     pub graph: Graph,
 }
 impl Engine {
@@ -813,7 +829,7 @@ impl Engine {
                 sampler: (n.kind == "poly_sampler").then(|| Box::new(sampler::Sampler::default())),
                 midi_controls: (matches!(
                     n.kind.as_str(),
-                    "part_midi" | "midi_input" | "osc_to_midi"
+                    "part_midi" | "midi_input" | "osc_to_midi" | "piano"
                 ))
                 .then(|| Box::new(midi_controls::MidiControls::new())),
                 control_text: None,
@@ -939,6 +955,10 @@ impl Engine {
             nodes,
             order,
             clock: Clock::new(sample_rate),
+            graph_clock: Clock {
+                running: true,
+                ..Clock::new(sample_rate)
+            },
             graph,
         })
     }
@@ -949,6 +969,7 @@ impl Engine {
         if self.clock.sample_rate != previous.clock.sample_rate {
             return;
         }
+        self.graph_clock = previous.graph_clock;
         for index in 0..self.nodes.len() {
             let target = &self.nodes[index];
             let Some(source_index) = previous.nodes.iter().position(|n| n.id == target.id) else {
@@ -959,7 +980,7 @@ impl Engine {
                 && target.part_id == source.part_id
                 && target.io == source.io
                 && target.channels == source.channels
-                && target.defaults == source.defaults
+                && (target.defaults == source.defaults || target.kind == "piano")
                 && target.fallback == source.fallback
                 && target.latency == source.latency
                 && target.bindings.len() == source.bindings.len()
@@ -995,6 +1016,12 @@ impl Engine {
             let source = &mut previous.nodes[source_index];
             std::mem::swap(target, source);
             std::mem::swap(&mut target.bindings, &mut source.bindings);
+            if target.kind == "piano" {
+                // Octave is display configuration; changing it must not release held notes.
+                std::mem::swap(&mut target.defaults, &mut source.defaults);
+                std::mem::swap(&mut target.values, &mut source.values);
+            }
+
             // Sequencer migration already selected voices by surviving part.
             // Do not resurrect voices from deleted or musically changed parts.
             if target.kind == "synth" {
@@ -1062,6 +1089,13 @@ impl Engine {
             .filter(|n| n.kind == "part_midi")
             .filter_map(|n| n.part_id.as_ref().map(|p| (n.id.clone(), p.clone())))
             .collect()
+    }
+    pub fn piano_note(&mut self, id: &str, pitch: u8, velocity: u8) {
+        if (self.graph_clock.running || velocity == 0)
+            && self.nodes.iter().any(|n| n.id == id && n.kind == "piano")
+        {
+            self.node_midi_note(id, pitch, velocity);
+        }
     }
     pub fn node_midi_note(&mut self, id: &str, pitch: u8, velocity: u8) {
         if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
@@ -1354,7 +1388,8 @@ impl Engine {
                         self.clock.set_tempo(bpm);
                     }
                 }
-                self.nodes[idx].process(&self.clock, &hardware);
+                self.graph_clock.set_tempo(self.clock.bpm);
+                self.nodes[idx].process(&self.graph_clock, &hardware);
                 if self.nodes[idx].kind == "output" {
                     for (ch, sample) in out.iter_mut().enumerate() {
                         *sample += self.nodes[idx].output[ch] as f32;
@@ -1365,6 +1400,7 @@ impl Engine {
                 *x = x.clamp(-1., 1.);
             }
             self.clock.advance();
+            self.graph_clock.advance();
         }
     }
     /// Called by the non-realtime orchestration worker between blocks.
@@ -1424,7 +1460,24 @@ impl Engine {
                     .zip(n.values.iter().copied())
                     .collect();
                 values.insert("_out".into(), n.control[0]);
-                if matches!(n.kind.as_str(), "part_midi" | "midi_input" | "osc_to_midi") {
+                if n.kind == "piano" {
+                    let start = ((n.p("octave") + 1.) * 12.) as usize;
+                    for pitch in start..(start + 12).min(128) {
+                        values.insert(
+                            format!("_key{pitch}"),
+                            if n.midi_controls.as_ref().unwrap().held(pitch) {
+                                1.
+                            } else {
+                                0.
+                            },
+                        );
+                    }
+                }
+
+                if matches!(
+                    n.kind.as_str(),
+                    "part_midi" | "midi_input" | "osc_to_midi" | "piano"
+                ) {
                     values.insert(
                         "_dropped".into(),
                         n.midi_controls.as_ref().unwrap().dropped as f64,
@@ -1517,6 +1570,64 @@ impl Fourier {
 mod tests {
     use super::*;
     use pr0_core::{Mode, demo_project};
+    #[test]
+    fn piano_passes_chords_and_releases_and_preserves_held_notes_on_octave_change() {
+        let mut graph = Graph {
+            nodes: vec![
+                visual_node("keys", "piano", 1),
+                visual_node("receive", "piano", 1),
+                visual_node("out", "midi_output", 1),
+            ],
+            edges: vec![],
+        };
+        for (source, target) in [("keys", "receive"), ("receive", "out")] {
+            for port in ["pitch", "velocity", "gate", "trigger", "note_off"] {
+                graph.edges.push(pr0_core::Edge {
+                    id: format!("{source}-{port}"),
+                    source: source.into(),
+                    source_port: port.into(),
+                    target: target.into(),
+                    target_port: port.into(),
+                });
+            }
+        }
+        let mut engine = Engine::prepare(graph.clone(), 48000.).unwrap();
+        engine.clock.running = true;
+        for (pitch, velocity) in [(60, 100), (64, 80), (40, 70), (60, 0), (64, 0), (40, 0)] {
+            engine.piano_note("keys", pitch, velocity);
+        }
+        let mut events = vec![];
+        for _ in 0..16 {
+            engine.render(&[], &mut [[0.; 8]]);
+            for note in engine.take_midi_output("out").into_iter().flatten() {
+                events.push((note.pitch, note.velocity));
+            }
+        }
+        assert_eq!(
+            events,
+            vec![(60, 100), (64, 80), (40, 70), (60, 0), (64, 0), (40, 0)]
+        );
+        assert_eq!(engine.telemetry()["receive"]["gate"], 0.);
+        engine.piano_note("keys", 60, 100);
+        engine.render(&[], &mut [[0.; 8]; 2]);
+        assert_eq!(engine.telemetry()["receive"]["_key60"], 1.);
+        graph.nodes[1].parameters.insert("octave".into(), 3.);
+        let mut next = Engine::prepare(graph, 48000.).unwrap();
+        next.clock = engine.clock;
+        next.carry_node_state(&mut engine);
+        next.render(&[], &mut [[0.; 8]; 2]);
+        assert!(!next.telemetry()["receive"].contains_key("_key60"));
+        assert_eq!(next.telemetry()["receive"]["gate"], 1.);
+        next.piano_note("keys", 60, 0);
+        next.render(&[], &mut [[0.; 8]; 4]);
+        assert_eq!(next.telemetry()["receive"]["gate"], 0.);
+        next.piano_note("keys", 65, 100);
+        next.render(&[], &mut [[0.; 8]; 4]);
+        next.reset_midi_sources();
+        next.clock.running = false;
+        next.render(&[], &mut [[0.; 8]; 16]);
+        assert_eq!(next.telemetry()["receive"]["gate"], 0.);
+    }
     #[test]
     fn part_events_fan_out_to_sampler_and_matching_midi_osc_ports() {
         let mut source = visual_node("notes", "part_midi", 2);
@@ -1899,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn clock_ratio_graph_preserves_tempo_phase_and_restarts_at_zero() {
+    fn clock_ratio_graph_preserves_phase_across_show_stop_and_tempo_changes() {
         let p = demo_project("x".into(), "x".into(), Mode::Freeform);
         let mut node = p.graph.nodes[0].clone();
         node.id = "ratio".into();
@@ -1919,12 +2030,12 @@ mod tests {
         e.clock.stop();
         e.clock.running = true;
         e.render(&[], &mut [[0.; 8]; 1]);
-        assert_eq!(e.nodes[0].control[0], 1.);
-        e.clock.beat = 0.125;
+        assert_eq!(e.nodes[0].control[0], 0.);
+        e.graph_clock.beat = 0.125;
         e.render(&[], &mut [[0.; 8]; 1]);
         assert_eq!(e.nodes[0].control[..3], [0., 0.5, 0.]);
         e.clock.set_tempo(60.);
-        e.clock.beat = 0.25;
+        e.graph_clock.beat = 0.25;
         e.render(&[], &mut [[0.; 8]; 1]);
         assert_eq!(e.nodes[0].control[..3], [1., 0., 1.]);
     }

@@ -24,7 +24,7 @@ class LauncherTests(unittest.TestCase):
             env = {k: v for k, v in os.environ.items() if not k.startswith("PR0_")}
             env["PR0_DATA"] = str(root / "data")
             for saved in (False, True):
-                port = 4000
+                port = 80
                 args = []
                 if saved:
                     with socket.socket() as sock:
@@ -134,6 +134,7 @@ class LauncherTests(unittest.TestCase):
   cat > target/release/pr0-server <<'SERVER'
 #!/bin/bash
 printf 'start|%s|%s|%s\n' "${PR0_HOST-}" "${PR0_PORT-}" "${PR0_BIND-}" >> trace
+if [ "${PR0_NO_SSL-}" = 1 ]; then printf "no-ssl\n" >> trace; fi
 exit "${PR0_TEST_SERVER_STATUS:-0}"
 SERVER
   chmod 700 target/release/pr0-server
@@ -165,6 +166,9 @@ fi
             (root / "trace").unlink()
             self.assertEqual(run("--uas", "--port", "4002").returncode, 0)
             self.assertEqual((root / "trace").read_text(), "build\nstart||4002|127.0.0.1:4321\n")
+            (root / "trace").unlink()
+            self.assertEqual(run("--uas", "--no-ssl").returncode, 0)
+            self.assertIn("no-ssl\n", (root / "trace").read_text())
             (root / "trace").unlink()
             env["PR0_TEST_BUILD_STATUS"] = "23"
             self.assertEqual(run("--uas").returncode, 23)

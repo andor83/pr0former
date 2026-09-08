@@ -44,6 +44,9 @@ impl MidiControls {
         self.queue.clear();
         self.releasing = true;
     }
+    pub fn held(&self, pitch: usize) -> bool {
+        self.held[pitch] > 0
+    }
     pub fn tick(&mut self) -> [f64; 5] {
         self.values[3] = 0.;
         self.values[4] = 0.;

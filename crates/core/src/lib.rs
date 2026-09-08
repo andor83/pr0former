@@ -523,6 +523,26 @@ pub fn catalog() -> Vec<Descriptor> {
         vec![],
         &["score", "notes", "part input"],
     );
+    add(
+        "piano",
+        "Piano",
+        "♬",
+        "Control",
+        "Playable one-octave MIDI keyboard. Receives and forwards pitch, velocity, gate, trigger and note_off, including notes outside the displayed octave. Held received notes light matching keys. Enable the audio engine to test outputs without playing the show; keys send velocity 100. Choose the displayed octave in the modal.",
+        ["pitch", "velocity", "gate", "trigger", "note_off"]
+            .into_iter()
+            .map(|id| port(id, Control))
+            .collect(),
+        ["pitch", "velocity", "gate", "trigger", "note_off"]
+            .into_iter()
+            .map(|id| port(id, Control))
+            .collect(),
+        vec![Parameter {
+            structural: true,
+            ..param("octave", "Octave", "", -1., 9., 4.)
+        }],
+        &["keyboard", "midi test"],
+    );
     for input in [true, false] {
         let structural = |mut p: Parameter| {
             p.structural = true;
@@ -1463,6 +1483,9 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
+            if n.kind == "piano" && n.parameters.get("octave").is_some_and(|v| v.fract() != 0.) {
+                return Err("Piano octave must be a whole number".into());
+            }
             if let Some(part) = &n.part_id {
                 if n.kind != "part_midi" || part.is_empty() || part.len() > 256 {
                     return Err("A source part belongs only to a Part MIDI node and must be a valid part ID".into());
@@ -1987,7 +2010,7 @@ mod tests {
         p.graph.nodes[0].part_id = Some(p.parts[0].id.clone());
         assert!(p.validate().is_err());
         let catalog = catalog();
-        for kind in ["part_midi", "midi_input", "osc_to_midi"] {
+        for kind in ["part_midi", "midi_input", "osc_to_midi", "piano"] {
             let d = catalog.iter().find(|d| d.kind == kind).unwrap();
             for name in ["pitch", "velocity", "gate", "trigger", "note_off"] {
                 assert!(
@@ -1997,7 +2020,7 @@ mod tests {
                 );
             }
         }
-        for kind in ["poly_sampler", "midi_output", "midi_to_osc"] {
+        for kind in ["poly_sampler", "midi_output", "midi_to_osc", "piano"] {
             let d = catalog.iter().find(|d| d.kind == kind).unwrap();
             for name in ["pitch", "velocity", "gate", "trigger", "note_off"] {
                 assert!(

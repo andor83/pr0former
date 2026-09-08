@@ -294,6 +294,8 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await page.getByRole('button', { name: 'Connect monitor', exact: true }).click()
   await expect(page.locator('.browser-monitor .mode-pill')).toHaveText('CONNECTED')
   await remoteTransport('deactivate')
+  // Monitor cleanup now follows disabling the development graph, not show pause/deactivation.
+  expect((await page.request.post(`/api/projects/${projectId}/engine`, { headers: { 'X-Pr0former': '1' }, data: { enabled:false } })).ok()).toBeTruthy()
   await expect(page.getByText('Waiting for show activation', { exact: true })).toBeVisible()
   await expect(page.locator('.browser-monitor .mode-pill')).toHaveText('DISCONNECTED')
   await expect(page.getByRole('button', { name: 'Connect monitor', exact: true })).toBeDisabled()
@@ -301,6 +303,8 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await expect(page.getByRole('button', { name: 'Deactivate show', exact: true })).toBeVisible()
   await page.context().setOffline(true)
   await remoteTransport('deactivate')
+  // Monitor cleanup now follows disabling the development graph, not show pause/deactivation.
+  expect((await page.request.post(`/api/projects/${projectId}/engine`, { headers: { 'X-Pr0former': '1' }, data: { enabled:false } })).ok()).toBeTruthy()
   await page.context().setOffline(false)
   await expect(page.getByText('Waiting for show activation', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Activate show', exact: true })).toBeVisible()
@@ -313,6 +317,8 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await expect(settings.getByText('Deactivate the show to change project settings.', { exact: true })).toBeVisible()
   await expect(settings.getByRole('button', { name: 'Save project settings', exact: true })).toBeDisabled()
   await remoteTransport('deactivate')
+  // Monitor cleanup now follows disabling the development graph, not show pause/deactivation.
+  expect((await page.request.post(`/api/projects/${projectId}/engine`, { headers: { 'X-Pr0former': '1' }, data: { enabled:false } })).ok()).toBeTruthy()
   await expect(settings.getByLabel('Project name', { exact: true })).toBeEnabled()
   await settings.getByLabel('Project name', { exact: true }).fill('Freeform rehearsal')
   await settings.getByLabel('Performance mode', { exact: true }).selectOption('freeform')
@@ -348,6 +354,8 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await page.getByRole('button', { name: 'Connect monitor', exact: true }).click()
   await expect.poll(() => page.evaluate(() => typeof (window as any).__resolveCapture)).toBe('function')
   await remoteTransport('deactivate')
+  // Monitor cleanup now follows disabling the development graph, not show pause/deactivation.
+  expect((await page.request.post(`/api/projects/${projectId}/engine`, { headers: { 'X-Pr0former': '1' }, data: { enabled:false } })).ok()).toBeTruthy()
   await expect(page.locator('.browser-monitor .mode-pill')).toHaveText('DISCONNECTED')
   await remoteTransport('activate')
   await page.getByLabel('Send microphone to the graph', { exact: true }).uncheck()
@@ -380,6 +388,8 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await page.getByRole('button', { name: 'Connect monitor', exact: true }).click()
   await expect(page.locator('.browser-monitor .mode-pill')).toHaveText('CONNECTED')
   await remoteTransport('deactivate')
+  // Monitor cleanup now follows disabling the development graph, not show pause/deactivation.
+  expect((await page.request.post(`/api/projects/${projectId}/engine`, { headers: { 'X-Pr0former': '1' }, data: { enabled:false } })).ok()).toBeTruthy()
   await expect(page.locator('.browser-monitor .mode-pill')).toHaveText('DISCONNECTED')
   await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
   await page.getByLabel('Part name', { exact: true }).fill('Viola gestures')

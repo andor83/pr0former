@@ -10,6 +10,9 @@ START_ONLY=false
 STOP_ONLY=false
 UPDATE_ONLY=false
 UPDATE_AND_START=false
+SETUP_SSL=false
+REMOVE_SSL=false
+NO_SSL=false
 RUN_DIR="$PROJECT_DIR/.local/manual-runs"
 START_HOST=""
 START_PORT=""
@@ -24,7 +27,10 @@ pr0former initial setup
   ./init.sh --update    Rebuild frontend and release server using locked dependencies
   ./init.sh --uas       Pull latest Git changes, rebuild, and start in the foreground
   ./init.sh --startup   Interactively enable or disable startup only
+  ./init.sh --setup-ssl Create a local certificate for HTTPS (restart to apply)
+  ./init.sh --remove-ssl Remove managed certificates and use HTTP (restart to apply)
   ./init.sh --help      Show this help
+  --no-ssl             Force HTTP for this --start/--uas launch
   --host HOST          Override the bind host for --start/--uas (IPv4, IPv6, or hostname)
   --port PORT          Override the bind port for --start/--uas (1–65535)
 
@@ -41,6 +47,10 @@ Red warnings identify stale/dirty builds or an unverifiable version; startup sti
 --uas pulls the current branch from its configured upstream (fast-forward only),
 then runs --update and --start. Pull/build failures prevent startup.
 It requires installed build tools and does not change startup services.
+HTTPS defaults to 443 with redirects on 80; without SSL the default is HTTP on 80.
+--setup-ssl/--remove-ssl take effect after restart and do not change startup services.
+Trust .local/ssl/ca.pem on each client. Linux may require bind-port permission
+or alternate ports: PR0_HTTP_PORT=8080 ./init.sh --start --port 8443.
 HELP
 }
 while [ "$#" -gt 0 ]; do
@@ -51,6 +61,9 @@ while [ "$#" -gt 0 ]; do
     --stop) STOP_ONLY=true ;;
     --update) UPDATE_ONLY=true ;;
     --uas) UPDATE_AND_START=true ;;
+    --setup-ssl) SETUP_SSL=true ;;
+    --remove-ssl) REMOVE_SSL=true ;;
+    --no-ssl) NO_SSL=true ;;
     --host|--port)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
         printf '%s requires a value.\n' "$argument" >&2; exit 2
@@ -62,6 +75,15 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+mode_count=0
+for selected in "$START_ONLY" "$STOP_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$UPDATE_AND_START" "$SETUP_SSL" "$REMOVE_SSL"; do
+  if [ "$selected" = true ]; then mode_count=$((mode_count + 1)); fi
+done
+if [ "$mode_count" -gt 1 ]; then printf 'Select only one launcher action.\n' >&2; exit 2; fi
+if [ "$NO_SSL" = true ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ]; then
+  printf '%s\n' '--no-ssl requires --start or --uas.' >&2; exit 2
+fi
 
 if [ -n "$START_HOST$START_PORT" ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ]; then
   printf '%s\n' '--host and --port require --start or --uas.' >&2; exit 2
@@ -145,6 +167,7 @@ if [ "$UPDATE_AND_START" = true ]; then
   # Re-read the pulled launcher so updates to the build/start steps take effect.
   /bin/bash "$PROJECT_DIR/init.sh" --update
   start_args=(--start)
+  if [ "$NO_SSL" = true ]; then start_args+=(--no-ssl); fi
   if [ -n "$START_HOST" ]; then start_args+=(--host "$START_HOST"); fi
   if [ -n "$START_PORT" ]; then start_args+=(--port "$START_PORT"); fi
   exec /bin/bash "$PROJECT_DIR/init.sh" "${start_args[@]}"
@@ -215,6 +238,7 @@ if [ "$START_ONLY" = true ]; then
   fi
   cd -- "$PROJECT_DIR"
   check_start_version
+  if [ "$NO_SSL" = true ]; then export PR0_NO_SSL=1; fi
   # These component overrides take precedence over PR0_BIND in saved scripts.
   if [ -n "$START_HOST" ]; then export PR0_HOST="$START_HOST"; fi
   if [ -n "$START_PORT" ]; then export PR0_PORT="$START_PORT"; fi
@@ -229,6 +253,15 @@ if [ "$START_ONLY" = true ]; then
     exec /bin/bash "$PROJECT_DIR/.local/start-pr0former.sh"
   fi
   exec "$PROJECT_DIR/target/release/pr0-server"
+fi
+
+if [ "$REMOVE_SSL" = true ]; then
+  mkdir -p "$PROJECT_DIR/.local/ssl"
+  chmod 700 "$PROJECT_DIR/.local/ssl"
+  rm -f -- "$PROJECT_DIR/.local/ssl/server.pem" "$PROJECT_DIR/.local/ssl/server-key.pem" "$PROJECT_DIR/.local/ssl/ca.pem" "$PROJECT_DIR/.local/ssl/ca-key.pem"
+  touch "$PROJECT_DIR/.local/ssl/disabled"
+  printf 'Managed certificates removed. Restart to serve HTTP on port 80. External TLS settings are disabled until --setup-ssl.\n'
+  exit 0
 fi
 
 if [ "$UPDATE_ONLY" != true ] && [ ! -t 0 ]; then
@@ -261,6 +294,14 @@ activate_tools() {
   if [ -x /usr/local/bin/brew ]; then eval "$(/usr/local/bin/brew shellenv)"; fi
   if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
 }
+require_ffmpeg() {
+  required ffmpeg
+  if ! ffmpeg -hide_banner -protocols 2>/dev/null | awk '$1 == "fd" { found=1 } END { exit !found }'; then
+    printf 'Upgrade FFmpeg to a build with the fd protocol for seekable audio imports.\n' >&2
+    exit 1
+  fi
+}
+
 install_dependencies() {
   printf '\nChecking build dependencies on %s…\n' "$PLATFORM"
   case "$PLATFORM" in
@@ -275,7 +316,7 @@ install_dependencies() {
       fi
       activate_tools
       if ! command -v brew >/dev/null 2>&1; then
-        if ask 'Install Homebrew from brew.sh to manage Node.js, CMake, pkg-config, and Opus?'; then
+        if ask 'Install Homebrew from brew.sh to manage Node.js, CMake, pkg-config, Opus, and FFmpeg?'; then
           local installer
           installer="$(mktemp -t pr0former-homebrew.XXXXXX)"
           curl --fail --show-error --location --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o "$installer"
@@ -287,6 +328,7 @@ install_dependencies() {
       required brew
       local packages=()
       if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then packages+=(node); fi
+      command -v ffmpeg >/dev/null 2>&1 || packages+=(ffmpeg)
       command -v cmake >/dev/null 2>&1 || packages+=(cmake)
       command -v pkg-config >/dev/null 2>&1 || packages+=(pkgconf)
       if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists opus; then packages+=(opus); fi
@@ -299,13 +341,13 @@ install_dependencies() {
       if ask 'Install compiler, audio, Node.js, CMake, TLS and package-config dependencies using the system package manager?'; then
         if command -v apt-get >/dev/null 2>&1; then
           sudo apt-get update
-          sudo apt-get install -y build-essential curl ca-certificates git cmake pkg-config libasound2-dev libopus-dev libssl-dev nodejs npm
+          sudo apt-get install -y build-essential curl ca-certificates git cmake pkg-config libasound2-dev libopus-dev libssl-dev nodejs npm ffmpeg openssl
         elif command -v dnf >/dev/null 2>&1; then
-          sudo dnf install -y gcc gcc-c++ make curl ca-certificates git cmake pkgconf-pkg-config alsa-lib-devel opus-devel openssl-devel nodejs npm
+          sudo dnf install -y gcc gcc-c++ make curl ca-certificates git cmake pkgconf-pkg-config alsa-lib-devel opus-devel openssl-devel nodejs npm ffmpeg openssl
         elif command -v pacman >/dev/null 2>&1; then
-          sudo pacman -S --needed base-devel curl ca-certificates git cmake pkgconf alsa-lib opus openssl nodejs npm
+          sudo pacman -S --needed base-devel curl ca-certificates git cmake pkgconf alsa-lib opus openssl nodejs npm ffmpeg openssl
         else
-          printf 'No supported package manager. Install a C/C++ toolchain, curl, git, CMake, pkg-config, ALSA/Opus/OpenSSL development packages, Node.js and npm.\n' >&2
+          printf 'No supported package manager. Install a C/C++ toolchain, curl, git, CMake, pkg-config, ALSA/Opus/OpenSSL development packages, FFmpeg, Node.js and npm.\n' >&2
         fi
       fi
       ;;
@@ -323,7 +365,7 @@ install_dependencies() {
       activate_tools
     else printf 'Rust is required.\n'; exit 1; fi
   fi
-  required cargo; required rustc; required node; required npm; required cmake; required pkg-config
+  required cargo; required rustc; required node; required npm; required cmake; required pkg-config; require_ffmpeg
   if ! node_supported; then
     printf 'Node.js 22.12 or newer is required. Current version: %s\n' "$(node --version)"
     if [ "$PLATFORM" = Darwin ] && ask 'Install/upgrade Node.js with Homebrew?'; then
@@ -371,12 +413,78 @@ install_dependencies() {
   npm --version
 }
 
+setup_ssl() {
+  required openssl
+  local directory="$PROJECT_DIR/.local/ssl" names name san index temporary default_names lan
+  if [ -f "$directory/server.pem" ] && ! ask 'Replace the existing local certificate? Clients will need to trust the new CA.'; then return; fi
+  default_names="localhost 127.0.0.1 ::1 $(hostname)"
+  if command -v ifconfig >/dev/null 2>&1; then
+    lan="$(ifconfig 2>/dev/null | awk '$1 == "inet" && $2 != "127.0.0.1" {print $2}')"
+    default_names="$default_names $lan"
+  elif command -v hostname >/dev/null 2>&1; then
+    lan="$(hostname -I 2>/dev/null || true)"
+    default_names="$default_names $lan"
+  fi
+  printf 'Hostnames and IP addresses clients will use, separated by spaces [%s]: ' "$default_names"
+  read -r names
+  names="${names:-$default_names}"
+  san=""; index=0
+  for name in $names; do
+    case "$name" in ''|*[!a-zA-Z0-9.:-]*|-*) printf 'Invalid certificate name: %s\n' "$name" >&2; return 1 ;; esac
+    index=$((index + 1))
+    case "$name" in *:*|[0-9]*.[0-9]*.[0-9]*.[0-9]*) san="${san}IP.$index = $name
+" ;; *) san="${san}DNS.$index = $name
+" ;; esac
+  done
+  mkdir -p "$directory"
+  chmod 700 "$directory"
+  temporary="$(mktemp -d "$directory/pending.XXXXXX")"
+  # Only temporary generated files are cleaned on failure; existing keys remain usable.
+  trap 'rm -rf -- "$temporary"' EXIT
+  (
+    umask 077
+    cat > "$temporary/ca.cnf" <<'CA'
+[req]
+prompt = no
+distinguished_name = dn
+x509_extensions = ca
+[dn]
+CN = pr0former Local CA
+[ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+CA
+    openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 -config "$temporary/ca.cnf" -keyout "$temporary/ca-key.pem" -out "$temporary/ca.pem"
+    cat > "$temporary/server.cnf" <<'SERVER'
+[req]
+prompt = no
+distinguished_name = dn
+[dn]
+CN = pr0former local server
+[server]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @names
+[names]
+SERVER
+    printf '%s' "$san" >> "$temporary/server.cnf"
+    openssl req -new -newkey rsa:2048 -nodes -sha256 -config "$temporary/server.cnf" -keyout "$temporary/server-key.pem" -out "$temporary/server.csr"
+    openssl x509 -req -sha256 -days 397 -in "$temporary/server.csr" -CA "$temporary/ca.pem" -CAkey "$temporary/ca-key.pem" -CAcreateserial -extfile "$temporary/server.cnf" -extensions server -out "$temporary/server.pem"
+    for name in ca.pem ca-key.pem server.pem server-key.pem; do mv -f -- "$temporary/$name" "$directory/$name"; done
+    rm -f -- "$directory/disabled"
+  )
+  rm -rf -- "$temporary"
+  trap - EXIT
+  printf '\nHTTPS configured on 443, with HTTP redirects on 80. Restart the server to apply.\nTrust this CA certificate on each client: %s/ca.pem\nOn iPad: install the certificate profile, then enable full trust in Settings > General > About > Certificate Trust Settings. Never share the key files.\n' "$directory"
+}
+
 generate_startup() {
-  local bind_address tls_cert tls_key
-  printf '\nServer bind address [0.0.0.0:4000]: '
+  local bind_address tls_cert tls_key default_port
+  printf '\nServer bind address [automatic: HTTP 80 / HTTPS 443]: '
   read -r bind_address
-  bind_address="${bind_address:-0.0.0.0:4000}"
-  printf 'TLS certificate path (blank for HTTP/localhost): '
+  printf 'External TLS certificate path (blank uses managed SSL when configured): '
   read -r tls_cert
   tls_key=""
   if [ -n "$tls_cert" ]; then
@@ -384,9 +492,12 @@ generate_startup() {
     read -r tls_key
     if [ ! -r "$tls_cert" ] || [ ! -r "$tls_key" ]; then printf 'TLS files must exist and be readable.\n' >&2; return 1; fi
     case "$tls_cert:$tls_key" in /*:/*) ;; *) printf 'Use absolute paths for TLS files.\n' >&2; return 1 ;; esac
-  elif [ "$bind_address" != '127.0.0.1:4000' ]; then
+  elif [ ! -f "$PROJECT_DIR/.local/ssl/server.pem" ]; then
     printf 'Browser microphone access on other devices requires trusted HTTPS. Configure TLS before performance use.\n'
   fi
+  default_port=80
+  if [ -n "$tls_cert" ] || [ -f "$PROJECT_DIR/.local/ssl/server.pem" ]; then default_port=443; fi
+  bind_address="${bind_address:-0.0.0.0:$default_port}"
   mkdir -p "$PROJECT_DIR/.local" "$PROJECT_DIR/data/logs"
   chmod 700 "$PROJECT_DIR/.local"
   local startup_script="$PROJECT_DIR/.local/start-pr0former.sh"
@@ -510,7 +621,7 @@ build_application() {
 if [ "$UPDATE_ONLY" = true ]; then
   printf '\npr0former · update build\nProject: %s\n' "$PROJECT_DIR"
   activate_tools
-  required cargo; required rustc; required node; required npm; required cmake; required pkg-config
+  required cargo; required rustc; required node; required npm; required cmake; required pkg-config; require_ffmpeg
   if ! node_supported || ! rust_supported; then
     printf 'Node.js 22.12+ and Rust 1.88+ are required. Run ./init.sh to update build tools.\n' >&2
     exit 1
@@ -522,12 +633,14 @@ fi
 
 printf '\npr0former · interactive setup\nProject: %s\n' "$PROJECT_DIR"
 if [ "$STARTUP_ONLY" = true ]; then startup_menu; exit 0; fi
+if [ "$SETUP_SSL" = true ]; then setup_ssl; exit 0; fi
 install_dependencies
 build_application
+if ask 'Create a local HTTPS certificate for browser audio on LAN devices?'; then setup_ssl; fi
 if ask 'Run automated Rust and frontend unit tests?'; then
   (cd "$PROJECT_DIR" && cargo test --workspace --locked)
   (cd "$PROJECT_DIR/web" && npm test)
 fi
-printf '\nBuild complete. Start manually with:\n  cd -- %q\n  ./init.sh --start\nThen open http://127.0.0.1:4000 to create the first account.\n' "$PROJECT_DIR"
+printf '\nBuild complete. Start manually with:\n  cd -- %q\n  ./init.sh --start\nThen open https://localhost (with SSL) or http://localhost to create the first account.\n' "$PROJECT_DIR"
 if ask 'Generate a startup script or configure automatic startup?'; then startup_menu; fi
 printf '\nSetup complete. Reconfigure startup later with ./init.sh --startup.\n'

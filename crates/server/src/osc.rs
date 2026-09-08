@@ -214,7 +214,7 @@ impl Runtime {
     }
     pub fn listen(self: &Arc<Self>, app: &App) {
         let runtime = self.clone();
-        let active = app.active.clone();
+        let active = app.graph.clone();
         let tx = app.engine.clone();
         std::thread::Builder::new()
             .name("pr0-osc-input".into())

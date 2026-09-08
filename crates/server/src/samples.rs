@@ -4,8 +4,7 @@ use axum::{
     extract::{Multipart, Path, State},
     http::HeaderMap,
 };
-use serde_json::{Value, json};
-use std::io::Cursor;
+use serde_json::Value;
 
 pub fn directory(project: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into()))
@@ -22,52 +21,105 @@ pub async fn upload(
     let u = user(&app, &headers)?;
     can_edit(&role(&app, &id, &u)?)?;
     load(&app, &id)?;
+    let _guard = app.setup.lock().await;
     let field = form
         .next_field()
         .await
         .map_err(bad)?
-        .ok_or_else(|| bad("Select a WAV file"))?;
+        .ok_or_else(|| bad("Select an audio file"))?;
+    let name = field
+        .file_name()
+        .unwrap_or("Imported sample")
+        .chars()
+        .take(256)
+        .collect::<String>();
     let bytes = field.bytes().await.map_err(bad)?;
-    let wav = hound::WavReader::new(Cursor::new(&bytes)).map_err(bad)?;
-    let spec = wav.spec();
-    if !(1..=8).contains(&spec.channels)
-        || spec.sample_rate < 8000
-        || spec.sample_rate > 192000
-        || wav.duration() > spec.sample_rate * 30
-    {
-        return Err(bad(
-            "Use a WAV with 1–8 channels, 8–192 kHz, and at most 30 seconds",
-        ));
-    }
-    if spec.sample_format == hound::SampleFormat::Float && spec.bits_per_sample != 32 {
-        return Err(bad("Float WAV must use 32-bit samples"));
-    }
-    let asset = (uuid::Uuid::new_v4().as_u128() % 999999999 + 1) as u32;
-    let dir = directory(&id);
-    tokio::fs::create_dir_all(&dir).await.map_err(bad)?;
-    use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dir.join(format!("{asset}.wav")))
-        .await
-        .map_err(bad)?;
-    file.write_all(&bytes).await.map_err(bad)?;
+    let temporary =
+        ImportDirectory(std::env::temp_dir().join(format!("pr0-audio-{}", uuid::Uuid::new_v4())));
+    tokio::fs::create_dir(&temporary.0).await.map_err(bad)?;
+    let source = temporary.0.join("input");
+    let converted = temporary.0.join("converted.wav");
+    tokio::fs::write(&source, &bytes).await.map_err(bad)?;
     let rate = crate::settings::read().sample_rate;
-    let project_id = id.clone();
-    tokio::task::spawn_blocking(move || cache_asset(&project_id, asset, rate))
+    // fd is seekable but cannot open nested local files or network URLs from uploaded playlists.
+    let mut command = tokio::process::Command::new("ffmpeg");
+    command
+        .kill_on_drop(true)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-threads",
+            "1",
+            "-protocol_whitelist",
+            "fd",
+            "-i",
+            "fd:",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-map_metadata",
+            "-1",
+            "-t",
+            "31",
+            "-ar",
+        ])
+        .arg(rate.to_string())
+        .args(["-c:a", "pcm_f32le", "-fs", "200000000", "-f", "wav"])
+        .arg(&converted)
+        .stdin(std::process::Stdio::from(
+            std::fs::File::open(&source).map_err(bad)?,
+        ));
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
+        .await
+        .map_err(|_| bad("Audio conversion timed out"))?
+        .map_err(|e| bad(format!("FFmpeg is required for audio import: {e}")))?;
+    if !output.status.success() {
+        return Err(bad(format!(
+            "Audio conversion failed. Install FFmpeg with the fd protocol and select a supported audio file: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(600)
+                .collect::<String>()
+        )));
+    }
+    let wav = hound::WavReader::open(&converted).map_err(bad)?;
+    let spec = wav.spec();
+    let frames = wav.duration();
+    if !(1..=8).contains(&spec.channels) || frames == 0 || frames > rate * 30 {
+        return Err(bad("Use audio with 1–8 channels and at most 30 seconds"));
+    }
+    drop(wav);
+    let result = crate::sample_library::register(&app, &id, &u, &name, &converted, None).await?;
+    let asset = result["asset"].as_u64().unwrap() as u32;
+    let project = id.clone();
+    tokio::task::spawn_blocking(move || cache_asset(&project, asset, rate))
         .await
         .map_err(bad)?
         .map_err(bad)?;
     app.logs.push(
         &id,
         "info",
-        &format!("Imported sample {asset}; cached at {rate} Hz (original retained)"),
+        &format!(
+            "Imported sample {asset}: {rate} Hz float WAV, {} channels",
+            spec.channels
+        ),
     );
-    Ok(Json(
-        json!({"asset":asset,"channels":spec.channels,"sample_rate":spec.sample_rate}),
-    ))
+    let _ = app
+        .events
+        .send(serde_json::json!({"type":"samples","project_id":id}));
+    Ok(Json(result))
 }
+struct ImportDirectory(std::path::PathBuf);
+impl Drop for ImportDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
     let rate = crate::settings::read().sample_rate;
     crate::settings::validate_routes(project, &crate::settings::read())?;
@@ -175,7 +227,7 @@ pub fn cache_project(project: &pr0_core::Project, rate: u32) -> Result<(), Strin
     }
     Ok(())
 }
-fn cache_asset(project: &str, asset: u32, rate: u32) -> Result<(), String> {
+pub(crate) fn cache_asset(project: &str, asset: u32, rate: u32) -> Result<(), String> {
     let dest = cache_path(project, asset, rate);
     if dest.exists() {
         return Ok(());

@@ -46,6 +46,7 @@ pub enum Command {
         engine: Box<Engine>,
     },
     Unload,
+    Show(bool),
     Parameter {
         node: String,
         key: String,
@@ -63,6 +64,12 @@ pub enum Command {
         revision: u64,
     },
     Bang(String),
+    Piano {
+        project: String,
+        node: String,
+        pitch: u8,
+        velocity: u8,
+    },
     Devices(oneshot::Sender<Value>),
     Hardware(bool),
     Clip {
@@ -105,6 +112,7 @@ fn run(
     let mut log_project = String::new();
     let mut outputs: Vec<Output> = vec![];
     let mut enabled = false;
+    let mut show_active = false;
     let mut settings = crate::settings::read();
     let mut testing = false;
     let mut test_sample = 0_u64;
@@ -319,7 +327,25 @@ fn run(
                     epoch = uuid::Uuid::new_v4().to_string();
                     next_tempo = None;
                 }
+                Command::Show(value) => {
+                    show_active = value;
+                    if !value {
+                        if let Some(e) = engine.as_mut() {
+                            apply_transport(
+                                "stop",
+                                0,
+                                4,
+                                e,
+                                &mut sequencer,
+                                &mut count_in,
+                                &mut next_tempo,
+                                &io,
+                            );
+                        }
+                    }
+                }
                 Command::Unload => {
+                    show_active = false;
                     count_in = None;
                     midi_inputs = crate::node_io::Inputs::default();
                     node_routes.clear();
@@ -375,10 +401,7 @@ fn run(
                                     }
                                     true
                                 }
-                                Some(crate::osc::Action::Transport(action)) => {
-                                    if matches!(action, "pause" | "stop") {
-                                        node_outputs.reset(vec![]);
-                                    }
+                                Some(crate::osc::Action::Transport(action)) if show_active => {
                                     apply_transport(
                                         action,
                                         0,
@@ -439,6 +462,18 @@ fn run(
                         }
                     }
                 }
+                Command::Piano {
+                    project: id,
+                    node,
+                    pitch,
+                    velocity,
+                } => {
+                    if project.as_ref().is_some_and(|p| p.id == id) {
+                        if let Some(e) = engine.as_mut() {
+                            e.piano_note(&node, pitch, velocity);
+                        }
+                    }
+                }
                 Command::Bang(node) => {
                     if let Some(e) = engine.as_mut() {
                         e.bang(&node);
@@ -448,9 +483,6 @@ fn run(
                     action,
                     count_in_beats,
                 } => {
-                    if matches!(action.as_str(), "pause" | "stop") {
-                        node_outputs.reset(vec![]);
-                    }
                     if let Some(e) = engine.as_mut() {
                         apply_transport(
                             &action,
@@ -608,7 +640,7 @@ fn run(
                 e.render(&[], std::slice::from_mut(frame));
                 for (node, route, cc) in &node_routes {
                     for event in e.take_midi_output(node).into_iter().flatten() {
-                        if e.clock.running || (!cc && event.velocity == 0) {
+                        if enabled {
                             node_outputs.note(node, route, event, *cc);
                         }
                     }
@@ -623,7 +655,7 @@ fn run(
 
                 for out in &mut outputs {
                     let mut routed = [0.; MAX_DEVICE_CHANNELS];
-                    if e.clock.running {
+                    if enabled {
                         if let Some(p) = &project {
                             for n in &p.graph.nodes {
                                 if n.kind == "output" {
@@ -644,20 +676,19 @@ fn run(
                 }
 
                 for (id, pcm) in &mut monitors {
-                    pcm.extend_from_slice(&if let Some(click) = click {
-                        [click; 2]
-                    } else if e.clock.running {
-                        e.monitor_frame(id)
-                    } else {
-                        [0.; 2]
-                    });
+                    let mut sample = e.monitor_frame(id);
+                    if let Some(click) = click {
+                        for ch in &mut sample {
+                            *ch += click;
+                        }
+                    }
+                    pcm.extend_from_slice(&sample);
                 }
-                // Gate per sample, including the block crossing into playback.
-                // Hardware routing above never receives count-in clicks.
+                // Count-in clicks join browser monitors; the development graph keeps running.
                 if let Some(click) = click {
-                    *frame = [click; MAX_CHANNELS];
-                } else if !e.clock.running {
-                    *frame = [0.; MAX_CHANNELS];
+                    for ch in frame {
+                        *ch += click;
+                    }
                 }
             }
 
@@ -719,7 +750,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error,"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
 ));
                 }
             }
@@ -1098,7 +1129,6 @@ fn apply_transport(
         }
         "pause" => {
             *count_in = None;
-            engine.reset_midi_sources();
             if let Some(seq) = sequencer {
                 seq.pause(engine, io);
             }
@@ -1106,7 +1136,6 @@ fn apply_transport(
         }
         "stop" => {
             *count_in = None;
-            engine.reset_midi_sources();
             if let Some(seq) = sequencer {
                 seq.reset(engine, io);
             }

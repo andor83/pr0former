@@ -9,9 +9,11 @@ mod output_buffer;
 mod performance;
 mod resources;
 mod revisions;
+mod sample_library;
 mod samples;
 mod settings;
 mod subgraphs;
+mod tls;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json, Router,
@@ -43,6 +45,7 @@ struct App {
     events: broadcast::Sender<Value>,
     engine: std::sync::mpsc::SyncSender<audio::Command>,
     active: Arc<Mutex<Option<String>>>,
+    graph: Arc<Mutex<Option<String>>>,
     setup: Arc<tokio::sync::Mutex<()>>,
     logs: Arc<settings::Logs>,
     secure: bool,
@@ -378,8 +381,9 @@ async fn status(State(app): State<App>) -> Json<Value> {
         .unwrap()
         .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
         .unwrap_or(1);
+    let ownership = engine_status(&app);
     Json(
-        json!({"bootstrap":count==0,"version":env!("CARGO_PKG_VERSION"),"build":build_info::json(),"active_project":*app.active.lock().unwrap(),"monitor_transport":"webrtc_opus"}),
+        json!({"bootstrap":count==0,"version":env!("CARGO_PKG_VERSION"),"build":build_info::json(),"active_project":ownership["active_project"],"graph_project":ownership["graph_project"],"monitor_transport":"webrtc_opus"}),
     )
 }
 async fn list_projects(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
@@ -530,7 +534,7 @@ async fn update_project(
         validate_live_update(&previous, &p)
             .map_err(|message| Failure(StatusCode::CONFLICT, message))?;
     }
-    let prepared = if active {
+    let prepared = if app.graph.lock().unwrap().as_deref() == Some(&id) {
         let prepared_project = p.clone();
         Some(
             tokio::task::spawn_blocking(move || samples::prepare(&prepared_project))
@@ -589,13 +593,15 @@ async fn control_input(
         .iter_mut()
         .find(|n| n.id == c.node && n.kind == "control_input")
         .ok_or_else(|| bad("Graphical control missing"))?;
-    let active = app.active.lock().unwrap().as_deref() == Some(&id);
+    let active = app.graph.lock().unwrap().as_deref() == Some(&id);
     if node.parameters.get("mode") == Some(&0.) {
         if c.value.is_some() {
             return Err(bad("Use a Bang trigger, not a stored value"));
         }
         if !active {
-            return Err(bad("Activate the show before triggering Bang"));
+            return Err(bad(
+                "Enable this project’s audio engine before triggering Bang",
+            ));
         }
         send(&app, audio::Command::Bang(c.node))?;
     } else {
@@ -616,6 +622,50 @@ async fn control_input(
         publish(&app, &p);
     }
     Ok(Json(p))
+}
+#[derive(Deserialize)]
+struct PianoNote {
+    node: String,
+    pitch: u8,
+    velocity: u8,
+}
+async fn piano_note(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(note): Json<PianoNote>,
+) -> Api<Json<serde_json::Value>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    can_edit(&role(&app, &id, &u)?)?;
+    let _guard = app.setup.lock().await;
+    let p = load(&app, &id)?;
+    if note.pitch > 127 || note.velocity > 127 {
+        return Err(bad("Invalid MIDI note"));
+    }
+    if !p
+        .graph
+        .nodes
+        .iter()
+        .any(|n| n.id == note.node && n.kind == "piano")
+    {
+        return Err(bad("Piano node missing"));
+    }
+    if app.graph.lock().unwrap().as_deref() != Some(&id) {
+        return Err(bad(
+            "Enable this project’s audio engine before playing piano keys",
+        ));
+    }
+    send(
+        &app,
+        audio::Command::Piano {
+            project: id,
+            node: note.node,
+            pitch: note.pitch,
+            velocity: note.velocity,
+        },
+    )?;
+    Ok(Json(serde_json::json!({"ok":true})))
 }
 #[derive(Deserialize)]
 struct ParameterEdit {
@@ -658,7 +708,7 @@ async fn parameter(
         .iter()
         .find(|x| x.id == c.parameter)
         .ok_or_else(|| bad("Parameter missing"))?;
-    let active = app.active.lock().unwrap().as_deref() == Some(&id);
+    let active = app.graph.lock().unwrap().as_deref() == Some(&id);
     if active && meta.structural {
         return Err(bad("Deactivate before changing structural parameters"));
     }
@@ -715,48 +765,27 @@ async fn transport(
             .as_ref()
             .is_some_and(|other| other != &id)
         {
-            return Err(bad("Another project owns the audio engine"));
+            return Err(bad("Another show is active"));
         }
         if app.active.lock().unwrap().as_deref() == Some(&id) {
             return Ok(Json(json!({"ok":true})));
         }
-        settings::discover().await?;
-        app.logs.push(&id, "info", "Preparing show activation");
-        let project = load(&app, &id)?;
-        let prepared_project = project.clone();
-        let engine = tokio::task::spawn_blocking(move || samples::prepare(&prepared_project))
-            .await
-            .map_err(internal)?
-            .map_err(|e| {
-                app.logs.push(&id, "error", &e);
-                bad(e)
-            })?;
-        if load(&app, &id)?.revision != project.revision {
-            return Err(Failure(
-                StatusCode::CONFLICT,
-                "Project changed during preparation".into(),
-            ));
-        }
-        enable_engine(&app, &id, true).await?;
-        let mut active = app.active.lock().unwrap();
-        if let Some(other) = active.as_ref() {
-            if other != &id {
-                return Err(bad("Another project owns the audio engine"));
-            }
-        }
-        send(&app, audio::Command::Load(project, Box::new(engine)))?;
-        *active = Some(id.clone());
-        let _ = app.events.send(engine_status(&active));
+        can_switch_graph(&app, &id, &u)?;
+        start_graph(&app, &id).await?;
+        send(&app, audio::Command::Show(true))?;
+        *app.active.lock().unwrap() = Some(id.clone());
+        let _ = app.events.send(engine_status(&app));
     } else if c.action == "deactivate" {
-        let mut active = app.active.lock().unwrap();
-        if active.as_deref() != Some(&id) {
+        if app.active.lock().unwrap().as_deref() != Some(&id) {
             return Err(bad("Project is not active"));
         }
-        send(&app, audio::Command::Unload)?;
-        *active = None;
-        let _ = app.events.send(engine_status(&active));
+        send(&app, audio::Command::Show(false))?;
+        *app.active.lock().unwrap() = None;
+        let _ = app.events.send(engine_status(&app));
     } else {
-        if app.active.lock().unwrap().as_deref() != Some(&id) {
+        if (c.action != "tempo" && app.active.lock().unwrap().as_deref() != Some(&id))
+            || app.graph.lock().unwrap().as_deref() != Some(&id)
+        {
             return Err(bad("Activate this show first"));
         }
         match c.action.as_str() {
@@ -937,8 +966,8 @@ async fn audio_enable(
             "Owner access required".into(),
         ));
     }
-    if app.active.lock().unwrap().as_deref() != Some(&id) {
-        return Err(bad("Activate this project first"));
+    if app.graph.lock().unwrap().as_deref() != Some(&id) {
+        return Err(bad("Enable the audio engine for this project first"));
     }
     if c.input {
         return Err(bad("Native inputs start and stop with the audio engine"));
@@ -973,10 +1002,53 @@ async fn enable_engine(app: &App, id: &str, enabled: bool) -> Api<()> {
             Ok(())
         }
         Err(e) => {
+            send(app, audio::Command::Unload)?;
+            *app.graph.lock().unwrap() = None;
+            let _ = app.events.send(engine_status(app));
             app.logs.push(id, "error", &e);
             Err(bad(e))
         }
     }
+}
+// Called under setup lock. Preparing first leaves the current graph intact on failure.
+async fn start_graph(app: &App, id: &str) -> Api<()> {
+    if app.graph.lock().unwrap().as_deref() == Some(id) {
+        return Ok(());
+    }
+    if app
+        .active
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|other| other != id)
+    {
+        return Err(bad("Another show owns the audio engine"));
+    }
+    if let Some(other) = app.graph.lock().unwrap().clone() {
+        // Development ownership may only be switched by someone authorized for both projects.
+        // The caller verifies the previous project's role before reaching this helper.
+        app.logs.push(&other, "info", "Development graph released");
+    }
+    settings::discover().await?;
+    let project = load(app, id)?;
+    let prepared = project.clone();
+    let engine = tokio::task::spawn_blocking(move || samples::prepare(&prepared))
+        .await
+        .map_err(internal)?
+        .map_err(bad)?;
+    enable_engine(app, id, true).await?;
+    send(app, audio::Command::Load(project, Box::new(engine)))?;
+    *app.graph.lock().unwrap() = Some(id.to_owned());
+    let _ = app.events.send(engine_status(app));
+    Ok(())
+}
+fn can_switch_graph(app: &App, id: &str, u: &str) -> Api<()> {
+    if let Some(other) = app.graph.lock().unwrap().clone() {
+        if other != id && !matches!(role(app, &other, u)?.as_str(), "owner" | "conductor") {
+            return Err(bad("Another project owns the audio engine"));
+        }
+    }
+    Ok(())
 }
 async fn engine_enable(
     State(app): State<App>,
@@ -993,7 +1065,15 @@ async fn engine_enable(
     if app.active.lock().unwrap().is_some() {
         return Err(bad("Deactivate the show before changing engine state"));
     }
-    enable_engine(&app, &id, c.enabled).await?;
+    can_switch_graph(&app, &id, &u)?;
+    if c.enabled {
+        start_graph(&app, &id).await?;
+    } else {
+        enable_engine(&app, &id, false).await?;
+        send(&app, audio::Command::Unload)?;
+        *app.graph.lock().unwrap() = None;
+        let _ = app.events.send(engine_status(&app));
+    }
     Ok(Json(json!({"ok":true})))
 }
 async fn latency_test(
@@ -1015,6 +1095,10 @@ async fn latency_test(
         if !settings::read().interfaces.iter().any(|i| i.enabled) {
             return Err(bad("Select and save an output interface before testing"));
         }
+        can_switch_graph(&app, &id, &u)?;
+        send(&app, audio::Command::Unload)?;
+        *app.graph.lock().unwrap() = None;
+        let _ = app.events.send(engine_status(&app));
         enable_engine(&app, &id, true).await?;
     }
     send(&app, audio::Command::Test(c.enabled))?;
@@ -1104,9 +1188,11 @@ async fn websocket(
     role(&app, &id, &u)?;
     Ok(ws.on_upgrade(move |socket| stream(socket, app, id, u)))
 }
-// Call while holding the active-project lock to order status snapshots and changes.
-fn engine_status(active: &Option<String>) -> Value {
-    json!({"type":"engine_status","active_project":active,"server_time":audio::monotonic_ms()})
+// Snapshot both ownership states; graph processing and show transport are independent.
+fn engine_status(app: &App) -> Value {
+    let graph = app.graph.lock().unwrap();
+    let active = app.active.lock().unwrap();
+    json!({"type":"engine_status","active_project":*active,"graph_project":*graph,"server_time":audio::monotonic_ms()})
 }
 
 async fn send_project_snapshot(socket: &mut WebSocket, app: &App, id: &str, u: &str) -> bool {
@@ -1141,7 +1227,7 @@ async fn send_project_snapshot(socket: &mut WebSocket, app: &App, id: &str, u: &
             return false;
         }
     }
-    let status = engine_status(&app.active.lock().unwrap());
+    let status = engine_status(&app);
     socket
         .send(Message::Text(status.to_string().into()))
         .await
@@ -1208,6 +1294,7 @@ async fn main() {
         CREATE TABLE IF NOT EXISTS members(project_id TEXT REFERENCES projects(id),user_id TEXT REFERENCES users(id),role TEXT NOT NULL,PRIMARY KEY(project_id,user_id));
         CREATE TABLE IF NOT EXISTS revisions(project_id TEXT REFERENCES projects(id),revision INTEGER,body TEXT NOT NULL,PRIMARY KEY(project_id,revision));
         CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),role TEXT,expires INTEGER,used INTEGER);").expect("Database migration");
+    sample_library::migrate(&db).expect("Sample library migration");
     subgraphs::migrate(&db).expect("Subgraph library migration");
     revisions::migrate(&db).expect("Revision save migration");
     let (events, _) = broadcast::channel(128);
@@ -1220,7 +1307,7 @@ async fn main() {
         logs.clone(),
         osc.clone(),
     );
-    let cert = std::env::var("PR0_TLS_CERT").ok();
+    let tls_config = tls::Config::load();
     let app = App {
         resources: resources::start(),
         osc,
@@ -1228,9 +1315,10 @@ async fn main() {
         events,
         engine,
         active: Arc::new(Mutex::new(None)),
+        graph: Arc::new(Mutex::new(None)),
         setup: Arc::new(tokio::sync::Mutex::new(())),
         logs,
-        secure: cert.is_some(),
+        secure: tls_config.pair.is_some(),
         media,
     };
     app.osc.listen(&app);
@@ -1252,6 +1340,7 @@ async fn main() {
         .route("/api/projects/{id}/logs", get(settings::logs))
         .route("/api/projects/{id}/preview", get(preview))
         .route("/api/projects/{id}/control", put(control_input))
+        .route("/api/projects/{id}/piano", put(piano_note))
         .route("/api/subgraphs", get(subgraphs::list))
         .route(
             "/api/subgraphs/{id}/versions/{version}",
@@ -1290,7 +1379,25 @@ async fn main() {
         .route("/api/projects/{id}/clip", post(clip))
         .route(
             "/api/projects/{id}/samples",
-            post(samples::upload).layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+            get(sample_library::list)
+                .post(samples::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
+            "/api/projects/{id}/sample-library",
+            get(sample_library::browse),
+        )
+        .route(
+            "/api/projects/{id}/samples/{sample}",
+            put(sample_library::edit),
+        )
+        .route(
+            "/api/projects/{id}/samples/{sample}/add",
+            post(sample_library::add),
+        )
+        .route(
+            "/api/projects/{id}/samples/{sample}/audio",
+            get(sample_library::audio),
         )
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
         .fallback_service(
@@ -1298,17 +1405,27 @@ async fn main() {
         )
         .with_state(app);
     let address = bind::address(
-        &std::env::var("PR0_BIND").unwrap_or("0.0.0.0:4000".into()),
+        &std::env::var("PR0_BIND").unwrap_or_else(|_| {
+            if tls_config.pair.is_some() {
+                "0.0.0.0:443"
+            } else {
+                "0.0.0.0:80"
+            }
+            .into()
+        }),
         std::env::var("PR0_HOST").ok().as_deref(),
-        std::env::var("PR0_PORT").ok().as_deref(),
+        tls_config.port.as_deref(),
     )
     .expect("Bind address");
     println!(
         "pr0former listening on {}://{address}",
-        if cert.is_some() { "https" } else { "http" }
+        if tls_config.pair.is_some() {
+            "https"
+        } else {
+            "http"
+        }
     );
-    if let Some(cert) = cert {
-        let key = std::env::var("PR0_TLS_KEY").expect("PR0_TLS_KEY required");
+    if let Some((cert, key)) = tls_config.pair {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
             .await
@@ -1318,10 +1435,19 @@ async fn main() {
             .expect("Resolve bind address")
             .next()
             .expect("Bind host resolved to no addresses");
-        axum_server::bind_rustls(socket, tls)
-            .serve(router.into_make_service())
-            .await
-            .unwrap();
+        let http_address = bind::address(
+            &address,
+            None,
+            Some(&std::env::var("PR0_HTTP_PORT").unwrap_or("80".into())),
+        )
+        .expect("HTTP redirect address");
+        let listener = tokio::net::TcpListener::bind(&http_address).await.expect("Bind HTTP redirect listener (ports 80/443 may require OS permission; use PR0_HTTP_PORT/PR0_PORT for alternate ports)");
+        println!("HTTP redirect listening on http://{http_address}");
+        tokio::try_join!(
+            axum_server::bind_rustls(socket, tls).serve(router.into_make_service()),
+            async { axum::serve(listener, tls::redirects(socket.port())).await }
+        )
+        .expect("Serve HTTPS and HTTP redirect");
     } else {
         let listener = tokio::net::TcpListener::bind(address).await.unwrap();
         axum::serve(listener, router).await.unwrap();

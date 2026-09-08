@@ -291,6 +291,9 @@ async fn apply(
         audio::Command::Enable(id.to_owned(), false, s.clone(), tx),
     )?;
     rx.await.map_err(internal)?.map_err(bad)?;
+    send(&app, audio::Command::Unload)?;
+    *app.graph.lock().unwrap() = None;
+    let _ = app.events.send(super::engine_status(app));
     app.logs.push(
         &id,
         "info",

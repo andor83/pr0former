@@ -33,6 +33,8 @@ test('authorization, invitations, revision conflicts, and sample preparation', a
   const uploaded = await request.post(`/api/projects/${id}/samples`, { headers, multipart: { sample: { name: 'tone.wav', mimeType: 'audio/wav', buffer: pcm } } })
   expect(uploaded.ok()).toBeTruthy()
   const sample = await uploaded.json()
+  expect((await stranger.get(`/api/projects/${id}/samples/${sample.id}/audio`)).ok()).toBeTruthy()
+  expect((await stranger.put(`/api/projects/${id}/samples/${sample.id}`, {headers, data: {...sample, name: "Forbidden edit"}})).status()).toBe(403)
   project.graph.nodes.find((n: any) => n.id === 'tone').kind = 'phase_vocoder'
   project.graph.nodes.find((n: any) => n.id === 'tone').parameters = { ...Object.fromEntries(descriptor.parameters.map((p: any) => [p.id, p.default])), asset: sample.asset, speed: 2 }
   const saved = await request.put(`/api/projects/${id}`, { headers, data: project })
@@ -40,7 +42,8 @@ test('authorization, invitations, revision conflicts, and sample preparation', a
   const settingsPath = `/api/projects/${id}/system/audio`
   expect((await request.put(settingsPath,{headers,data:{sample_rate:48000,block_size:77,interfaces:[]}})).status()).toBe(400)
   const originalPath = join(process.env.PR0_TEST_DATA!, 'samples', id, `${sample.asset}.wav`)
-  expect(await readFile(originalPath)).toEqual(pcm)
+  const convertedOriginal=await readFile(originalPath)
+  expect(convertedOriginal.subarray(0,4).toString()).toBe('RIFF')
   expect((await stranger.put(settingsPath, { headers, data: { sample_rate: 96000, block_size:1024, interfaces: [] } })).ok()).toBeFalsy()
   expect((await request.put(settingsPath, { headers, data: { sample_rate: 12345, interfaces: [] } })).status()).toBe(400)
   expect((await request.put(`/api/projects/${id}/parameter`, { headers, data: { node: 'out', parameter: 'interface', value: 999, revision: project.revision } })).status()).toBe(400)
@@ -50,7 +53,7 @@ test('authorization, invitations, revision conflicts, and sample preparation', a
   expect((await request.put(settingsPath, { headers, data: { sample_rate: 96000, block_size:1024, interfaces: [] } })).ok()).toBeTruthy()
   const cache = await readFile(join(process.env.PR0_TEST_DATA!, 'samples', id, `${sample.asset}-96000-v1.wav`))
   expect(cache.readUInt32LE(24)).toBe(96000)
-  expect(await readFile(originalPath)).toEqual(pcm)
+  expect(await readFile(originalPath)).toEqual(convertedOriginal)
   await expect(access(lazyCache)).rejects.toThrow()
   expect((await request.get(`/api/projects/${other.id}`)).ok()).toBeTruthy()
   await access(lazyCache)

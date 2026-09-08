@@ -57,6 +57,8 @@ test('visualizers preserve typed inputs and display multichannel block history, 
   await page.getByRole('button',{name:'Deactivate show',exact:true}).click()
   await page.getByRole('button',{name:'Edit Text source',exact:true}).click()
   await page.getByLabel('Disconnected input value').fill('new message')
+  await expect.poll(()=>latest?.sample).toBeGreaterThan(latest.sample)
+  await expect(page.getByLabel('Disconnected input value')).toHaveValue('new message')
   await page.getByLabel('Disconnected input value').press('Tab')
   await expect.poll(async()=>(await(await page.request.get(`/api/projects/${project.id}`)).json()).project.graph.nodes.find((n:any)=>n.id==='Text source').control_value).toBe('new message')
   expect(errors).toEqual([])

@@ -35,7 +35,7 @@ test('private/public library permissions, immutable versions, forks and bundled 
   expect(root.library.version).toBe(2);expect(root.x).toBe(150)
   const imported=dest.graph.nodes.find((n:any)=>n.kind==='sample')
   expect(imported.parameters.asset).not.toBe(sample.asset)
-  expect(await readFile(join(process.env.PR0_TEST_DATA!,'samples',dest.id,`${imported.parameters.asset}.wav`))).toEqual(pcm)
+  expect(await readFile(join(process.env.PR0_TEST_DATA!,'samples',dest.id,`${imported.parameters.asset}.wav`))).toEqual(await readFile(join(process.env.PR0_TEST_DATA!,'samples',p.id,`${sample.asset}.wav`)))
   p.graph.nodes.find((n:any)=>n.id==='Value').parameters.value=3
   p=await(await request.put(`/api/projects/${p.id}`,{headers,data:p})).json()
   expect((await(await save(request,{library_id:first.id,public:true})).json()).version).toBe(3)
