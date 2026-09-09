@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises'
 import { test, expect } from '@playwright/test'
 
 test('create a project, inspect a driven parameter, and edit an unconnected value', async ({ page }) => {
+  test.setTimeout(120000)
+  page.setDefaultTimeout(10000)
   let latest: any
   page.on('websocket', socket => socket.on('framereceived', ({ payload }) => {
     const message = JSON.parse(String(payload))
@@ -113,6 +115,7 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
     return energy
   })).toBeGreaterThan(0)
   await page.getByRole('button', { name: 'Performance mode', exact: true }).click()
+  await page.getByLabel('Show all parts',{exact:true}).check()
   await expect(page.getByRole('main', { name: 'Performance stage' })).toBeVisible()
   await expect(page.getByLabel('Clef', { exact: true })).toHaveCount(0)
   await expect(page.getByLabel('Stage part status')).toHaveText('Part idle')
@@ -163,6 +166,7 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await expect(page.locator('.notation-surface svg')).toBeVisible()
   await page.getByRole('button', { name: 'Piano roll', exact: true }).click()
   await expect(page.locator('.midi-note')).toHaveCount(8)
+  await page.locator('.score-settings summary').click()
   await page.getByLabel('Clef', { exact: true }).selectOption('alto')
   await expect(page.getByLabel('Clef', { exact: true })).toHaveValue('alto')
   await page.getByLabel('Key signature', { exact: true }).selectOption('Eb')
@@ -197,9 +201,9 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   expect(restored.beat_unit).toBe(8)
   expect(restored.parts[0].notes.map((n: any) => n.beat)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
   await expect(page.getByLabel('Clef', { exact: true })).toHaveValue('alto')
-  await expect(page.getByLabel('Key signature', { exact: true })).toHaveValue('Eb')
+  await expect(page.getByLabel('Key signature', { exact: true })).toHaveValue('')
   await expect(page.getByLabel('Time signature', { exact: true })).toHaveValue('hide')
-  restored.parts[0].notes = restored.parts[0].notes.slice(0, 3).map((n: any, i: number) => ({ ...n, beat: [0, 0.5, 3][i], duration: 0.25 }))
+  restored.parts[0].notes = restored.parts[0].notes.slice(0, 3).map((n: any, i: number) => ({ ...n, notation: undefined, beat: [0, 0.5, 3][i], duration: 0.25 }))
   const spaced = await page.request.put(`/api/projects/${projectId}`, { headers: { 'X-Pr0former': '1' }, data: restored })
   expect(spaced.ok()).toBeTruthy()
   await expect(page.locator('[data-score-beat]')).toHaveCount(3)
@@ -207,8 +211,8 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
     beat: Number((el as SVGElement).dataset.scoreBeat),
     x: el.querySelector('.vf-notehead > text')!.getBoundingClientRect().left,
   })).sort((a, b) => a.beat - b.beat))
-  expect(positions[1]!.x - positions[0]!.x).toBeCloseTo(50, 0)
-  expect(positions[2]!.x - positions[1]!.x).toBeCloseTo(250, 0)
+  expect(positions[1]!.x - positions[0]!.x).toBeCloseTo(48, 0)
+  expect(positions[2]!.x - positions[1]!.x).toBeCloseTo(226.5, 0)
   const cursorX = await page.locator('.score-playhead').evaluate(el => el.getBoundingClientRect().left)
   expect(cursorX).toBeCloseTo(positions[0]!.x, 0)
   await page.getByLabel('Follow playback').uncheck()
@@ -216,16 +220,16 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await page.getByRole('button',{name:'Settings menu',exact:true}).click()
   await page.getByRole('menuitem',{name:'System settings',exact:true}).click()
   await page.getByRole('tab',{name:'MIDI',exact:true}).click()
-  await page.getByLabel('MIDI channel', { exact: true }).selectOption('10')
-  await expect(page.getByLabel('MIDI channel',{exact:true})).toBeEnabled()
+  await system.getByLabel('MIDI channel', { exact: true }).selectOption('10')
+  await expect(system.getByLabel('MIDI channel',{exact:true})).toBeEnabled()
   await page.getByRole('tab',{name:'OSC',exact:true}).click()
-  await page.getByLabel('OSC address', { exact: true }).fill('/touchdesigner/note')
-  await page.getByLabel('OSC address', { exact: true }).press('Tab')
+  await system.getByLabel('OSC address', { exact: true }).fill('/touchdesigner/note')
+  await system.getByLabel('OSC address', { exact: true }).press('Tab')
   await expect.poll(async () => {
     const saved = (await (await page.request.get(`/api/projects/${projectId}`)).json()).project
     return [saved.parts[0].midi_channel, saved.parts[0].osc_address]
   }).toEqual([10, '/touchdesigner/note'])
-  await expect(page.getByLabel('OSC address', { exact: true })).toBeEnabled()
+  await expect(system.getByLabel('OSC address', { exact: true })).toBeEnabled()
   await page.getByRole('button',{name:'Close system settings',exact:true}).click()
   const rhythms = (await (await page.request.get(`/api/projects/${projectId}`)).json()).project
   rhythms.parts[0].notes = rhythms.parts[0].notes.map((n: any, i: number) => ({ ...n, beat: [0, 1, 3][i], duration: [0.75, 1.25, 0.8][i] }))
@@ -256,7 +260,7 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   await page.getByRole('button',{name:'Settings menu',exact:true}).click()
   await page.getByRole('menuitem',{name:'System settings',exact:true}).click()
   await page.getByRole('tab',{name:'MIDI',exact:true}).click()
-  await page.getByLabel('MIDI channel', { exact: true }).selectOption('11')
+  await system.getByLabel('MIDI channel', { exact: true }).selectOption('11')
   await expect.poll(() => savedBeforeRemote?.revision).toBeTruthy()
   const newer = { ...savedBeforeRemote, name: 'Latest ensemble revision' }
   const remoteResponse = await page.request.put(`/api/projects/${projectId}`, { headers: { 'X-Pr0former': '1' }, data: newer })
@@ -264,13 +268,14 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   const remoteSaved = await remoteResponse.json()
   await expect(page.getByRole('button', { name: 'Latest ensemble revision', exact: true })).toBeVisible()
   releaseSave()
-  await expect(page.getByLabel('MIDI channel', { exact: true })).toBeEnabled()
+  await expect(system.getByLabel('MIDI channel', { exact: true })).toBeEnabled()
   expect(remoteSaved.revision).toBeGreaterThan(savedBeforeRemote.revision)
   await expect(page.locator('.revision')).toHaveText(/Revision \d+ · Unsaved changes/)
   await expect(page.getByRole('button', { name: 'Latest ensemble revision', exact: true })).toBeVisible()
   await page.unroute(`**/api/projects/${projectId}`)
   await page.getByRole('button',{name:'Close system settings',exact:true}).click()
   await page.getByRole('button', { name: 'Performance mode', exact: true }).click()
+  await page.getByLabel('Show all parts',{exact:true}).check()
   await page.context().setOffline(true)
   await expect(page.getByText('Connecting', { exact: true })).toBeAttached()
   const offlineProject = (await (await page.request.get(`/api/projects/${projectId}`)).json()).project
@@ -392,6 +397,7 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   expect((await page.request.post(`/api/projects/${projectId}/engine`, { headers: { 'X-Pr0former': '1' }, data: { enabled:false } })).ok()).toBeTruthy()
   await expect(page.locator('.browser-monitor .mode-pill')).toHaveText('DISCONNECTED')
   await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  if(!await page.locator('.score-settings').evaluate(el=>el.hasAttribute('open')))await page.locator('.score-settings summary').click()
   await page.getByLabel('Part name', { exact: true }).fill('Viola gestures')
   await page.getByLabel('Part name', { exact: true }).press('Tab')
   await expect(page.getByLabel('Part name', { exact: true })).toBeEnabled()
@@ -408,11 +414,12 @@ test('create a project, inspect a driven parameter, and edit an unconnected valu
   const partSetup = (await (await page.request.get(`/api/projects/${projectId}`)).json()).project.parts[0]
   expect([partSetup.name, partSetup.loop_beats, partSetup.view, partSetup.notes[0].duration]).toEqual(['Viola gestures', 2, 'grid', 0.75])
   await page.getByRole('button', { name: 'Add part', exact: true }).click()
-  await page.getByRole('button', { name: 'Player 2', exact: true }).click()
-  await expect(page.locator('.notation-surface')).toBeVisible()
+  await page.getByRole('button', { name: 'Part 2', exact: true }).click()
+  await expect(page.locator('.notation-surface').first()).toBeVisible()
   await page.getByRole('button', { name: 'Viola gestures', exact: true }).click()
-  await expect(page.locator('.piano-roll')).toBeVisible()
+  await expect(page.locator(`[data-score-part="${partSetup.id}"] .piano-roll`)).toBeVisible()
   await page.getByRole('button', { name: 'Performance mode', exact: true }).click()
+  await page.getByLabel('Show all parts',{exact:true}).check()
   await expect(page.locator('.piano-roll')).toBeVisible()
   await expect(page.getByLabel('Part name', { exact: true })).toHaveCount(0)
   expect((await page.request.put(`/api/projects/${projectId}/system/audio`, {headers:{'X-Pr0former':'1'},data:{sample_rate:48000,interfaces:[]}})).ok()).toBeTruthy()

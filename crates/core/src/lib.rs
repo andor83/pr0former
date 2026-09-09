@@ -2,6 +2,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod midi;
+pub mod score;
+
 pub const SCHEMA_VERSION: u32 = 1;
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const MAX_CHANNELS: usize = 8;
@@ -57,6 +60,7 @@ pub enum Signal {
     Audio,
     Control,
     Spectral,
+    Midi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +158,8 @@ pub struct Graph {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notation: Option<score::Notation>,
     pub id: String,
     pub pitch: u8,
     pub beat: f64,
@@ -166,6 +172,12 @@ pub struct Note {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Part {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamics: Option<score::Dynamics>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation: Vec<score::AutomationLane>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub staves: Vec<score::Staff>,
     pub id: String,
     pub name: String,
     pub performer: Option<String>,
@@ -201,6 +213,8 @@ fn default_osc() -> String {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<score::Timeline>,
     pub schema_version: u32,
     pub id: String,
     pub name: String,
@@ -290,6 +304,7 @@ pub fn catalog() -> Vec<Descriptor> {
         ("audio", Audio),
         ("control", Control),
         ("spectral", Spectral),
+        ("midi", Midi),
     ] {
         for direction in ["input", "output"] {
             let parameters = if signal == Spectral {
@@ -1556,6 +1571,38 @@ pub fn catalog() -> Vec<Descriptor> {
             &["tabplay~"],
         );
     }
+    add(
+        "midi_to_control",
+        "MIDI to control",
+        "♪→",
+        "Control",
+        "Decode typed MIDI channel messages. Type is the status high nibble (8 note off, 9 note on, 11 CC, 12 program, 13 pressure, 14 bend). Number identifies a note/controller; value decodes 7-bit values or full 14-bit pitch bend. Channel is 1–16. Trigger marks an event. Filter type/number in the modal; zero type or -1 number accepts all.",
+        vec![port("events", Midi)],
+        vec![
+            port("type", Control),
+            port("number", Control),
+            port("value", Control),
+            port("channel", Control),
+            port("trigger", Control),
+        ],
+        vec![
+            param("message_type", "Message type (0 all)", "", 0., 14., 0.),
+            param("number_filter", "Number (-1 all)", "", -1., 127., -1.),
+        ],
+        &[],
+    );
+    for descriptor in &mut result {
+        if descriptor.kind == "part_midi" {
+            descriptor.outputs.push(port("events", Midi));
+            descriptor.parameters.push(Parameter {
+                structural: true,
+                ..param("staff", "Staff (0 all, 1 first)", "", 0., 8., 0.)
+            });
+        }
+        if descriptor.kind == "midi_output" {
+            descriptor.inputs.push(port("events", Midi));
+        }
+    }
     result
 }
 
@@ -2133,8 +2180,17 @@ impl Graph {
 
 impl Project {
     /// Musical positions and BPM use quarter notes regardless of meter.
+    pub fn initial_meter(&self) -> (u8, u8) {
+        self.score
+            .as_ref()
+            .and_then(|s| s.meters.first())
+            .filter(|m| m.beat == 0.)
+            .map(|m| (m.beats, m.unit))
+            .unwrap_or((self.beats_per_bar, self.beat_unit))
+    }
     pub fn quarter_beats_per_bar(&self) -> f64 {
-        self.beats_per_bar as f64 * 4. / self.beat_unit as f64
+        let (beats, unit) = self.initial_meter();
+        beats as f64 * 4. / unit as f64
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -2151,11 +2207,42 @@ impl Project {
         {
             return Err("Invalid tempo or meter".into());
         }
+        if let Some(score) = &self.score {
+            score.validate()?;
+            if score
+                .spans()
+                .len()
+                .saturating_mul(self.parts.iter().map(|p| p.notes.len()).sum::<usize>())
+                > 320_000
+            {
+                return Err("Expanded score exceeds the 320,000-note preparation budget".into());
+            }
+        }
         if self.parts.len() > 32 {
             return Err("At most 32 parts".into());
         }
         let mut ids = BTreeSet::new();
         for p in &self.parts {
+            score::validate(p)?;
+            for staff in &p.staves {
+                if staff.instrument_node.as_ref().is_some_and(|id| {
+                    !self.graph.nodes.iter().any(|n| {
+                        &n.id == id
+                            && matches!(
+                                n.kind.as_str(),
+                                "synth" | "fm_synth" | "input" | "browser_input"
+                            )
+                    })
+                }) {
+                    return Err(
+                        "Staff instrument must reference a local instrument/input node".into(),
+                    );
+                }
+            }
+            score::validate_automation(&p.automation)?;
+            if let Some(d) = &p.dynamics {
+                score::validate_automation(&[d.lane(p.midi_channel)])?;
+            }
             if p.name.trim().is_empty() || p.name.len() > 120 {
                 return Err("Part name must contain 1–120 bytes".into());
             }
@@ -2292,6 +2379,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
     })
     .collect();
     Project {
+        score: None,
         schema_version: 1,
         id,
         name,
@@ -2302,6 +2390,9 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         beat_unit: 4,
         graph: Graph { nodes, edges },
         parts: vec![Part {
+            staves: vec![],
+            automation: vec![],
+            dynamics: None,
             id: "part-1".into(),
             name: "Prepared piano".into(),
             performer: None,
@@ -2313,6 +2404,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
                 .iter()
                 .enumerate()
                 .map(|(i, p)| Note {
+                    notation: None,
                     id: format!("note-{i}"),
                     pitch: *p,
                     beat: i as f64,

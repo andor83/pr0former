@@ -6,6 +6,7 @@ mod effects;
 mod envelope;
 mod looper;
 mod midi_controls;
+mod midi_events;
 mod named;
 pub mod note_inputs;
 mod oscillator;
@@ -140,6 +141,8 @@ struct Voice {
     releasing: bool,
 }
 struct RuntimeNode {
+    midi_pending: Box<midi_events::Buffer>,
+    midi_frame: Box<midi_events::Buffer>,
     clock_ratio: clock_ratio::ClockRatio,
     channel_map: channels::ChannelMap,
     adsr: envelope::Adsr,
@@ -374,6 +377,31 @@ impl RuntimeNode {
                 }
                 self.control[..5].copy_from_slice(&midi.tick());
                 scalar = self.control[0];
+            }
+            "midi_to_control" => {
+                self.control[4] = 0.;
+                for index in 0..self.midi_frame.len {
+                    let event = self.midi_frame.events[index];
+                    if (self.p("message_type") == 0.
+                        || self.p("message_type") == f64::from(event.status >> 4))
+                        && (self.p("number_filter") < 0.
+                            || self.p("number_filter") == f64::from(event.data1))
+                    {
+                        self.control[..5].copy_from_slice(&[
+                            f64::from(event.status >> 4),
+                            f64::from(event.data1),
+                            if event.status >> 4 == 14 {
+                                f64::from(u16::from(event.data1) + (u16::from(event.data2) << 7))
+                            } else if matches!(event.status >> 4, 12 | 13) {
+                                f64::from(event.data1)
+                            } else {
+                                f64::from(event.data2)
+                            },
+                            f64::from((event.status & 15) + 1),
+                            1.,
+                        ]);
+                    }
+                }
             }
             "part_midi" | "midi_input" | "osc_to_midi" => {
                 self.control[..5].copy_from_slice(&self.midi_controls.as_mut().unwrap().tick());
@@ -1095,6 +1123,8 @@ impl Engine {
                 part_id: n.part_id.clone(),
                 io: n.io.clone(),
                 note_inputs: note_inputs::NoteInputs::default(),
+                midi_pending: Box::new(midi_events::Buffer::new()),
+                midi_frame: Box::new(midi_events::Buffer::new()),
                 outgoing_notes: [None; 2],
                 recorder: if n.kind == "record" {
                     let width = graph
@@ -1514,6 +1544,9 @@ impl Engine {
                 }
                 if target.kind == source.kind && target.midi_controls.is_some() {
                     std::mem::swap(&mut target.midi_controls, &mut source.midi_controls);
+                    if target.part_id == source.part_id && target.defaults == source.defaults {
+                        std::mem::swap(&mut target.midi_pending, &mut source.midi_pending);
+                    }
                     if target.part_id != source.part_id
                         || target.io != source.io
                         || target.defaults != source.defaults
@@ -1588,8 +1621,14 @@ impl Engine {
         }
     }
     pub fn part_note(&mut self, part: &str, pitch: u8, velocity: u8) {
+        self.part_staff_note(part, 1, pitch, velocity)
+    }
+    pub fn part_staff_note(&mut self, part: &str, staff: u8, pitch: u8, velocity: u8) {
         for node in &mut self.nodes {
-            if node.kind == "part_midi" && node.part_id.as_deref() == Some(part) {
+            if node.kind == "part_midi"
+                && node.part_id.as_deref() == Some(part)
+                && (node.p("staff") == 0. || node.p("staff") == f64::from(staff))
+            {
                 node.midi_controls.as_mut().unwrap().note(pitch, velocity);
             }
         }
@@ -1606,6 +1645,19 @@ impl Engine {
             .iter()
             .find(|n| n.id == id && n.kind == "part_midi")
             .and_then(|n| n.part_id.as_deref())
+    }
+    pub fn part_source_staff(&self, id: &str) -> Option<u8> {
+        self.nodes
+            .iter()
+            .find(|n| n.id == id && n.kind == "part_midi")
+            .map(|n| n.p("staff") as u8)
+    }
+    pub fn node_midi_message(&mut self, id: &str, message: pr0_core::midi::Message) {
+        if message.valid() {
+            if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
+                node.midi_pending.push(message);
+            }
+        }
     }
     /// Used only during prepared graph installation, never in render.
     pub fn part_sources(&self) -> Vec<(String, String)> {
@@ -1649,6 +1701,28 @@ impl Engine {
                 midi.release();
             }
         }
+    }
+    pub fn part_message(&mut self, part: &str, message: pr0_core::midi::Message) {
+        self.part_staff_message(part, 0, message)
+    }
+    pub fn part_staff_message(&mut self, part: &str, staff: u8, message: pr0_core::midi::Message) {
+        if !message.valid() {
+            return;
+        }
+        for node in &mut self.nodes {
+            if node.kind == "part_midi"
+                && node.part_id.as_deref() == Some(part)
+                && (staff == 0 || node.p("staff") == 0. || node.p("staff") == f64::from(staff))
+            {
+                node.midi_pending.push(message)
+            }
+        }
+    }
+    pub fn take_midi_message(&mut self, id: &str) -> Option<pr0_core::midi::Message> {
+        self.nodes
+            .iter_mut()
+            .find(|n| n.id == id && n.kind == "midi_output")
+            .and_then(|n| n.midi_frame.pop())
     }
     pub fn take_midi_output(&mut self, id: &str) -> [Option<note_inputs::NoteEvent>; 2] {
         self.nodes
@@ -1908,6 +1982,7 @@ impl Engine {
                         receive.audio[ch] += audio[ch];
                     }
                 }
+                pr0_core::Signal::Midi => {}
                 pr0_core::Signal::Spectral => {
                     if rank < best {
                         spectrum_source = Some((source, generation));
@@ -1955,6 +2030,11 @@ impl Engine {
             *out = [0.; MAX_CHANNELS];
             for order_index in 0..self.order.len() {
                 let idx = self.order[order_index];
+                self.nodes[idx].midi_frame.clear();
+                while let Some(event) = self.nodes[idx].midi_pending.pop() {
+                    self.nodes[idx].midi_frame.push(event);
+                }
+                self.nodes[idx].midi_pending.clear();
                 self.nodes[idx].input = [[0.; MAX_CHANNELS]; 8];
                 self.nodes[idx].input_text = None;
                 self.nodes[idx].target_text = None;
@@ -1991,6 +2071,13 @@ impl Engine {
                 }
                 for j in 0..self.nodes[idx].bindings.len() {
                     let b = self.nodes[idx].bindings[j].clone();
+                    if b.signal == pr0_core::Signal::Midi {
+                        for index in 0..self.nodes[b.source].midi_frame.len {
+                            let event = self.nodes[b.source].midi_frame.events[index];
+                            self.nodes[idx].midi_frame.push(event);
+                        }
+                        continue;
+                    }
                     if b.merge
                         .is_some_and(|g| self.nodes[idx].merges[g].winner != j)
                     {
@@ -2293,6 +2380,10 @@ impl Engine {
                     }
                 }
 
+                values.insert(
+                    "_midi_event_dropped".into(),
+                    (n.midi_pending.dropped + n.midi_frame.dropped) as f64,
+                );
                 if matches!(
                     n.kind.as_str(),
                     "part_midi" | "midi_input" | "osc_to_midi" | "piano"
@@ -4150,3 +4241,135 @@ mod trigger_tests {
 
 #[cfg(test)]
 mod routing_tests;
+
+#[cfg(test)]
+mod typed_midi_tests {
+    use super::*;
+    fn graph(nested: bool) -> Graph {
+        let template = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Structured)
+            .graph
+            .nodes[0]
+            .clone();
+        let node = |id: &str, kind: &str, parent: Option<&str>| {
+            let mut n = template.clone();
+            n.id = id.into();
+            n.kind = kind.into();
+            n.label = id.into();
+            n.parent = parent.map(str::to_string);
+            n.parameters.clear();
+            n.part_id = if kind == "part_midi" {
+                Some("p".into())
+            } else {
+                None
+            };
+            n
+        };
+        let edge = |id: &str, source: &str, sp: &str, target: &str, tp: &str| pr0_core::Edge {
+            id: id.into(),
+            source: source.into(),
+            source_port: sp.into(),
+            target: target.into(),
+            target_port: tp.into(),
+        };
+        if nested {
+            Graph {
+                nodes: vec![
+                    node("source", "part_midi", None),
+                    node("group", "subgraph", None),
+                    node("in", "subgraph_input_midi", Some("group")),
+                    node("out", "subgraph_output_midi", Some("group")),
+                    node("sink", "midi_output", None),
+                ],
+                edges: vec![
+                    edge("a", "source", "events", "group", "in"),
+                    edge("b", "in", "out", "out", "in"),
+                    edge("c", "group", "out", "sink", "events"),
+                ],
+            }
+        } else {
+            Graph {
+                nodes: vec![
+                    node("source", "part_midi", None),
+                    node("sink", "midi_output", None),
+                ],
+                edges: vec![edge("a", "source", "events", "sink", "events")],
+            }
+        }
+    }
+    #[test]
+    fn channel_messages_preserve_order_bytes_and_nested_boundaries() {
+        let messages = [
+            (0x91, 60, 100),
+            (0x81, 60, 0),
+            (0xb2, 11, 64),
+            (0xe3, 127, 127),
+            (0xc4, 17, 0),
+            (0xd5, 90, 0),
+            (0xa6, 60, 77),
+        ]
+        .map(|(status, data1, data2)| pr0_core::midi::Message {
+            status,
+            data1,
+            data2,
+        });
+        for nested in [false, true] {
+            let mut engine = Engine::prepare(graph(nested), 48000.).unwrap();
+            engine.part_message("other", messages[0]);
+            for message in messages {
+                engine.part_message("p", message)
+            }
+            engine.render(&[], &mut [[0.; 8]]);
+            let mut received = Vec::new();
+            while let Some(message) = engine.take_midi_message("sink") {
+                received.push(message)
+            }
+            assert_eq!(received, messages);
+            engine.render(&[], &mut [[0.; 8]]);
+            assert!(engine.take_midi_message("sink").is_none());
+        }
+    }
+    #[test]
+    fn overflow_is_bounded_and_sends_all_notes_off() {
+        let mut engine = Engine::prepare(graph(false), 48000.).unwrap();
+        for _ in 0..257 {
+            engine.part_message(
+                "p",
+                pr0_core::midi::Message {
+                    status: 0x90,
+                    data1: 60,
+                    data2: 90,
+                },
+            )
+        }
+        engine.render(&[], &mut [[0.; 8]]);
+        for channel in 0..16 {
+            assert_eq!(
+                engine.take_midi_message("sink"),
+                Some(pr0_core::midi::Message {
+                    status: 0xb0 | channel,
+                    data1: 123,
+                    data2: 0
+                })
+            )
+        }
+        assert!(engine.take_midi_message("sink").is_none());
+        assert_eq!(engine.telemetry()["source"]["_midi_event_dropped"], 257.);
+    }
+    #[test]
+    fn staff_filter_does_not_leak_another_staff() {
+        let mut g = graph(false);
+        g.nodes[0].parameters.insert("staff".into(), 2.);
+        let mut engine = Engine::prepare(g, 48000.).unwrap();
+        let message = pr0_core::midi::Message {
+            status: 0x90,
+            data1: 60,
+            data2: 90,
+        };
+        engine.part_staff_message("p", 1, message);
+        engine.render(&[], &mut [[0.; 8]]);
+        assert!(engine.take_midi_message("sink").is_none());
+        engine.part_staff_message("p", 2, message);
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(engine.take_midi_message("sink"), Some(message));
+    }
+}

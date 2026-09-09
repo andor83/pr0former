@@ -156,3 +156,6 @@ body{position:fixed;inset:0}
   /* Sixteen-pixel edit text prevents iOS from zooming the page on focus. */
   .parameter-modal input:not([type=checkbox]):not([type=radio]):not([type=range]),.parameter-modal select,.parameter-modal textarea,.auth-card input{font-size:16px}
 }
+
+.score-content{display:flex;flex-direction:column;overflow:hidden!important;padding:12px!important}.score-content>.score-workspace{flex:1;min-height:0}.score-content>.score-actions{flex-shrink:0}
+.signal-edge.midi{stroke:var(--violet);stroke-dasharray:3 3}.vue-flow__handle.midi{background:var(--violet);border-color:var(--violet)}

@@ -12,7 +12,18 @@ pub struct Event {
     pub pitch: u8,
     pub velocity: u8,
 }
+#[derive(Clone, PartialEq)]
+struct NoteRoute {
+    node: Option<String>,
+    midi: Option<String>,
+    channel: u8,
+    staff: u8,
+}
 pub struct Lane {
+    routes: Vec<NoteRoute>,
+    automation: Vec<crate::score_automation::Automation>,
+    pub score_spans: Vec<pr0_core::score::Span>,
+    pub looping: bool,
     pub id: String,
     owner: u64,
     active: Vec<Option<(u8, u8)>>,
@@ -33,6 +44,7 @@ pub struct Lane {
 }
 #[derive(serde::Serialize)]
 pub struct PartPlayback {
+    position_end: Option<f64>,
     id: String,
     playing: bool,
     start: f64,
@@ -59,9 +71,127 @@ pub enum External {
 impl Sequencer {
     pub fn new(p: &Project) -> Self {
         let autoplay = matches!(p.mode, pr0_core::Mode::Structured);
+        let mut prepared = p.clone();
+        for part in &mut prepared.parts {
+            let original = part.notes.clone();
+            let by_id: std::collections::BTreeMap<_, _> =
+                original.iter().map(|n| (n.id.as_str(), n)).collect();
+            let mut grace_totals = std::collections::BTreeMap::<&str, f64>::new();
+            let mut grace_offsets = std::collections::BTreeMap::<&str, f64>::new();
+            for g in &original {
+                if let Some(target) = g.notation.as_ref().and_then(|v| v.grace_to.as_ref()) {
+                    let total = grace_totals.entry(target.as_str()).or_default();
+                    grace_offsets.insert(g.id.as_str(), *total);
+                    *total += g.duration.min(0.25);
+                }
+            }
+
+            let tied: std::collections::BTreeSet<_> = original
+                .iter()
+                .filter_map(|n| n.notation.as_ref().and_then(|v| v.tie_to.as_ref()))
+                .collect();
+            part.notes = original
+                .iter()
+                .filter(|n| !tied.contains(&n.id))
+                .map(|n| {
+                    let mut note = n.clone();
+                    let mut current = n;
+                    for _ in 0..original.len() {
+                        let Some(target) = current
+                            .notation
+                            .as_ref()
+                            .and_then(|v| v.tie_to.as_ref())
+                            .and_then(|id| by_id.get(id.as_str()).copied())
+                        else {
+                            break;
+                        };
+                        note.duration += target.duration;
+                        current = target;
+                    }
+                    if let Some(d) = &part.dynamics {
+                        note.velocity = d.velocity(note.beat, note.velocity);
+                    }
+                    if let Some(v) = &n.notation {
+                        match v.articulation.as_deref() {
+                            Some("staccato") => note.duration *= 0.5,
+                            Some("marcato") => {
+                                note.duration *= 0.75;
+                                note.velocity = (note.velocity as f64 * 1.3).min(127.) as u8
+                            }
+                            Some("accent") => {
+                                note.velocity = (note.velocity as f64 * 1.2).min(127.) as u8
+                            }
+                            _ => {}
+                        }
+                        if let Some(target) = &v.grace_to {
+                            let total = grace_totals.get(target.as_str()).copied().unwrap_or(0.25);
+                            let principal =
+                                by_id.get(target.as_str()).map(|n| n.duration).unwrap_or(1.);
+                            let scale = (principal * 0.5 / total).min(1.);
+                            note.beat +=
+                                grace_offsets.get(n.id.as_str()).copied().unwrap_or(0.) * scale;
+                            note.duration = note.duration.min(0.25) * scale;
+                        }
+                        if v.slur_to.is_some() {
+                            note.duration *= 1.05;
+                        }
+                    }
+                    let grace = grace_totals
+                        .get(n.id.as_str())
+                        .copied()
+                        .unwrap_or(0.)
+                        .min(note.duration * 0.5);
+                    note.beat += grace;
+                    note.duration -= grace;
+                    note
+                })
+                .collect();
+        }
+        let timeline = p.score.as_ref();
+        let spans = timeline.map(|s| s.spans()).unwrap_or_default();
+        let mut part_spans = BTreeMap::new();
+        if timeline.is_some() {
+            for part in &mut prepared.parts {
+                let mut elapsed = 0.;
+                let local_spans: Vec<_> = spans
+                    .iter()
+                    .filter(|s| autoplay || s.start < part.loop_beats)
+                    .map(|s| {
+                        let end = if autoplay {
+                            s.end
+                        } else {
+                            s.end.min(part.loop_beats)
+                        };
+                        let result = pr0_core::score::Span {
+                            start: s.start,
+                            end,
+                            elapsed,
+                        };
+                        elapsed += end - s.start;
+                        result
+                    })
+                    .collect();
+                part.notes = local_spans
+                    .iter()
+                    .flat_map(|span| {
+                        part.notes
+                            .iter()
+                            .filter(move |n| n.beat >= span.start && n.beat < span.end)
+                            .map(move |n| {
+                                let mut next = n.clone();
+                                next.beat = span.elapsed + n.beat - span.start;
+                                next.duration = n.duration.min(span.end - n.beat);
+                                next
+                            })
+                    })
+                    .collect();
+                part.loop_beats = elapsed.max(0.25);
+                part_spans.insert(part.id.clone(), local_spans);
+            }
+        }
         Self {
             autoplay,
-            lanes: p
+            lanes: prepared
                 .parts
                 .iter()
                 .enumerate()
@@ -88,6 +218,47 @@ impl Sequencer {
                         a.beat.total_cmp(&b.beat).then(a.velocity.cmp(&b.velocity))
                     });
                     Lane {
+                        routes: p
+                            .notes
+                            .iter()
+                            .map(|n| {
+                                let staff = n
+                                    .notation
+                                    .as_ref()
+                                    .and_then(|v| p.staves.iter().position(|s| s.id == v.staff));
+                                let s = staff.and_then(|i| p.staves.get(i));
+                                NoteRoute {
+                                    node: s
+                                        .and_then(|s| s.instrument_node.clone())
+                                        .or_else(|| p.instrument_node.clone()),
+                                    midi: s
+                                        .and_then(|s| s.midi_port.clone())
+                                        .or_else(|| p.midi_port.clone()),
+                                    channel: s
+                                        .and_then(|s| s.midi_channel)
+                                        .unwrap_or(p.midi_channel),
+                                    staff: staff.map(|i| i as u8 + 1).unwrap_or(1),
+                                }
+                            })
+                            .collect(),
+                        automation: p
+                            .automation
+                            .iter()
+                            .cloned()
+                            .map(crate::score_automation::Automation::new)
+                            .chain(
+                                p.dynamics
+                                    .as_ref()
+                                    .filter(|d| d.mode != pr0_core::score::DynamicsMode::Velocity)
+                                    .map(|d| {
+                                        crate::score_automation::Automation::generated(
+                                            d.lane(p.midi_channel),
+                                        )
+                                    }),
+                            )
+                            .collect(),
+                        score_spans: part_spans.get(&p.id).cloned().unwrap_or_default(),
+                        looping: !autoplay || timeline.is_none_or(|s| s.loop_score),
                         id: p.id.clone(),
                         owner: owner as u64 + 1,
                         active: vec![None; p.notes.len()],
@@ -136,13 +307,23 @@ impl Sequencer {
                     && old.events == lane.events
                     && old.ends == lane.ends
                     && old.length == lane.length
+                    && old.score_spans == lane.score_spans
+                    && old.looping == lane.looping
+                    && old.routes == lane.routes
+                    && old
+                        .automation
+                        .iter()
+                        .map(|a| &a.lane)
+                        .eq(lane.automation.iter().map(|a| &a.lane))
                     && old.midi == lane.midi
                     && old.midi_channel == lane.midi_channel
                     && old.osc == lane.osc
                     && old.address == lane.address
             }) {
                 let old = self.lanes.remove(index);
-                if let Some(node) = &old.node {
+                let nodes: std::collections::BTreeSet<_> =
+                    old.routes.iter().filter_map(|r| r.node.as_ref()).collect();
+                for node in nodes {
                     prepared.carry_note_voices(previous, node, old.owner);
                 }
                 *lane = old;
@@ -160,12 +341,28 @@ impl Sequencer {
     /// Seed new/reassigned control nodes with the part's currently held notes.
     pub fn seed_part_nodes(&self, previous: &pr0_dsp::Engine, prepared: &mut pr0_dsp::Engine) {
         for (node, part) in prepared.part_sources() {
-            if previous.part_source(&node) == Some(part.as_str()) {
+            let staff = prepared.part_source_staff(&node).unwrap_or(0);
+            if previous.part_source(&node) == Some(part.as_str())
+                && previous.part_source_staff(&node) == Some(staff)
+            {
                 continue;
             }
             if let Some(lane) = self.lanes.iter().find(|lane| lane.id == part) {
-                for (pitch, velocity) in lane.active.iter().flatten() {
-                    prepared.node_midi_note(&node, *pitch, *velocity);
+                for (index, active) in lane.active.iter().enumerate() {
+                    if let Some((pitch, velocity)) = active {
+                        let route = &lane.routes[index];
+                        if staff == 0 || staff == route.staff {
+                            prepared.node_midi_note(&node, *pitch, *velocity);
+                            prepared.node_midi_message(
+                                &node,
+                                pr0_core::midi::Message {
+                                    status: 0x90 | (route.channel - 1),
+                                    data1: *pitch,
+                                    data2: *velocity,
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -211,11 +408,32 @@ impl Sequencer {
         self.lanes
             .iter()
             .map(|l| PartPlayback {
+                position_end: {
+                    let elapsed = if l.looping {
+                        (beat - l.start).max(0.).rem_euclid(l.length)
+                    } else {
+                        (beat - l.start).max(0.).min(l.length)
+                    };
+                    l.score_spans
+                        .iter()
+                        .find(|s| elapsed < s.elapsed + s.end - s.start)
+                        .map(|s| s.end)
+                        .or_else(|| l.score_spans.last().map(|s| s.end))
+                },
                 id: l.id.clone(),
                 playing: l.playing,
                 start: l.start,
                 position: if l.playing {
-                    (beat - l.start).max(0.).rem_euclid(l.length)
+                    let elapsed = if l.looping {
+                        (beat - l.start).max(0.).rem_euclid(l.length)
+                    } else {
+                        (beat - l.start).max(0.).min(l.length)
+                    };
+                    l.score_spans
+                        .iter()
+                        .find(|s| elapsed < s.elapsed + s.end - s.start)
+                        .map(|s| s.start + elapsed - s.elapsed)
+                        .unwrap_or_else(|| l.score_spans.last().map(|s| s.end).unwrap_or(elapsed))
                 } else {
                     0.
                 },
@@ -224,8 +442,20 @@ impl Sequencer {
             .collect()
     }
     pub fn tick(&mut self, engine: &mut pr0_dsp::Engine, io: &SyncSender<External>) {
-        let beat = engine.clock.beat;
+        let mut beat = engine.clock.beat;
         let running = engine.clock.running;
+        if running
+            && !self.last_running
+            && self.autoplay
+            && self
+                .lanes
+                .first()
+                .is_some_and(|l| !l.looping && beat >= l.length)
+        {
+            engine.clock.beat = 0.;
+            self.reset(engine, io);
+            beat = 0.;
+        }
         if self.last_running && !running {
             self.pause(engine, io);
         }
@@ -244,11 +474,45 @@ impl Sequencer {
         if !running {
             return;
         }
+        if self.autoplay
+            && self
+                .lanes
+                .first()
+                .is_some_and(|l| !l.looping && beat >= l.length)
+        {
+            for lane in &mut self.lanes {
+                let position = lane
+                    .score_spans
+                    .last()
+                    .map(|s| s.end)
+                    .unwrap_or(lane.length);
+                lane.automation_tick(position, engine);
+                lane.release(engine, io);
+                lane.suspended.fill(None);
+            }
+            engine.clock.running = false;
+            self.last_running = false;
+            return;
+        }
         for lane in &mut self.lanes {
             if let Some((boundary, playing)) = lane.pending {
                 if beat + 1e-9 >= boundary {
                     lane.apply(playing, boundary, engine, io);
                 }
+            }
+            if lane.playing && beat >= lane.start {
+                let elapsed = if lane.looping {
+                    (beat - lane.start).rem_euclid(lane.length)
+                } else {
+                    (beat - lane.start).min(lane.length)
+                };
+                let position = lane
+                    .score_spans
+                    .iter()
+                    .find(|s| elapsed < s.elapsed + s.end - s.start)
+                    .map(|s| s.start + elapsed - s.elapsed)
+                    .unwrap_or(elapsed);
+                lane.automation_tick(position, engine);
             }
             if !lane.playing || beat < lane.start || lane.events.is_empty() {
                 continue;
@@ -259,6 +523,9 @@ impl Sequencer {
             // A bounded number of simultaneous events per sample prevents runaway patches.
             for _ in 0..256 {
                 if lane.next >= lane.events.len() {
+                    if !lane.looping {
+                        break;
+                    }
                     lane.next = 0;
                     lane.cycle += 1;
                 }
@@ -273,19 +540,29 @@ impl Sequencer {
                     lane.next += 1;
                     continue;
                 }
-                if let Some(node) = &lane.node {
+                let route = &lane.routes[e.note_id as usize];
+                if let Some(node) = &route.node {
                     engine.note_scoped(node, lane.owner, e.note_id, e.pitch, e.velocity);
                 }
-                engine.part_note(&lane.id, e.pitch, e.velocity);
+                engine.part_staff_note(&lane.id, route.staff, e.pitch, e.velocity);
+                engine.part_staff_message(
+                    &lane.id,
+                    route.staff,
+                    pr0_core::midi::Message {
+                        status: (if e.velocity == 0 { 0x80 } else { 0x90 }) | (route.channel - 1),
+                        data1: e.pitch,
+                        data2: e.velocity,
+                    },
+                );
                 lane.active[e.note_id as usize] = if e.velocity > 0 {
                     Some((e.pitch, e.velocity))
                 } else {
                     None
                 };
-                if lane.midi.is_some() || lane.osc.is_some() {
+                if route.midi.is_some() || lane.osc.is_some() {
                     let _ = io.try_send(External::Note {
-                        midi: lane.midi.clone(),
-                        midi_channel: lane.midi_channel,
+                        midi: route.midi.clone(),
+                        midi_channel: route.channel,
                         osc: lane.osc.clone(),
                         address: lane.address.clone(),
                         pitch: e.pitch,
@@ -298,6 +575,41 @@ impl Sequencer {
     }
 }
 impl Lane {
+    fn automation_tick(&mut self, position: f64, engine: &mut pr0_dsp::Engine) {
+        for index in 0..self.automation.len() {
+            let a = &self.automation[index];
+            let overridden = self.automation.iter().any(|other| {
+                other.generated != a.generated
+                    && other.lane.message == a.lane.message
+                    && other.lane.channel == a.lane.channel
+                    && other.lane.number == a.lane.number
+                    && if a.generated {
+                        other
+                            .lane
+                            .events
+                            .iter()
+                            .any(|e| position >= e.beat && position <= e.beat + e.duration)
+                    } else {
+                        !a.lane
+                            .events
+                            .iter()
+                            .any(|e| position >= e.beat && position <= e.beat + e.duration)
+                    }
+            });
+            let automation = &mut self.automation[index];
+            if overridden {
+                automation.reset();
+                continue;
+            }
+            for message in automation
+                .tick(position, engine.clock.sample, engine.clock.sample_rate)
+                .into_iter()
+                .flatten()
+            {
+                engine.part_message(&self.id, message);
+            }
+        }
+    }
     fn apply(
         &mut self,
         playing: bool,
@@ -321,15 +633,25 @@ impl Lane {
                 if end <= beat + 1e-9 {
                     continue;
                 }
-                if let Some(node) = &self.node {
+                let route = &self.routes[note_id];
+                if let Some(node) = &route.node {
                     engine.note_scoped(node, self.owner, note_id as u32, pitch, velocity);
                 }
-                engine.part_note(&self.id, pitch, velocity);
+                engine.part_staff_note(&self.id, route.staff, pitch, velocity);
+                engine.part_staff_message(
+                    &self.id,
+                    route.staff,
+                    pr0_core::midi::Message {
+                        status: 0x90 | (route.channel - 1),
+                        data1: pitch,
+                        data2: velocity,
+                    },
+                );
                 self.active[note_id] = Some((pitch, velocity));
-                if self.midi.is_some() || self.osc.is_some() {
+                if route.midi.is_some() || self.osc.is_some() {
                     let _ = io.try_send(External::Note {
-                        midi: self.midi.clone(),
-                        midi_channel: self.midi_channel,
+                        midi: route.midi.clone(),
+                        midi_channel: route.channel,
                         osc: self.osc.clone(),
                         address: self.address.clone(),
                         pitch,
@@ -342,15 +664,30 @@ impl Lane {
 
     fn release(&mut self, engine: &mut pr0_dsp::Engine, io: &SyncSender<External>) {
         engine.part_notes_off(&self.id);
+        for automation in &mut self.automation {
+            if let Some(off) = automation.reset() {
+                engine.part_message(&self.id, off);
+            }
+        }
         for (note_id, active) in self.active.iter_mut().enumerate() {
             if let Some((pitch, _)) = active.take() {
-                if let Some(node) = &self.node {
+                let route = &self.routes[note_id];
+                engine.part_staff_message(
+                    &self.id,
+                    route.staff,
+                    pr0_core::midi::Message {
+                        status: 0x80 | (route.channel - 1),
+                        data1: pitch,
+                        data2: 0,
+                    },
+                );
+                if let Some(node) = &route.node {
                     engine.note_scoped(node, self.owner, note_id as u32, pitch, 0);
                 }
-                if self.midi.is_some() || self.osc.is_some() {
+                if route.midi.is_some() || self.osc.is_some() {
                     let _ = io.try_send(External::Note {
-                        midi: self.midi.clone(),
-                        midi_channel: self.midi_channel,
+                        midi: route.midi.clone(),
+                        midi_channel: route.channel,
                         osc: self.osc.clone(),
                         address: self.address.clone(),
                         pitch,
@@ -867,5 +1204,96 @@ mod tests {
             }
         ));
         assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod score_tests {
+    use super::*;
+    use pr0_core::score::*;
+    #[test]
+    fn shared_repeat_positions_stop_and_restart_follow_engine_beats() {
+        let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Structured);
+        p.score = Some(Timeline {
+            version: 1,
+            length: 8.,
+            loop_score: false,
+            meters: vec![MeterChange {
+                beat: 4.,
+                beats: 3,
+                unit: 4,
+            }],
+            keys: vec![],
+            repeats: vec![Repeat {
+                start: 0.,
+                end: 4.,
+                times: 2,
+                first_ending: None,
+            }],
+            navigation: None,
+        });
+        let mut seq = Sequencer::new(&p);
+        assert_eq!(seq.lanes[0].length, 12.);
+        assert_eq!(seq.playback(4.5)[0].position, 0.5);
+        assert_eq!(seq.playback(8.5)[0].position, 4.5);
+        let mut e = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let (tx, _) = sync_channel(256);
+        e.clock.running = true;
+        seq.tick(&mut e, &tx);
+        e.clock.beat = 12.;
+        seq.tick(&mut e, &tx);
+        assert!(!e.clock.running);
+        e.clock.running = true;
+        seq.tick(&mut e, &tx);
+        assert_eq!(e.clock.beat, 0.);
+        assert!(seq.lanes[0].active[0].is_some());
+    }
+    #[test]
+    fn independent_parts_keep_launch_state_and_expand_their_local_ranges() {
+        let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
+        p.parts[0].loop_beats = 4.;
+        p.score = Some(Timeline {
+            version: 1,
+            length: 8.,
+            loop_score: false,
+            meters: vec![],
+            keys: vec![],
+            repeats: vec![Repeat {
+                start: 0.,
+                end: 4.,
+                times: 2,
+                first_ending: None,
+            }],
+            navigation: None,
+        });
+        let seq = Sequencer::new(&p);
+        assert!(!seq.lanes[0].playing);
+        assert!(seq.lanes[0].looping);
+        assert_eq!(seq.lanes[0].length, 8.);
+    }
+    #[test]
+    fn dynamics_change_attacks_without_changing_authored_notes() {
+        let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Structured);
+        p.parts[0].dynamics = Some(Dynamics {
+            mode: DynamicsMode::Velocity,
+            controller: 11,
+            events: vec![AutomationEvent {
+                id: "d".into(),
+                beat: 0.,
+                duration: 4.,
+                start: 20.,
+                end: 100.,
+                curve: Curve::Linear,
+            }],
+        });
+        let seq = Sequencer::new(&p);
+        let attacks: Vec<_> = seq.lanes[0]
+            .events
+            .iter()
+            .filter(|e| e.velocity > 0)
+            .map(|e| e.velocity)
+            .collect();
+        assert_eq!(&attacks[..5], &[20, 40, 60, 80, 100]);
+        assert_eq!(p.parts[0].notes[0].velocity, 90);
     }
 }

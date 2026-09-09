@@ -1,7 +1,8 @@
+export class ApiError extends Error { constructor(message:string,readonly status:number){super(message);this.name="ApiError"} }
 export async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await fetch(`/api${path}`, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Pr0former': '1' }, body: body === undefined ? undefined : JSON.stringify(body) })
   const result = await response.json()
-  if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`)
+  if (!response.ok) throw new ApiError(result.error || `Request failed (${response.status})`,response.status)
   return result
 }
 export function formatValue(value: number | undefined, unit = ''): string {

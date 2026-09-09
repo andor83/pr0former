@@ -476,7 +476,7 @@ fn run(
                                     apply_transport(
                                         action,
                                         0,
-                                        project.as_ref().map_or(4, |p| p.beat_unit),
+                                        project.as_ref().map_or(4, |p| p.initial_meter().1),
                                         e,
                                         &mut sequencer,
                                         &mut count_in,
@@ -558,7 +558,7 @@ fn run(
                         apply_transport(
                             &action,
                             count_in_beats,
-                            project.as_ref().map_or(4, |p| p.beat_unit),
+                            project.as_ref().map_or(4, |p| p.initial_meter().1),
                             e,
                             &mut sequencer,
                             &mut count_in,
@@ -710,6 +710,11 @@ fn run(
                 }
                 e.render(&[], std::slice::from_mut(frame));
                 for (node, route, cc) in &node_routes {
+                    while let Some(message) = e.take_midi_message(node) {
+                        if enabled {
+                            node_outputs.message(node, route, message)
+                        }
+                    }
                     for event in e.take_midi_output(node).into_iter().flatten() {
                         if enabled {
                             node_outputs.note(node, route, event, *cc);

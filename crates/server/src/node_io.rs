@@ -40,6 +40,11 @@ struct OutputEvent {
     cc: bool,
 }
 enum Command {
+    Midi {
+        node: String,
+        route: Route,
+        message: pr0_core::midi::Message,
+    },
     Event(OutputEvent),
     Reset(Vec<String>),
 }
@@ -68,7 +73,41 @@ impl Outputs {
                     release(&mut held, &[], &mut midi, &osc, &worker_error);
                     continue;
                 }
+                let command = match command {
+                    Command::Midi {
+                        node,
+                        route,
+                        message,
+                    } => {
+                        let kind = message.status >> 4;
+                        if kind == 11 && matches!(message.data1, 120 | 123) {
+                            release(&mut held, &[node.clone()], &mut midi, &osc, &worker_error);
+                        }
+                        let route = match route {
+                            Route::Midi(port, _) => Route::Midi(port, (message.status & 15) + 1),
+                            other => other,
+                        };
+                        if matches!(kind, 8 | 9) {
+                            Command::Event(OutputEvent {
+                                node,
+                                route,
+                                note: NoteEvent {
+                                    pitch: message.data1,
+                                    velocity: if kind == 8 { 0 } else { message.data2 },
+                                },
+                                cc: false,
+                            })
+                        } else {
+                            if let Err(e) = send_message(&route, message, &mut midi) {
+                                *worker_error.lock().unwrap() = Some(e)
+                            };
+                            continue;
+                        }
+                    }
+                    other => other,
+                };
                 match command {
+                    Command::Midi { .. } => unreachable!(),
                     Command::Reset(nodes) => {
                         release(&mut held, &nodes, &mut midi, &osc, &worker_error)
                     }
@@ -128,6 +167,20 @@ impl Outputs {
             self.panic.store(true, Ordering::Release);
         }
     }
+    pub fn message(&self, node: &str, route: &Route, message: pr0_core::midi::Message) {
+        if self
+            .tx
+            .try_send(Command::Midi {
+                node: node.into(),
+                route: route.clone(),
+                message,
+            })
+            .is_err()
+        {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.panic.store(true, Ordering::Release);
+        }
+    }
     pub fn reset(&self, nodes: Vec<String>) {
         if self.tx.try_send(Command::Reset(nodes)).is_err() {
             self.panic.store(true, Ordering::Release);
@@ -168,6 +221,37 @@ fn release(
         }
         held.remove(&key);
     }
+}
+fn send_message(
+    route: &Route,
+    message: pr0_core::midi::Message,
+    midi: &mut BTreeMap<String, midir::MidiOutputConnection>,
+) -> Result<(), String> {
+    let Route::Midi(port, _) = route else {
+        return Err("Typed MIDI requires a MIDI output route".into());
+    };
+    if !midi.contains_key(port) {
+        if std::env::var_os("PR0_DISABLE_NATIVE_DEVICES").is_some() {
+            return Err("Native MIDI disabled for this server".into());
+        }
+        let output = midir::MidiOutput::new("pr0former score").map_err(|e| e.to_string())?;
+        let target = output
+            .ports()
+            .into_iter()
+            .find(|p| output.port_name(p).ok().as_ref() == Some(port))
+            .ok_or_else(|| format!("MIDI output unavailable: {port}"))?;
+        midi.insert(
+            port.clone(),
+            output
+                .connect(&target, "pr0former score output")
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    let (bytes, len) = message.bytes();
+    midi.get_mut(port)
+        .unwrap()
+        .send(&bytes[..len])
+        .map_err(|e| e.to_string())
 }
 fn send(
     route: &Route,

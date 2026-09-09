@@ -125,7 +125,8 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
     crate::settings::validate_routes(project, &crate::settings::read())?;
     cache_project(project, rate)?;
     let mut engine = pr0_dsp::Engine::prepare(project.graph.clone(), rate as f64)?;
-    engine.set_meter(project.beats_per_bar, project.beat_unit);
+    let (beats, unit) = project.initial_meter();
+    engine.set_meter(beats, unit);
     crate::loops::restore(project, &mut engine)?;
     let mut total = 0;
     for node in &project.graph.nodes {

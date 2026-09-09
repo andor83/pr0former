@@ -13,6 +13,7 @@ mod resources;
 mod revisions;
 mod sample_library;
 mod samples;
+mod score_automation;
 mod settings;
 mod subgraphs;
 mod tls;
@@ -472,6 +473,27 @@ fn validate_live_update(previous: &Project, next: &Project) -> Result<(), String
         // Deleting an instrument detaches its score route; other score edits
         // still require deactivation in structured mode.
         for part in &mut graph_edit.parts {
+            for staff in &mut part.staves {
+                if staff.instrument_node.as_ref().is_some_and(|id| {
+                    previous.graph.nodes.iter().any(|n| &n.id == id)
+                        && !next.graph.nodes.iter().any(|n| &n.id == id)
+                }) {
+                    staff.instrument_node = None;
+                }
+                if let Some(restored) = next
+                    .parts
+                    .iter()
+                    .find(|p| p.id == part.id)
+                    .and_then(|p| p.staves.iter().find(|s| s.id == staff.id))
+                {
+                    if restored.instrument_node.as_ref().is_some_and(|id| {
+                        !previous.graph.nodes.iter().any(|n| &n.id == id)
+                            && next.graph.nodes.iter().any(|n| &n.id == id)
+                    }) {
+                        staff.instrument_node = restored.instrument_node.clone();
+                    }
+                }
+            }
             if part.instrument_node.as_ref().is_some_and(|id| {
                 previous.graph.nodes.iter().any(|n| &n.id == id)
                     && !next.graph.nodes.iter().any(|n| &n.id == id)
