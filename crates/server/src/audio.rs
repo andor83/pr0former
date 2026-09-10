@@ -54,6 +54,8 @@ pub enum Command {
     },
     Unload,
     Show(bool),
+    /// Click track mixed into browser monitors while transport runs.
+    Metronome(bool),
     Parameter {
         node: String,
         key: String,
@@ -151,6 +153,8 @@ fn run(
     let mut seq = 0_u64;
     let mut next_tempo: Option<(f64, f64)> = None;
     let mut count_in: Option<pr0_dsp::count_in::CountIn> = None;
+    let mut metronome = false;
+    let mut metro = pr0_dsp::count_in::Metronome::new();
     let mut device_error = String::new();
     let mut browser: std::collections::BTreeMap<String, std::collections::VecDeque<[f32; 2]>> =
         std::collections::BTreeMap::new();
@@ -647,6 +651,7 @@ fn run(
                         );
                     }
                 }
+                Command::Metronome(value) => metronome = value,
                 Command::Tempo(bpm) => {
                     if let Some(e) = engine.as_mut() {
                         if e.clock.running {
@@ -746,7 +751,20 @@ fn run(
                         next_tempo = None;
                     }
                 }
-                let click = advance_count_in(&mut count_in, e);
+                let count_click = advance_count_in(&mut count_in, e);
+                let metro_click = if metronome {
+                    let (beats, unit) = project
+                        .as_ref()
+                        .map(|p| (p.beats_per_bar as u8, p.beat_unit as u8))
+                        .unwrap_or((4, 4));
+                    metro.next(&e.clock, beats, unit)
+                } else {
+                    None
+                };
+                let click = match (count_click, metro_click) {
+                    (None, None) => None,
+                    (a, b) => Some(a.unwrap_or(0.) + b.unwrap_or(0.)),
+                };
                 if let Some(seq) = &mut sequencer {
                     seq.tick(e, &io);
                 }
@@ -890,7 +908,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":record_store.error().or_else(|| loop_store.error()).unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"route_targets":e.route_targets(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"metronome":metronome,"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":record_store.error().or_else(|| loop_store.error()).unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"route_targets":e.route_targets(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
 ));
                 }
             }

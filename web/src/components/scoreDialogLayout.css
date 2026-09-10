@@ -1,0 +1,309 @@
+/* Shared layout for the score dialogs: summary strip, tab rail, sections, steppers. */
+.sd-dialog {
+  font-size: 12px;
+  color: #111;
+}
+.sd-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #d9e0e1;
+}
+.sd-strip strong {
+  font-size: 15px;
+  min-width: 120px;
+}
+.sd-strip label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sd-strip input[type='number'] {
+  width: 76px;
+}
+.sd-strip small {
+  color: #526267;
+  margin-left: auto;
+}
+.sd-layout {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  min-height: 260px;
+}
+.sd-nav {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #d9e0e1;
+  background: #f4f7f7;
+}
+.sd-nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #111;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+}
+.sd-nav button.active {
+  background: #fff;
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 #087f8c;
+}
+.sd-nav button:disabled {
+  opacity: 0.4;
+}
+.sd-nav .sd-nav-action {
+  margin-top: auto;
+  color: #087f8c;
+  border-top: 1px solid #d9e0e1;
+}
+.sd-symbol {
+  display: inline-flex;
+  justify-content: center;
+  width: 28px;
+  font-size: 22px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.sd-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  max-height: 60vh;
+  overflow: auto;
+}
+.sd-section h3 {
+  font-size: 13px;
+  margin: 0;
+}
+.sd-note {
+  color: #526267;
+  line-height: 1.5;
+  margin: 0;
+}
+.sd-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px 16px;
+}
+.sd-fields label,
+.sd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.sd-fields input:not([type='checkbox']),
+.sd-fields select {
+  width: 100%;
+}
+.sd-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sd-stepper {
+  display: grid;
+  grid-template-columns: 130px 40px minmax(48px, 90px) 40px;
+  align-items: center;
+  gap: 4px;
+}
+.sd-stepper button,
+.sd-quick button,
+.sd-keys button,
+.sd-footer button,
+.sd-actions button {
+  min-height: 40px;
+  border: 1px solid #cbd5d7;
+  border-radius: 4px;
+  background: #fff;
+  color: #111;
+  cursor: pointer;
+  font-size: 15px;
+}
+.sd-stepper output {
+  text-align: center;
+  font-size: 18px;
+  font-weight: 600;
+}
+.sd-stepper input,
+.sd-stepper select {
+  width: 100%;
+  text-align: center;
+  font-size: 16px;
+  font-weight: 600;
+  padding: 4px;
+}
+.sd-quick,
+.sd-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sd-quick button,
+.sd-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 13px;
+}
+.sd-quick button[aria-pressed='true'],
+.sd-quick button[aria-checked='true'],
+.sd-keys button[aria-checked='true'] {
+  background: #e4f3f2;
+  border-color: #087f8c;
+  color: #075c65;
+}
+.sd-keys {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(52px, 1fr));
+  gap: 6px;
+}
+.sd-keys button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 4px;
+  line-height: 1.2;
+}
+.sd-keys strong {
+  font-size: 15px;
+}
+.sd-keys small {
+  font-size: 11px;
+  color: #526267;
+}
+.sd-row,
+.sd-column {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  align-items: end;
+}
+.sd-column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.sd-row label,
+.sd-column label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sd-row input[type='number'] {
+  width: 76px;
+}
+.sd-dialog legend {
+  font-weight: 600;
+  padding-bottom: 6px;
+}
+.sd-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sd-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid #e2e6e6;
+  border-radius: 4px;
+}
+.sd-list li span {
+  flex: 1;
+}
+.sd-list button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #cbd5d7;
+  border-radius: 4px;
+  background: #fff;
+  color: #9c2d16;
+  cursor: pointer;
+  font-size: 12px;
+}
+.sd-meter-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 70px;
+  font-family: serif;
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 0.95;
+  border-top: 1px solid #111;
+  border-bottom: 1px solid #111;
+  padding: 4px 0;
+}
+.sd-meter-editor {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.sd-steppers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sd-danger {
+  color: #9c2d16 !important;
+  align-self: flex-start;
+}
+.sd-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid #d9e0e1;
+}
+.sd-primary {
+  background: #087f8c !important;
+  border-color: #087f8c !important;
+  color: #fff !important;
+  padding: 0 22px;
+}
+@media (max-width: 700px) {
+  .sd-layout {
+    grid-template-columns: 1fr;
+  }
+  .sd-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: 0;
+    border-bottom: 1px solid #d9e0e1;
+  }
+  .sd-nav .sd-nav-action {
+    margin-top: 0;
+    border-top: 0;
+  }
+  .sd-keys {
+    grid-template-columns: repeat(5, minmax(52px, 1fr));
+  }
+}
+@media (pointer: coarse) {
+  .sd-nav button,
+  .sd-stepper button,
+  .sd-quick button,
+  .sd-actions button {
+    min-height: 44px;
+  }
+}

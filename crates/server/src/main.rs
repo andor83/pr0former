@@ -886,6 +886,8 @@ struct Transport {
     #[serde(default)]
     count_in_beats: u8,
     bpm: Option<f64>,
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 async fn transport(
     State(app): State<App>,
@@ -949,7 +951,8 @@ async fn transport(
         *app.active.lock().unwrap() = None;
         let _ = app.events.send(engine_status(&app));
     } else {
-        if (c.action != "tempo" && app.active.lock().unwrap().as_deref() != Some(&id))
+        if (!matches!(c.action.as_str(), "tempo" | "metronome")
+            && app.active.lock().unwrap().as_deref() != Some(&id))
             || app.graph.lock().unwrap().as_deref() != Some(&id)
         {
             return Err(bad("Enable this project’s audio engine first"));
@@ -962,6 +965,9 @@ async fn transport(
                     count_in_beats: c.count_in_beats,
                 },
             )?,
+            "metronome" => {
+                send(&app, audio::Command::Metronome(c.enabled.unwrap_or(true)))?;
+            }
             "tempo" => {
                 let project = load(&app, &id)?;
                 if project.graph.edges.iter().any(|e| {

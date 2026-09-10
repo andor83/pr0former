@@ -169,3 +169,5 @@ body{position:fixed;inset:0}
 .score-content{display:flex;flex-direction:column;overflow:hidden!important;padding:12px!important}.score-content>.score-workspace{flex:1;min-height:0}.score-content>.score-actions{flex-shrink:0}
 
 .signal-edge.midi{stroke:var(--violet);stroke-dasharray:3 3}.vue-flow__handle.midi{background:var(--violet);border-color:var(--violet)}
+
+.metronome-toggle{margin-left:8px;color:#8a9a9d}.metronome-toggle[aria-pressed=true]{color:var(--amber);background:#dfb87918}.metronome-toggle:disabled{opacity:.35}

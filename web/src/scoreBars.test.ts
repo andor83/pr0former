@@ -237,3 +237,28 @@ it('keeps tempo marks and staff marks aligned through bar edits and edits them',
   expect(removeMark(p, 'p', 's', id).parts[0]!.staves![0]!.marks).toEqual([])
   expect(removeTempo(p, 8).score!.tempos).toEqual([{ beat: 0, bpm: 90 }])
 })
+
+it('places forward and backward repeat bars like Finale', async () => {
+  const { placeRepeatBegin, placeRepeatEnd } = await import('./scoreBars')
+  const p = fixture()
+  p.score!.repeats = []
+  // End with no begin: repeat from the top of the score.
+  let next = placeRepeatEnd(p, 5)
+  expect(next.score!.repeats).toEqual([{ start: 0, end: 8, times: 2, first_ending: null }])
+  // A later end with no begin starts where the previous repeat ended (no nesting).
+  next = placeRepeatEnd(next, 9)
+  expect(next.score!.repeats.map((r) => [r.start, r.end])).toEqual([
+    [0, 8],
+    [8, 12],
+  ])
+  // Begin with no end runs to the end of the score; an end then closes it.
+  let open = placeRepeatBegin(p, 4)
+  expect(open.score!.repeats).toEqual([{ start: 4, end: 12, times: 2, first_ending: null }])
+  open = placeRepeatEnd(open, 6)
+  expect(open.score!.repeats).toEqual([{ start: 4, end: 8, times: 2, first_ending: null }])
+  // A begin inside an existing repeat moves its start; repeated placement is idempotent.
+  expect(placeRepeatBegin(open, 6).score!.repeats[0]).toMatchObject({ start: 4, end: 8 })
+  const moved = placeRepeatBegin(placeRepeatEnd(p, 9), 4)
+  expect(moved.score!.repeats).toEqual([{ start: 4, end: 12, times: 2, first_ending: null }])
+  expect(() => placeRepeatEnd(p, 50)).toThrow()
+})

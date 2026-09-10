@@ -9,14 +9,22 @@ import {
   setClef,
   sharedTimeline,
 } from '../scoreBars'
+export type StructureTab = 'meter' | 'bars' | 'clef'
 const props = defineProps<{
   project: Project
   editable: boolean
   partId: string
   staffId?: string
   beat: number
+  initialTab?: StructureTab
 }>()
 const emit = defineEmits<{ update: [project: Project] }>()
+const tabs: { id: StructureTab; label: string; symbol: string }[] = [
+  { id: 'meter', label: 'Time signature', symbol: '⁴₄' },
+  { id: 'bars', label: 'Add / delete bars', symbol: '+𝄀' },
+  { id: 'clef', label: 'Clef change', symbol: '𝄞' },
+]
+const tab = ref<StructureTab>(props.initialTab ?? 'meter')
 const error = ref(''),
   at = ref(props.beat),
   count = ref(1),
@@ -25,6 +33,7 @@ const error = ref(''),
   unit = ref(props.project.beat_unit || 4),
   staffId = ref(props.staffId || ''),
   clef = ref('treble')
+const units = [1, 2, 4, 8, 16, 32]
 const bars = computed(() => measures(props.project)),
   part = computed(() => props.project.parts.find((p) => p.id === props.partId)),
   staffs = computed(() => (part.value ? staves(part.value) : []))
@@ -74,13 +83,15 @@ function change(action: () => Project) {
 }
 </script>
 <template>
-  <div class="structure-editor">
-    <p v-if="!project.score">
+  <div class="sd-dialog">
+    <p v-if="!project.score" class="sd-note" style="padding: 10px 14px 0">
       Applying a meter or bar edit creates a shared timeline for all parts.
     </p>
-    <p v-if="error" role="alert" class="field-error">{{ error }}</p>
-    <fieldset>
-      <legend>Position</legend>
+    <p v-if="error" role="alert" class="field-error" style="padding: 0 14px">
+      {{ error }}
+    </p>
+    <div class="sd-strip">
+      <strong>Bar {{ bar }}</strong>
       <label
         >Bar<input
           v-model.number="bar"
@@ -99,135 +110,227 @@ function change(action: () => Project) {
         >{{ bars.length }} bars · {{ sharedTimeline(project).length }} quarter
         beats</small
       >
-    </fieldset>
-    <fieldset>
-      <legend>Time signature</legend>
-      <label
-        >Beats per bar<input
-          v-model.number="beats"
-          type="number"
-          min="1"
-          max="16" /></label
-      ><label
-        >Beat unit<select v-model.number="unit" aria-label="Beat unit">
-          <option v-for="u in [1, 2, 4, 8, 16, 32]" :key="u" :value="u">
-            {{ u }}
-          </option>
-        </select></label
-      ><button
-        :disabled="!editable"
-        @click="change(() => setMeter(project, at, beats, unit))"
-      >
-        Set time signature
-      </button>
-      <p>
-        Applies to every part from this beat. Existing notes keep their timing.
-      </p>
-    </fieldset>
-    <fieldset>
-      <legend>Blank bars</legend>
-      <label
-        >Number of bars<input
-          v-model.number="count"
-          type="number"
-          min="1"
-          max="1024" /></label
-      ><button
-        :disabled="!editable"
-        @click="change(() => editBars(project, 'append', bar, count))"
-      >
-        Add bars at end</button
-      ><button
-        :disabled="!editable"
-        @click="
-          change(() =>
-            editBars(
-              project,
-              bar === bars.length ? 'append' : 'insert',
-              bar + 1,
-              count,
-            ),
-          )
-        "
-      >
-        Insert after bar</button
-      ><button
-        :disabled="!editable"
-        @click="change(() => editBars(project, 'insert', bar, count))"
-      >
-        Insert before bar {{ bar }}</button
-      ><button
-        :disabled="!editable"
-        @click="change(() => editBars(project, 'delete', bar, count))"
-      >
-        Delete from bar {{ bar }}
-      </button>
-      <p>
-        Insertion and deletion shift all parts, signatures, repeats and MIDI
-        events together. Delete removes the selected bars’ contents. Undo
-        restores the complete edit.
-      </p>
-    </fieldset>
-    <fieldset>
-      <legend>Clef change · {{ part?.name }}</legend>
-      <label
-        >Staff<select v-model="staffId" aria-label="Staff">
-          <option v-for="s in staffs" :key="s.id" :value="s.id">
-            {{ s.name }}
-          </option>
-        </select></label
-      ><label
-        >Clef<select v-model="clef" aria-label="Clef">
-          <option v-for="c in ['treble', 'bass', 'alto', 'tenor']" :key="c">
-            {{ c }}
-          </option>
-        </select></label
-      ><button
-        :disabled="!editable || !staffId"
-        @click="change(() => setClef(project, partId, staffId, at, clef))"
-      >
-        Set clef at beat
-      </button>
-      <p>Uses the position above; clef changes can occur between bar lines.</p>
-    </fieldset>
+    </div>
+    <div class="sd-layout">
+      <nav class="sd-nav" aria-label="Bar tools">
+        <button
+          v-for="t in tabs"
+          :key="t.id"
+          type="button"
+          :class="{ active: tab === t.id }"
+          :aria-pressed="tab === t.id"
+          :aria-label="t.label"
+          @click="tab = t.id"
+        >
+          <span class="sd-symbol">{{ t.symbol }}</span>{{ t.label }}
+        </button>
+      </nav>
+      <section class="sd-section">
+        <template v-if="tab === 'meter'">
+          <div class="sd-meter-editor">
+            <div class="sd-meter-preview" aria-live="polite">
+              <span>{{ beats }}</span><span>{{ unit }}</span>
+            </div>
+            <div class="sd-steppers">
+              <div class="sd-stepper">
+                <span>Beats per bar</span>
+                <button
+                  type="button"
+                  aria-label="Fewer beats"
+                  @click="beats = Math.max(1, beats - 1)"
+                >
+                  −
+                </button>
+                <input
+                  v-model.number="beats"
+                  type="number"
+                  min="1"
+                  max="16"
+                  aria-label="Beats per bar"
+                />
+                <button
+                  type="button"
+                  aria-label="More beats"
+                  @click="beats = Math.min(16, beats + 1)"
+                >
+                  +
+                </button>
+              </div>
+              <div class="sd-stepper">
+                <span>Beat unit</span>
+                <button
+                  type="button"
+                  aria-label="Longer beat unit"
+                  @click="unit = units[Math.max(0, units.indexOf(unit) - 1)]!"
+                >
+                  −
+                </button>
+                <select v-model.number="unit" aria-label="Beat unit">
+                  <option v-for="u in units" :key="u" :value="u">{{ u }}</option>
+                </select>
+                <button
+                  type="button"
+                  aria-label="Shorter beat unit"
+                  @click="
+                    unit = units[Math.min(units.length - 1, units.indexOf(unit) + 1)]!
+                  "
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="sd-quick">
+            <button
+              v-for="m in ['2/4', '3/4', '4/4', '5/4', '6/8', '7/8', '9/8', '12/8']"
+              :key="m"
+              type="button"
+              :aria-pressed="`${beats}/${unit}` === m"
+              @click="
+                () => {
+                  const [b, u] = m.split('/').map(Number)
+                  beats = b!
+                  unit = u!
+                }
+              "
+            >
+              {{ m }}
+            </button>
+          </div>
+          <div class="sd-actions">
+            <button
+              type="button"
+              class="sd-primary"
+              :disabled="!editable"
+              @click="change(() => setMeter(project, at, beats, unit))"
+            >
+              Set time signature
+            </button>
+          </div>
+          <p class="sd-note">
+            Applies to every part from the position above; at beat zero it also
+            sets the initial and count-in meter. Existing notes keep their timing.
+          </p>
+        </template>
+        <template v-else-if="tab === 'bars'">
+          <div class="sd-stepper">
+            <span>Number of bars</span>
+            <button
+              type="button"
+              aria-label="Fewer bars"
+              @click="count = Math.max(1, count - 1)"
+            >
+              −
+            </button>
+            <input
+              v-model.number="count"
+              type="number"
+              min="1"
+              max="1024"
+              aria-label="Number of bars"
+            />
+            <button
+              type="button"
+              aria-label="More bars"
+              @click="count = Math.min(1024, count + 1)"
+            >
+              +
+            </button>
+          </div>
+          <div class="sd-actions">
+            <button
+              type="button"
+              :disabled="!editable"
+              @click="change(() => editBars(project, 'append', bar, count))"
+            >
+              Add bars at end</button
+            ><button
+              type="button"
+              :disabled="!editable"
+              @click="
+                change(() =>
+                  editBars(
+                    project,
+                    bar === bars.length ? 'append' : 'insert',
+                    bar + 1,
+                    count,
+                  ),
+                )
+              "
+            >
+              Insert after bar</button
+            ><button
+              type="button"
+              :disabled="!editable"
+              @click="change(() => editBars(project, 'insert', bar, count))"
+            >
+              Insert before bar {{ bar }}</button
+            ><button
+              type="button"
+              class="sd-danger"
+              :disabled="!editable"
+              @click="change(() => editBars(project, 'delete', bar, count))"
+            >
+              Delete from bar {{ bar }}
+            </button>
+          </div>
+          <p class="sd-note">
+            Insertion and deletion shift all parts, signatures, repeats and MIDI
+            events together. Delete removes the selected bars’ contents. Undo
+            restores the complete edit.
+          </p>
+        </template>
+        <template v-else>
+          <h3>Clef change · {{ part?.name }}</h3>
+          <div class="sd-fields">
+            <label
+              >Staff<select v-model="staffId" aria-label="Staff">
+                <option v-for="s in staffs" :key="s.id" :value="s.id">
+                  {{ s.name }}
+                </option>
+              </select></label
+            ><label
+              >Clef<select v-model="clef" aria-label="Clef">
+                <option v-for="c in ['treble', 'bass', 'alto', 'tenor']" :key="c">
+                  {{ c }}
+                </option>
+              </select></label
+            >
+          </div>
+          <div class="sd-quick" role="radiogroup" aria-label="Clef glyphs">
+            <button
+              v-for="[c, symbol] in [
+                ['treble', '𝄞'],
+                ['bass', '𝄢'],
+                ['alto', '𝄡'],
+                ['tenor', '𝄡'],
+              ]"
+              :key="c"
+              type="button"
+              role="radio"
+              :aria-checked="clef === c"
+              :aria-label="`${c} clef glyph`"
+              @click="clef = c!"
+            >
+              <span class="sd-symbol">{{ symbol }}</span>{{ c }}
+            </button>
+          </div>
+          <div class="sd-actions">
+            <button
+              type="button"
+              class="sd-primary"
+              :disabled="!editable || !staffId"
+              @click="change(() => setClef(project, partId, staffId, at, clef))"
+            >
+              Set clef at beat
+            </button>
+          </div>
+          <p class="sd-note">
+            Uses the position above; clef changes can occur between bar lines.
+          </p>
+        </template>
+      </section>
+    </div>
   </div>
 </template>
-<style scoped>
-.structure-editor {
-  font-size: 12px;
-}
-.structure-editor fieldset {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 12px;
-  border-top: 1px solid #d9e0e1;
-  margin-top: 14px;
-  padding: 14px 0;
-}
-.structure-editor legend {
-  font-weight: 600;
-  padding-right: 10px;
-}
-.structure-editor label {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.structure-editor input {
-  width: 100px;
-}
-.structure-editor select {
-  min-width: 85px;
-}
-.structure-editor p {
-  flex-basis: 100%;
-  font-size: 11px;
-  color: #526267;
-  line-height: 1.5;
-}
-.structure-editor small {
-  padding: 8px 0;
-  color: #526267;
-}
-</style>
+<style src="./scoreDialogLayout.css"></style>

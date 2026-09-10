@@ -45,9 +45,79 @@ impl CountIn {
     }
 }
 
+/// Monitor-only click track while transport runs: one click per denominator beat,
+/// accented on the first beat of each bar. Advanced once per engine sample.
+#[derive(Default)]
+pub struct Metronome {
+    last_index: Option<i64>,
+    click_sample: u64,
+    accent: bool,
+}
+
+impl Metronome {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// `beats_per_bar` and `beat_unit` describe the meter in force; the clock beat
+    /// is in quarter notes. Returns the click sample while one is sounding.
+    pub fn next(&mut self, clock: &Clock, beats_per_bar: u8, beat_unit: u8) -> Option<f32> {
+        if !clock.running {
+            self.last_index = None;
+            return None;
+        }
+        let unit = 4. / f64::from(beat_unit.max(1));
+        let index = ((clock.beat + 1e-9) / unit).floor() as i64;
+        if Some(index) != self.last_index {
+            self.last_index = Some(index);
+            self.click_sample = clock.sample;
+            self.accent = index.rem_euclid(i64::from(beats_per_bar.max(1))) == 0;
+        }
+        let elapsed = (clock.sample - self.click_sample) as f64 / clock.sample_rate;
+        if elapsed >= 0.03 {
+            return None;
+        }
+        let frequency = if self.accent { 1500. } else { 1000. };
+        let envelope = (1. - elapsed / 0.025).max(0.);
+        Some(((std::f64::consts::TAU * frequency * elapsed).sin() * envelope * 0.2) as f32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metronome_clicks_once_per_denominator_beat_and_accents_bar_starts() {
+        let mut clock = Clock::new(48000.);
+        clock.running = true;
+        clock.set_tempo(120.);
+        let mut metro = Metronome::new();
+        let mut clicks = 0;
+        let mut accents = 0;
+        let mut last_audible: Option<u64> = None;
+        // Two bars of 6/8 (six quarter beats) at 120 quarter-note BPM take three
+        // seconds and produce twelve eighth-note clicks, two of them accented.
+        let samples = 48000 * 3;
+        while clock.sample < samples {
+            if let Some(sample) = metro.next(&clock, 6, 8) {
+                assert!(sample.is_finite() && sample.abs() <= 0.2);
+                if sample.abs() > 1e-6 {
+                    if last_audible.is_none_or(|last| clock.sample - last > 48000 * 3 / 100) {
+                        clicks += 1;
+                        if metro.accent {
+                            accents += 1;
+                        }
+                    }
+                    last_audible = Some(clock.sample);
+                }
+            }
+            clock.advance();
+        }
+        assert_eq!(clicks, 12);
+        assert_eq!(accents, 2);
+        clock.running = false;
+        assert!(metro.next(&clock, 6, 8).is_none());
+    }
 
     #[test]
     fn exact_meter_duration_and_clicks_across_sample_rates() {

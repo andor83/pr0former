@@ -47,6 +47,8 @@ import {
   barsInRange,
   clearRange,
   setRepeat,
+  placeRepeatBegin,
+  placeRepeatEnd,
   tempoAt,
   setTempo,
   removeTempo,
@@ -63,6 +65,7 @@ import {
   type MidiEntryMode,
 } from '../midiEntry'
 import ScoreMeasureDialog from './ScoreMeasureDialog.vue'
+import ScorePartDialog from './ScorePartDialog.vue'
 import {
   copyRegion,
   pasteRegion,
@@ -113,6 +116,15 @@ import {
   Music2,
   Piano,
   Trash2,
+  GripVertical,
+  ChevronUp,
+  ChevronDown,
+  ChevronsLeft,
+  ChevronsRight,
+  Eye,
+  EyeOff,
+  Plus,
+  Check,
 } from '@lucide/vue'
 const dialog = ref<
   | 'part'
@@ -209,6 +221,14 @@ type MeasureMode =
   | 'edit'
 const regionClipboard = ref<RegionClipboard | null>(null)
 const measureMode = ref<MeasureMode>('meter')
+/** Which Bars & meter tab to open: bars tool → bars, clef mark → clef, else meter. */
+const structureTab = computed<'meter' | 'bars' | 'clef'>(() =>
+  placement.value?.kind === 'bars' || selectedElement.value?.kind === 'barline'
+    ? 'bars'
+    : selectedElement.value?.kind === 'clef'
+      ? 'clef'
+      : 'meter',
+)
 /** Finale-style bar selection: a beat range on one staff, bar-aligned when clicked. */
 const region = ref<{
   part: string
@@ -253,14 +273,99 @@ const selected = ref(new Set<string>()),
       doc.value.parts[0]?.id ||
       '',
   )
+const zoomKey = 'pr0former.score.zoom'
+function readZoom() {
+  try {
+    const v = Number(localStorage.getItem(zoomKey))
+    return v >= 0.5 && v <= 3 ? v : 1
+  } catch {
+    return 1
+  }
+}
+/** Page-style zoom of the whole score surface (CSS zoom); `scale` is note spacing. */
+const zoom = ref(readZoom())
+watch(zoom, (z) => {
+  try {
+    localStorage.setItem(zoomKey, String(z))
+  } catch {
+    /* private mode */
+  }
+  nextTick(updateViewport)
+})
+function setZoom(next: number, anchor?: { x: number; y: number }) {
+  const v = viewport.value,
+    z = Math.max(0.5, Math.min(3, Math.round(next * 100) / 100))
+  if (!v || z === zoom.value) return
+  // Keep the point under the cursor/fingers fixed while the surface rescales.
+  const rect = v.getBoundingClientRect(),
+    ax = anchor ? anchor.x - rect.left : v.clientWidth / 2,
+    ay = anchor ? anchor.y - rect.top : v.clientHeight / 2,
+    sx = (v.scrollLeft + ax) / zoom.value,
+    sy = (v.scrollTop + ay) / zoom.value
+  zoom.value = z
+  nextTick(() => {
+    v.scrollLeft = sx * z - ax
+    v.scrollTop = sy * z - ay
+  })
+}
+let pinch: {
+  distance: number
+  zoom: number
+  midX: number
+  midY: number
+  scrollLeft: number
+  scrollTop: number
+} | null = null
+function touchStart(event: TouchEvent) {
+  if (event.touches.length !== 2 || !viewport.value) return
+  const [a, b] = [event.touches[0]!, event.touches[1]!]
+  pinch = {
+    distance: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+    zoom: zoom.value,
+    midX: (a.clientX + b.clientX) / 2,
+    midY: (a.clientY + b.clientY) / 2,
+    scrollLeft: viewport.value.scrollLeft,
+    scrollTop: viewport.value.scrollTop,
+  }
+  gesture.value = null
+  marquee.value = null
+}
+function touchMove(event: TouchEvent) {
+  const v = viewport.value
+  if (!pinch || event.touches.length !== 2 || !v) return
+  event.preventDefault()
+  const [a, b] = [event.touches[0]!, event.touches[1]!],
+    distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+    midX = (a.clientX + b.clientX) / 2,
+    midY = (a.clientY + b.clientY) / 2,
+    z = Math.max(0.5, Math.min(3, (pinch.zoom * distance) / pinch.distance)),
+    rect = v.getBoundingClientRect()
+  // Surface point under the initial midpoint stays under the current midpoint.
+  const sx = (pinch.scrollLeft + pinch.midX - rect.left) / pinch.zoom,
+    sy = (pinch.scrollTop + pinch.midY - rect.top) / pinch.zoom
+  zoom.value = Math.round(z * 100) / 100
+  nextTick(() => {
+    v.scrollLeft = sx * zoom.value - (midX - rect.left)
+    v.scrollTop = sy * zoom.value - (midY - rect.top)
+  })
+}
+function touchEnd(event: TouchEvent) {
+  if (event.touches.length < 2) pinch = null
+}
+function wheel(event: WheelEvent) {
+  if (!event.ctrlKey && !event.metaKey) return
+  event.preventDefault()
+  setZoom(zoom.value * Math.exp(-event.deltaY * 0.01), {
+    x: event.clientX,
+    y: event.clientY,
+  })
+}
 const collapsed = ref(false),
   showAll = ref(false),
   tool = ref<'select' | 'write'>('select'),
   scale = ref(90),
   follow = ref(true),
   view = ref('notation')
-const clefBeat = ref(4),
-  newClef = ref('bass')
 const base = ref(1),
   dots = ref(0),
   alter = ref<number | null>(null),
@@ -309,10 +414,12 @@ function updateViewport() {
     const step = Math.max(1, barLength.value)
     viewportStart.value = Math.max(
       0,
-      Math.floor((beatAt(v.scrollLeft) - 8) / step) * step,
+      Math.floor((beatAt(v.scrollLeft / zoom.value) - 8) / step) * step,
     )
     viewportEnd.value =
-      Math.ceil((beatAt(v.scrollLeft + v.clientWidth) + 8) / step) * step
+      Math.ceil(
+        (beatAt((v.scrollLeft + v.clientWidth) / zoom.value) + 8) / step,
+      ) * step
   }
 }
 onMounted(() => {
@@ -899,6 +1006,22 @@ function reorder(id: string, delta: number) {
   next.parts.splice(target, 0, p!)
   void commit(next)
 }
+const dragPart = ref<string | null>(null)
+function movePart(id: string, toIndex: number) {
+  const next = clone(doc.value),
+    index = next.parts.findIndex((p) => p.id === id)
+  if (index < 0 || toIndex < 0 || toIndex >= next.parts.length || toIndex === index)
+    return
+  const [p] = next.parts.splice(index, 1)
+  next.parts.splice(toIndex, 0, p!)
+  void commit(next)
+}
+function dropPart(targetId: string) {
+  const from = dragPart.value
+  dragPart.value = null
+  if (!from || from === targetId || !canEdit.value) return
+  movePart(from, doc.value.parts.findIndex((p) => p.id === targetId))
+}
 function addPart() {
   if (doc.value.parts.length >= 32) return
   const next = clone(doc.value),
@@ -1130,7 +1253,7 @@ function scrollToCaret() {
   const c = caret.value,
     v = viewport.value
   if (!c || !v) return
-  const x = xAt(c.beat)
+  const x = xAt(c.beat) * zoom.value
   if (x < v.scrollLeft + 40 || x > v.scrollLeft + v.clientWidth - 40)
     v.scrollLeft = Math.max(0, x - v.clientWidth * 0.3)
 }
@@ -1508,8 +1631,8 @@ function point(event: MouseEvent) {
   const v = viewport.value!,
     rect = v.querySelector('.ensemble-surface')!.getBoundingClientRect()
   return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top,
+    x: (event.clientX - rect.left) / zoom.value,
+    y: (event.clientY - rect.top) / zoom.value,
   }
 }
 async function inspectElement() {
@@ -1606,12 +1729,13 @@ function pointerDown(event: PointerEvent) {
           beat: bar.start,
         }
         if (chosen.kind === 'bars') dialog.value = 'structure'
-        else if (chosen.kind === 'repeat') {
-          const next = clone(doc.value)
-          next.score = sharedTimeline(next)
-          next.score.repeats.push({ start: bar.start, end: bar.end, times: 2 })
-          void commit(next)
-        } else if (chosen.kind === 'barline') {
+        else if (chosen.kind === 'repeat')
+          void commit(
+            chosen.value === 'end'
+              ? placeRepeatEnd(doc.value, beat)
+              : placeRepeatBegin(doc.value, beat),
+          )
+        else if (chosen.kind === 'barline') {
           const next = clone(doc.value)
           next.score = sharedTimeline(next)
           next.score.barlines = [
@@ -1725,7 +1849,9 @@ function pointerDown(event: PointerEvent) {
     extend: event.shiftKey,
     part: row.dataset.partId!,
     staff: row.dataset.staffId!,
-    step: bottomStep(clef) + Math.round((118 - (event.clientY - rect.top)) / 5),
+    step:
+      bottomStep(clef) +
+      Math.round((118 - (event.clientY - rect.top) / zoom.value) / 5),
     beat: Math.max(0, Math.round(beatAt(pos.x) / snap) * snap),
     pointer: event.pointerId,
   }
@@ -1787,7 +1913,7 @@ function pointerUp(event: PointerEvent) {
           next,
           g.e,
           Math.round((beatAt(point(event).x) - g.beat) * 4) / 4,
-          Math.round((g.y - event.clientY) / 5),
+          Math.round((g.y - event.clientY) / (5 * zoom.value)),
           el
             ? { part: el.dataset.partId!, note: el.dataset.noteId! }
             : undefined,
@@ -1808,8 +1934,10 @@ function pointerUp(event: PointerEvent) {
   if (!g) return
   if (g.move && marquee.value && canEdit.value) {
     const delta =
-        Math.round((beatAt(g.x + event.clientX - g.cx) - beatAt(g.x)) * 4) / 4,
-      steps = -Math.round((event.clientY - g.cy) / 5)
+        Math.round(
+          (beatAt(g.x + (event.clientX - g.cx) / zoom.value) - beatAt(g.x)) * 4,
+        ) / 4,
+      steps = -Math.round((event.clientY - g.cy) / (5 * zoom.value))
     try {
       const next = clone(doc.value)
       for (const p of next.parts) {
@@ -1837,12 +1965,13 @@ function pointerUp(event: PointerEvent) {
       .value!.querySelectorAll<HTMLElement>('[data-note-id]')
       .forEach((el) => {
         const box = el.getBoundingClientRect(),
-          x = box.left - rect.left + viewport.value!.scrollLeft,
-          y = box.top - rect.top + viewport.value!.scrollTop
+          z = zoom.value,
+          x = (box.left - rect.left + viewport.value!.scrollLeft) / z,
+          y = (box.top - rect.top + viewport.value!.scrollTop) / z
         if (
-          x + box.width >= m.left &&
+          x + box.width / z >= m.left &&
           x <= m.left + m.width &&
-          y + box.height >= m.top &&
+          y + box.height / z >= m.top &&
           y <= m.top + m.height
         )
           set.add(noteKey(el.dataset.partId!, el.dataset.noteId!))
@@ -2179,7 +2308,7 @@ watch(
   () => props.beats[focused.value],
   (beat) => {
     if (!follow.value || !viewport.value || beat == null) return
-    const x = xAt(beat),
+    const x = xAt(beat) * zoom.value,
       v = viewport.value
     if (x < v.scrollLeft || x > v.scrollLeft + v.clientWidth * 0.8)
       v.scrollLeft = Math.max(0, x - v.clientWidth * 0.25)
@@ -2241,31 +2370,86 @@ watch(
     </div>
     <div class="score-layout">
       <aside v-if="!performance" class="score-parts" :class="{ collapsed }">
-        <button
-          class="collapse-parts"
-          :aria-expanded="!collapsed"
-          @click="collapsed = !collapsed"
-        >
-          {{ collapsed ? 'Parts ›' : '‹ Parts' }}
-        </button>
-        <template v-if="!collapsed"
-          ><div class="parts-actions">
-            <button @click="visible = new Set(doc.parts.map((p) => p.id))">
-              Show all</button
-            ><button @click="visible = new Set()">Hide all</button>
-          </div>
-          <div
+        <div class="parts-bar">
+          <button
+            class="parts-toggle"
+            :aria-expanded="!collapsed"
+            :aria-label="collapsed ? 'Expand parts' : 'Collapse parts'"
+            :title="collapsed ? 'Show the part list' : 'Collapse the part list'"
+            @click="collapsed = !collapsed"
+          >
+            <ChevronsRight v-if="collapsed" :size="14" /><ChevronsLeft
+              v-else
+              :size="14"
+            />
+          </button>
+          <template v-if="!collapsed">
+            <span class="parts-title">Parts</span>
+            <span class="parts-group" role="group" aria-label="Part list actions">
+              <button
+                aria-label="Show all"
+                title="Show all parts"
+                @click="visible = new Set(doc.parts.map((p) => p.id))"
+              >
+                <Eye :size="13" />
+              </button>
+              <button
+                aria-label="Hide all"
+                title="Hide all parts"
+                @click="visible = new Set()"
+              >
+                <EyeOff :size="13" />
+              </button>
+              <button
+                :disabled="!canEdit || doc.parts.length >= 32"
+                aria-label="Add part"
+                title="Add part"
+                @click="addPart"
+              >
+                <Plus :size="13" />
+              </button>
+            </span>
+          </template>
+        </div>
+        <ul v-if="!collapsed" class="parts-list" aria-label="Parts">
+          <li
             v-for="(p, index) in doc.parts"
             :key="p.id"
-            class="part-entry"
-            :class="{ focused: focused === p.id }"
+            class="part-row"
+            :class="{
+              focused: focused === p.id,
+              muted: !visible.has(p.id),
+              dragging: dragPart === p.id,
+            }"
+            :draggable="canEdit"
+            @dragstart="dragPart = p.id"
+            @dragend="dragPart = null"
+            @dragover.prevent
+            @drop.prevent="dropPart(p.id)"
           >
-            <input
-              type="checkbox"
-              :aria-label="`Show ${p.name}`"
-              :checked="visible.has(p.id)"
-              @change="toggleVisible(p.id)"
-            /><button @click="focus(p.id)">
+            <div class="part-order">
+              <button
+                :disabled="!canEdit || index === 0"
+                :aria-label="`Move ${p.name} up`"
+                @click="reorder(p.id, -1)"
+              >
+                <ChevronUp :size="11" />
+              </button>
+              <span
+                class="part-grip"
+                :title="canEdit ? 'Drag to reorder' : ''"
+                aria-hidden="true"
+                ><GripVertical :size="14"
+              /></span>
+              <button
+                :disabled="!canEdit || index === doc.parts.length - 1"
+                :aria-label="`Move ${p.name} down`"
+                @click="reorder(p.id, 1)"
+              >
+                <ChevronDown :size="11" />
+              </button>
+            </div>
+            <button class="part-main" @click="focus(p.id)">
               <strong>{{ p.name }}</strong
               ><small
                 >{{
@@ -2279,17 +2463,29 @@ watch(
                     ?.label || 'External / acoustic'
                 }}
                 · MIDI {{ p.midi_channel || 1 }}</small
-              ></button
-            ><span class="part-mix"
-              ><button
+              >
+            </button>
+            <div class="part-controls" role="group" :aria-label="`${p.name} controls`">
+              <button
+                class="part-check"
+                role="checkbox"
+                :aria-checked="visible.has(p.id)"
+                :aria-label="`Show ${p.name}`"
+                :title="visible.has(p.id) ? 'Hide in the score' : 'Show in the score'"
+                @click="toggleVisible(p.id)"
+              >
+                <Check v-if="visible.has(p.id)" :size="11" />
+              </button>
+              <button
                 :disabled="!canEdit"
                 :aria-label="`Mute ${p.name}`"
                 :aria-pressed="!!p.muted"
                 :title="`Mute ${p.name} MIDI`"
                 @click="mixPart(p.id, false)"
               >
-                M</button
-              ><button
+                M
+              </button>
+              <button
                 :disabled="!canEdit"
                 :aria-label="`Solo ${p.name}`"
                 :aria-pressed="!!p.solo"
@@ -2297,31 +2493,10 @@ watch(
                 @click="mixPart(p.id, true)"
               >
                 S
-              </button></span
-            ><span class="part-order"
-              ><button
-                :disabled="!canEdit || index === 0"
-                :aria-label="`Move ${p.name} up`"
-                @click="reorder(p.id, -1)"
-              >
-                ↑</button
-              ><button
-                :disabled="!canEdit || index === doc.parts.length - 1"
-                :aria-label="`Move ${p.name} down`"
-                @click="reorder(p.id, 1)"
-              >
-                ↓
-              </button></span
-            >
-          </div>
-          <button
-            :disabled="!canEdit || doc.parts.length >= 32"
-            aria-label="Add part"
-            @click="addPart"
-          >
-            ＋ Add part
-          </button>
-        </template>
+              </button>
+            </div>
+          </li>
+        </ul>
       </aside>
       <div class="score-main">
         <header
@@ -2550,12 +2725,19 @@ watch(
               >
                 {{ symbol }}</button
               ><button
-                title="Repeat clicked bar twice"
-                aria-label="Repeat bar tool"
+                title="Begin repeat 𝄆 · click a bar (repeats to the end until an end repeat is placed)"
+                aria-label="Begin repeat tool"
                 :disabled="!canEdit"
-                @click="placeTool('repeat')"
+                @click="placeTool('repeat', 'begin')"
               >
-                𝄆𝄇</button
+                𝄆</button
+              ><button
+                title="End repeat 𝄇 · click a bar (without a begin repeat, plays again from the top)"
+                aria-label="End repeat tool"
+                :disabled="!canEdit"
+                @click="placeTool('repeat', 'end')"
+              >
+                𝄇</button
               ><button
                 title="Insert bars · click a bar"
                 aria-label="Insert bars tool"
@@ -2712,8 +2894,16 @@ watch(
             }
           "
           @pointerleave="ghost = null"
+          @touchstart.passive="touchStart"
+          @touchmove="touchMove"
+          @touchend="touchEnd"
+          @touchcancel="touchEnd"
+          @wheel="wheel"
         >
-          <div class="ensemble-surface" :style="{ width: `${width}px` }">
+          <div
+            class="ensemble-surface"
+            :style="{ width: `${width}px`, zoom: zoom }"
+          >
             <p v-if="!shown.length" class="empty-score">
               {{
                 performance
@@ -2938,13 +3128,39 @@ watch(
           <label
             ><input v-model="follow" type="checkbox" /> Follow playback</label
           ><label
-            >Zoom<input
+            >Spacing<input
               v-model.number="scale"
               type="range"
               min="45"
               max="180"
               step="5"
+              aria-label="Note spacing"
           /></label>
+          <span class="zoom-control">
+            <button
+              type="button"
+              aria-label="Zoom out"
+              title="Zoom out (Ctrl/Cmd + wheel, pinch)"
+              @click="setZoom(zoom / 1.15)"
+            >
+              −</button
+            ><input
+              :value="zoom"
+              type="range"
+              min="0.5"
+              max="3"
+              step="0.05"
+              aria-label="Zoom"
+              @input="setZoom(Number(($event.target as HTMLInputElement).value))"
+            /><button
+              type="button"
+              aria-label="Zoom in"
+              title="Zoom in (Ctrl/Cmd + wheel, pinch)"
+              @click="setZoom(zoom * 1.15)"
+            >
+              +</button
+            ><output aria-label="Zoom level">{{ Math.round(zoom * 100) }}%</output>
+          </span>
           <slot name="footer" />
         </footer>
       </div>
@@ -2955,6 +3171,7 @@ watch(
       :error="error"
       @close="dialog = null"
       ><ScoreStructureEditor
+        :initial-tab="structureTab"
         :project="doc"
         :editable="canEdit"
         :part-id="focused"
@@ -2970,355 +3187,17 @@ watch(
       v-if="part && dialog === 'part'"
       :title="`Part settings · ${part.name}`"
       @close="dialog = null"
-      ><div class="score-settings">
-        <div class="part-routing">
-          <label
-            >Part name<input
-              :value="part.name"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  name: ($event.target as HTMLInputElement).value,
-                })
-              "
-          /></label>
-          <label
-            >Performer<select
-              aria-label="Performer"
-              :value="part.performer || ''"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  performer: ($event.target as HTMLSelectElement).value || null,
-                })
-              "
-            >
-              <option value="">Unassigned</option>
-              <option v-for="m in members" :key="m.id" :value="m.id">
-                {{ m.username }}
-              </option>
-            </select></label
-          >
-          <label
-            >Instrument / input<select
-              aria-label="Instrument / input"
-              :value="part.instrument_node || ''"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  instrument_node:
-                    ($event.target as HTMLSelectElement).value || null,
-                })
-              "
-            >
-              <option value="">Acoustic / external only</option>
-              <option
-                v-for="n in doc.graph.nodes.filter((n) =>
-                  ['synth', 'fm_synth', 'browser_input', 'input'].includes(
-                    n.kind,
-                  ),
-                )"
-                :key="n.id"
-                :value="n.id"
-              >
-                {{ n.label }}
-              </option>
-            </select></label
-          >
-          <label
-            >Loop length (quarter beats)<input
-              type="number"
-              min="0.25"
-              max="4096"
-              :value="part.loop_beats"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  loop_beats: Number(($event.target as HTMLInputElement).value),
-                })
-              "
-          /></label>
-          <label
-            >Default display<select
-              aria-label="Default display"
-              :value="part.view"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  view: ($event.target as HTMLSelectElement).value,
-                })
-              "
-            >
-              <option value="notation">Notation</option>
-              <option value="grid">Piano roll</option>
-            </select></label
-          ><label
-            >Time signature<select
-              aria-label="Time signature"
-              :value="part.show_time_signature === false ? 'hide' : 'show'"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  show_time_signature:
-                    ($event.target as HTMLSelectElement).value === 'show',
-                })
-              "
-            >
-              <option value="show">Show</option>
-              <option value="hide">Hidden</option>
-            </select></label
-          >
-          <label
-            >MIDI port<input
-              :value="part.midi_port || ''"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  midi_port: ($event.target as HTMLInputElement).value || null,
-                })
-              " /></label
-          ><label
-            >OSC destination<input
-              :value="part.osc_destination || ''"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  osc_destination:
-                    ($event.target as HTMLInputElement).value || null,
-                })
-              " /></label
-          ><label
-            >OSC address<input
-              :value="part.osc_address"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  osc_address: ($event.target as HTMLInputElement).value,
-                })
-              "
-          /></label>
-          <label
-            >MIDI channel<input
-              type="number"
-              min="1"
-              max="16"
-              :value="part.midi_channel || 1"
-              :disabled="!canEdit"
-              @change="
-                updatePart({
-                  ...part!,
-                  midi_channel: Number(
-                    ($event.target as HTMLInputElement).value,
-                  ),
-                })
-              "
-          /></label>
-          <label
-            >Beats per bar<input
-              type="number"
-              min="1"
-              max="16"
-              :value="doc.beats_per_bar"
-              :disabled="!canEdit"
-              @change="
-                meter(
-                  'beats_per_bar',
-                  Number(($event.target as HTMLInputElement).value),
-                )
-              "
-          /></label>
-          <label
-            >Beat unit<select
-              aria-label="Beat unit"
-              :value="doc.beat_unit || 4"
-              :disabled="!canEdit"
-              @change="
-                meter(
-                  'beat_unit',
-                  Number(($event.target as HTMLSelectElement).value),
-                )
-              "
-            >
-              <option v-for="u in [1, 2, 4, 8, 16, 32]" :key="u" :value="u">
-                {{ u }}
-              </option>
-            </select></label
-          >
-        </div>
-        <div v-for="s in staves(part)" :key="s.id" class="part-routing">
-          <label
-            >Staff name<input
-              :value="s.name"
-              :disabled="!canEdit"
-              @change="
-                editStaff(s, {
-                  name: ($event.target as HTMLInputElement).value,
-                })
-              " /></label
-          ><label
-            >Clef<select
-              aria-label="Clef"
-              :value="s.clef"
-              :disabled="!canEdit"
-              @change="
-                editStaff(s, {
-                  clef: ($event.target as HTMLSelectElement).value,
-                })
-              "
-            >
-              <option v-for="c in ['treble', 'bass', 'alto', 'tenor']" :key="c">
-                {{ c }}
-              </option>
-            </select></label
-          ><label
-            >Key signature<select
-              aria-label="Key signature"
-              :value="s.key_signature || ''"
-              :disabled="!canEdit"
-              @change="
-                editStaff(s, {
-                  key_signature:
-                    ($event.target as HTMLSelectElement).value || null,
-                })
-              "
-            >
-              <option value="">Inherit score / part key</option>
-              <option v-for="k in keyNames" :key="k" :value="k">
-                {{ keyLabel(k, s.key_mode) }}
-              </option>
-            </select></label
-          ><label
-            >Key mode<select
-              aria-label="Key mode"
-              :value="s.key_mode || 'major'"
-              :disabled="!canEdit"
-              @change="
-                editStaff(s, {
-                  key_mode: ($event.target as HTMLSelectElement).value as
-                    'major' | 'minor',
-                })
-              "
-            >
-              <option value="major">Major</option>
-              <option value="minor">Minor</option>
-            </select></label
-          ><label
-            >Sounding transposition<input
-              type="number"
-              min="-48"
-              max="48"
-              :value="s.transpose"
-              :disabled="!canEdit"
-              @change="
-                editStaff(s, {
-                  transpose: Number(($event.target as HTMLInputElement).value),
-                })
-              " /></label
-          ><label
-            >Staff instrument<select
-              aria-label="Staff instrument"
-              :value="s.instrument_node || ''"
-              :disabled="!canEdit"
-              @change="
-                editStaff(s, {
-                  instrument_node:
-                    ($event.target as HTMLSelectElement).value || null,
-                })
-              "
-            >
-              <option value="">Inherit part</option>
-              <option
-                v-for="n in doc.graph.nodes.filter((n) =>
-                  ['synth', 'fm_synth', 'input', 'browser_input'].includes(
-                    n.kind,
-                  ),
-                )"
-                :key="n.id"
-                :value="n.id"
-              >
-                {{ n.label }}
-              </option>
-            </select></label
-          ><label
-            >Staff MIDI port<input
-              :value="s.midi_port || ''"
-              :disabled="!canEdit"
-              placeholder="Inherit part"
-              @change="
-                editStaff(s, {
-                  midi_port: ($event.target as HTMLInputElement).value || null,
-                })
-              " /></label
-          ><label
-            >Staff MIDI channel<input
-              type="number"
-              min="1"
-              max="16"
-              placeholder="Inherit"
-              :value="s.midi_channel ?? ''"
-              :disabled="!canEdit"
-              @change="
-                editStaff(s, {
-                  midi_channel: ($event.target as HTMLInputElement).value
-                    ? Number(($event.target as HTMLInputElement).value)
-                    : null,
-                })
-              " /></label
-          ><label
-            >Change at beat<input
-              v-model.number="clefBeat"
-              type="number"
-              min="0"
-              step="0.25" /></label
-          ><select v-model="newClef" aria-label="New clef">
-            <option v-for="c in ['treble', 'bass', 'alto', 'tenor']" :key="c">
-              {{ c }}
-            </option></select
-          ><button
-            :disabled="!canEdit"
-            @click="
-              editStaff(s, {
-                clef_changes: [
-                  ...(s.clef_changes || []).filter((c) => c.beat !== clefBeat),
-                  { beat: clefBeat, clef: newClef },
-                ].sort((a, b) => a.beat - b.beat),
-              })
-            "
-          >
-            Add clef change</button
-          ><span v-for="c in s.clef_changes" :key="c.beat"
-            >{{ c.beat }}: {{ c.clef }}
-            <button
-              :disabled="!canEdit"
-              @click="
-                editStaff(s, {
-                  clef_changes: s.clef_changes!.filter(
-                    (x) => x.beat !== c.beat,
-                  ),
-                })
-              "
-            >
-              Remove
-            </button></span
-          >
-        </div>
-        <button
-          :disabled="!canEdit || staves(part).length >= 8"
-          @click="addStaff"
-        >
-          ＋ Add staff
-        </button>
-      </div></ScoreDialog
-    >
+      ><ScorePartDialog
+        :project="doc"
+        :part="part"
+        :editable="canEdit"
+        :members="members"
+        :initial-staff="selectedElement?.kind === 'staff' ? selectedElement.staff : undefined"
+        @update="updatePart"
+        @staff="editStaff"
+        @meter="meter"
+        @add-staff="addStaff"
+    /></ScoreDialog>
     <ScoreDialog
       v-if="dialog === 'measure' && region"
       :title="`Measure · ${regionLabel} · ${doc.parts.find((p) => p.id === region!.part)?.name || ''}`"
@@ -4238,6 +4117,32 @@ watch(
   width: 70px;
   padding: 0;
 }
+.zoom-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.zoom-control button {
+  min-height: 24px;
+  min-width: 26px;
+  padding: 0 6px;
+  border: 1px solid #d9e0e1;
+  border-radius: 4px;
+  background: #fff;
+  color: #111;
+  font-size: 13px;
+}
+.zoom-control output {
+  min-width: 36px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+@media (pointer: coarse) {
+  .zoom-control button {
+    min-height: 40px;
+    min-width: 40px;
+  }
+}
 .midi-entry-status {
   max-width: 160px;
   overflow: hidden;
@@ -4301,5 +4206,193 @@ watch(
 }
 .score-workspace :deep(.midi-lane) {
   border-color: #d9e0e1;
+}
+/* Part list: compact header bar, full-width rows, drag handle, tiny control groups. */
+.score-parts {
+  width: 232px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.score-parts.collapsed {
+  width: 36px;
+}
+.parts-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.score-parts .parts-toggle,
+.score-parts .parts-group button {
+  min-height: 24px;
+  height: 24px;
+  width: 24px;
+  min-width: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: #111;
+}
+.parts-title {
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: auto;
+}
+.parts-group {
+  display: inline-flex;
+}
+.parts-group button + button {
+  margin-left: -1px;
+}
+.parts-group button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+.parts-group button:last-child {
+  border-radius: 0 4px 4px 0;
+}
+.parts-group button:not(:first-child):not(:last-child) {
+  border-radius: 0;
+}
+.parts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1;
+}
+.part-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 4px 6px 4px 2px;
+  border-bottom: 1px solid #edf0f0;
+  background: #fff;
+}
+.part-row.focused {
+  background: #e4f3f2;
+  box-shadow: inset 3px 0 0 #087f8c;
+}
+.part-row.muted .part-main {
+  opacity: 0.55;
+}
+.part-row.dragging {
+  opacity: 0.5;
+}
+.part-order {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  width: 20px;
+  flex-shrink: 0;
+}
+.score-parts .part-order button {
+  min-height: 16px;
+  height: 16px;
+  width: 20px;
+  min-width: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #526267;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.score-parts .part-order button:disabled {
+  opacity: 0.25;
+}
+.part-grip {
+  color: #8a9a9d;
+  cursor: grab;
+  display: inline-flex;
+}
+.part-row[draggable='true'] {
+  cursor: default;
+}
+.score-parts .part-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+  color: #111;
+}
+.score-parts .part-main strong,
+.score-parts .part-main small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.score-parts .part-main small {
+  font-size: 10px;
+  color: #526267;
+  margin-top: 1px;
+}
+.part-controls {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.score-parts .part-controls button {
+  min-height: 18px;
+  height: 18px;
+  width: 22px;
+  min-width: 22px;
+  padding: 0;
+  border: 1px solid #cbd5d7;
+  background: #fff;
+  color: #111;
+  font-size: 10px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+}
+.score-parts .part-controls button + button {
+  margin-top: -1px;
+}
+.score-parts .part-controls button:first-child {
+  border-radius: 4px 4px 0 0;
+}
+.score-parts .part-controls button:last-child {
+  border-radius: 0 0 4px 4px;
+}
+.score-parts .part-controls button[aria-pressed='true'] {
+  background: #c9ead1;
+  color: #14532d;
+  border-color: #16803c;
+}
+.score-parts .part-check[aria-checked='true'] {
+  background: #087f8c;
+  color: #fff;
+  border-color: #087f8c;
+}
+@media (pointer: coarse) {
+  .score-parts .part-controls button,
+  .score-parts .part-order button {
+    height: 26px;
+    min-height: 26px;
+  }
+  .score-parts .parts-toggle,
+  .score-parts .parts-group button {
+    height: 32px;
+    min-height: 32px;
+    width: 32px;
+    min-width: 32px;
+  }
 }
 </style>

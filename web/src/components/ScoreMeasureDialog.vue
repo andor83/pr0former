@@ -233,9 +233,9 @@ function apply() {
 const barCount = computed(() => toBar.value - fromBar.value + 1)
 </script>
 <template>
-  <div class="measure-dialog">
+  <div class="sd-dialog">
     <p v-if="error" role="alert" class="field-error">{{ error }}</p>
-    <div class="measure-region">
+    <div class="sd-strip">
       <strong>{{
         toEnd
           ? `Bar ${fromBar} to end`
@@ -256,12 +256,12 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           :min="fromBar"
           :max="bars.length"
           :disabled="toEnd" /></label
-      ><label class="check-label"
+      ><label class="sd-check"
         ><input v-model="toEnd" type="checkbox" /> To end of score</label
       ><small>{{ part?.name }} · {{ bars.length }} bars</small>
     </div>
-    <div class="measure-layout">
-      <nav aria-label="Measure tools">
+    <div class="sd-layout">
+      <nav class="sd-nav" aria-label="Measure tools">
         <button
           v-for="t in tabs"
           :key="t.id"
@@ -271,17 +271,17 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           :aria-label="t.label"
           @click="tab = t.id"
         >
-          <span class="tab-symbol">{{ t.symbol }}</span>{{ t.label }}
+          <span class="sd-symbol">{{ t.symbol }}</span>{{ t.label }}
         </button>
       </nav>
-      <section>
+      <section class="sd-section">
         <template v-if="tab === 'meter'">
-          <div class="meter-editor">
-            <div class="meter-preview" aria-live="polite">
+          <div class="sd-meter-editor">
+            <div class="sd-meter-preview" aria-live="polite">
               <span>{{ beats }}</span><span>{{ unit }}</span>
             </div>
-            <div class="steppers">
-              <div class="stepper">
+            <div class="sd-steppers">
+              <div class="sd-stepper">
                 <span>Beats per bar</span>
                 <button
                   type="button"
@@ -299,7 +299,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
                   +
                 </button>
               </div>
-              <div class="stepper">
+              <div class="sd-stepper">
                 <span>Beat unit</span>
                 <button
                   type="button"
@@ -321,7 +321,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               </div>
             </div>
           </div>
-          <div class="quick-picks">
+          <div class="sd-quick">
             <button
               v-for="m in ['2/4', '3/4', '4/4', '5/4', '6/8', '7/8', '9/8', '12/8']"
               :key="m"
@@ -338,7 +338,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               {{ m }}
             </button>
           </div>
-          <p>
+          <p class="sd-note">
             The time signature changes at bar {{ fromBar }}.
             {{
               toEnd
@@ -349,7 +349,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           </p>
         </template>
         <template v-else-if="tab === 'key'">
-          <div class="key-row" role="radiogroup" aria-label="Key signature">
+          <div class="sd-keys" role="radiogroup" aria-label="Key signature">
             <button
               v-for="k in keyNames"
               :key="k"
@@ -365,14 +365,14 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               ><small>{{ accidentals(k) || '♮' }}</small>
             </button>
           </div>
-          <div class="option-row">
+          <div class="sd-row">
             <label
               ><input v-model="keyMode" type="radio" value="major" /> Major</label
             ><label
               ><input v-model="keyMode" type="radio" value="minor" /> Minor</label
             >
           </div>
-          <fieldset class="option-row">
+          <fieldset class="sd-row">
             <legend>Notes in these bars</legend>
             <label
               ><input v-model="transposeNotes" type="radio" value="hold" /> Hold
@@ -385,14 +385,14 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               Transpose down</label
             >
           </fieldset>
-          <p>
+          <p class="sd-note">
             {{ keyLabel(key, keyMode) }} from bar {{ fromBar }}{{
               toEnd ? ' to the end' : `; the previous key resumes after bar ${toBar}`
             }}.
           </p>
         </template>
         <template v-else-if="tab === 'repeat'">
-          <div class="stepper">
+          <div class="sd-stepper">
             <span>Passes</span>
             <button
               type="button"
@@ -425,7 +425,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               </option>
             </select></label
           >
-          <p>
+          <p class="sd-note">
             Repeat bars {{ fromBar }}–{{ toBar }} {{ times }} times
             (𝄆 at bar {{ fromBar }}, 𝄇 after bar {{ toBar }}).
             {{
@@ -437,7 +437,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           <button
             v-if="existingRepeat"
             type="button"
-            class="danger"
+            class="sd-danger"
             :disabled="!editable"
             @click="change(() => removeRepeats(project, start, end))"
           >
@@ -445,7 +445,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           </button>
         </template>
         <template v-else-if="tab === 'navigation'">
-          <fieldset class="option-column">
+          <fieldset class="sd-column">
             <legend>Text repeat at the end of bar {{ toBar }}</legend>
             <label
               ><input v-model="jump" type="radio" value="dc_fine" /> D.C. al
@@ -461,7 +461,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               Coda — segno at bar {{ fromBar }}</label
             >
           </fieldset>
-          <div class="option-row">
+          <div class="sd-row">
             <label v-if="jump.endsWith('fine')"
               >Fine after bar<input
                 v-model.number="fineBar"
@@ -486,7 +486,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           <button
             v-if="nav"
             type="button"
-            class="danger"
+            class="sd-danger"
             :disabled="!editable"
             @click="change(() => setNavigation(project, null))"
           >
@@ -494,7 +494,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           </button>
         </template>
         <template v-else-if="tab === 'barline'">
-          <div class="quick-picks" role="radiogroup" aria-label="Barline style">
+          <div class="sd-quick" role="radiogroup" aria-label="Barline style">
             <button
               v-for="[style, symbol, name] in [
                 ['normal', '𝄀', 'Normal'],
@@ -509,10 +509,10 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               :aria-label="`${name} barline`"
               @click="barlineStyle = style!"
             >
-              <span class="tab-symbol">{{ symbol }}</span>{{ name }}
+              <span class="sd-symbol">{{ symbol }}</span>{{ name }}
             </button>
           </div>
-          <p>Applies to the barline after bar {{ toBar }}.</p>
+          <p class="sd-note">Applies to the barline after bar {{ toBar }}.</p>
         </template>
         <template v-else-if="tab === 'clef'">
           <label
@@ -522,7 +522,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               </option>
             </select></label
           >
-          <div class="quick-picks" role="radiogroup" aria-label="Clef">
+          <div class="sd-quick" role="radiogroup" aria-label="Clef">
             <button
               v-for="[c, symbol] in [
                 ['treble', '𝄞'],
@@ -537,13 +537,13 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               :aria-label="`${c} clef`"
               @click="clef = c!"
             >
-              <span class="tab-symbol">{{ symbol }}</span>{{ c }}
+              <span class="sd-symbol">{{ symbol }}</span>{{ c }}
             </button>
           </div>
-          <p>The clef changes at the start of bar {{ fromBar }}.</p>
+          <p class="sd-note">The clef changes at the start of bar {{ fromBar }}.</p>
         </template>
         <template v-else-if="tab === 'tempo'">
-          <div class="stepper">
+          <div class="sd-stepper">
             <span>♩ per minute</span>
             <button type="button" aria-label="Slower" @click="bpm = Math.max(1, bpm - 1)">
               −
@@ -555,13 +555,13 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               max="400"
               step="0.5"
               aria-label="Quarter notes per minute"
-              class="tempo-input"
+              class="sd-tempo-input"
             />
             <button type="button" aria-label="Faster" @click="bpm = Math.min(400, bpm + 1)">
               +
             </button>
           </div>
-          <div class="quick-picks">
+          <div class="sd-quick">
             <button
               v-for="t in [60, 72, 84, 96, 108, 120, 132, 144, 160]"
               :key="t"
@@ -572,7 +572,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               {{ t }}
             </button>
           </div>
-          <p>
+          <p class="sd-note">
             The tempo changes at the start of bar {{ fromBar }} and stays in force
             until the next tempo mark. Manual tempo edits during playback last until
             the next mark. At bar 1 this also sets the project tempo and count-in.
@@ -580,7 +580,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           <button
             v-if="tempoHere"
             type="button"
-            class="danger"
+            class="sd-danger"
             :disabled="!editable"
             @click="change(() => removeTempo(project, start))"
           >
@@ -588,15 +588,15 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
           </button>
         </template>
         <template v-else-if="tab === 'edit'">
-          <fieldset class="option-column">
+          <fieldset class="sd-column">
             <legend>Transpose notes in bars {{ fromBar }}–{{ toBar }}</legend>
-            <div class="stepper">
+            <div class="sd-stepper">
               <span>Diatonic steps</span>
               <button type="button" aria-label="Step down" @click="steps--">−</button>
               <output aria-label="Diatonic steps">{{ steps }}</output>
               <button type="button" aria-label="Step up" @click="steps++">+</button>
             </div>
-            <div class="stepper">
+            <div class="sd-stepper">
               <span>Semitones</span>
               <button type="button" aria-label="Semitone down" @click="semitones--">
                 −
@@ -606,7 +606,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
                 +
               </button>
             </div>
-            <div class="quick-picks">
+            <div class="sd-quick">
               <button
                 type="button"
                 :disabled="!editable || (!steps && !semitones)"
@@ -636,9 +636,9 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               </button>
             </div>
           </fieldset>
-          <fieldset class="option-column">
+          <fieldset class="sd-column">
             <legend>Change note durations</legend>
-            <div class="quick-picks">
+            <div class="sd-quick">
               <button
                 v-for="[factor, label] in [
                   [2, 'Double (×2)'],
@@ -658,12 +658,12 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
                 {{ label }}
               </button>
             </div>
-            <p>
+            <p class="sd-note">
               Onsets are scaled from the start of bar {{ fromBar }}; later music is
               not shifted, so doubling can overlap following bars.
             </p>
           </fieldset>
-          <fieldset class="option-row">
+          <fieldset class="sd-row">
             <legend>Move notes</legend>
             <label
               >To voice<select v-model.number="targetVoice" aria-label="Move to voice">
@@ -693,7 +693,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               Move to staff
             </button>
           </fieldset>
-          <p>
+          <p class="sd-note">
             Copy, cut and paste selected bars with Ctrl/Cmd-C, X and V; paste
             lands at the caret in Write mode or at the selected bars in Select mode.
           </p>
@@ -706,7 +706,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               min="1"
               max="1024"
           /></label>
-          <div class="quick-picks">
+          <div class="sd-quick">
             <button
               type="button"
               :disabled="!editable"
@@ -736,7 +736,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               Add {{ count }} at end</button
             ><button
               type="button"
-              class="danger"
+              class="sd-danger"
               :disabled="!editable"
               @click="change(() => editBars(project, 'delete', fromBar, barCount))"
             >
@@ -751,17 +751,17 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               Clear contents of bars {{ fromBar }}–{{ toBar }}
             </button>
           </div>
-          <p>
+          <p class="sd-note">
             Insertion and deletion shift every part, signature, repeat and MIDI
             event together. Undo restores the whole edit.
           </p>
         </template>
       </section>
     </div>
-    <footer v-if="tab !== 'bars' && tab !== 'edit'">
+    <footer v-if="tab !== 'bars' && tab !== 'edit'" class="sd-footer">
       <button
         type="button"
-        class="primary"
+        class="sd-primary"
         :disabled="!editable"
         @click="apply"
       >
@@ -771,231 +771,4 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
     </footer>
   </div>
 </template>
-<style scoped>
-.measure-dialog {
-  font-size: 12px;
-  color: #111;
-}
-.measure-region {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 14px;
-  border-bottom: 1px solid #d9e0e1;
-}
-.measure-region strong {
-  font-size: 15px;
-  min-width: 120px;
-}
-.measure-region label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.measure-region input[type='number'] {
-  width: 70px;
-}
-.measure-region small {
-  color: #526267;
-  margin-left: auto;
-}
-.measure-layout {
-  display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
-  min-height: 260px;
-}
-.measure-layout nav {
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid #d9e0e1;
-  background: #f4f7f7;
-}
-.measure-layout nav button {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 42px;
-  padding: 8px 12px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: #111;
-  text-align: left;
-  cursor: pointer;
-  font-size: 12px;
-}
-.measure-layout nav button.active {
-  background: #fff;
-  font-weight: 600;
-  box-shadow: inset 3px 0 0 #087f8c;
-}
-.tab-symbol {
-  display: inline-flex;
-  justify-content: center;
-  width: 28px;
-  font-size: 22px;
-  line-height: 1;
-}
-.measure-layout section {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 16px;
-}
-.measure-layout p {
-  color: #526267;
-  line-height: 1.5;
-  margin: 0;
-}
-.meter-editor {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-}
-.meter-preview {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  width: 70px;
-  font-family: serif;
-  font-size: 34px;
-  font-weight: 700;
-  line-height: 0.95;
-  border-top: 1px solid #111;
-  border-bottom: 1px solid #111;
-  padding: 4px 0;
-}
-.steppers {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.stepper {
-  display: grid;
-  grid-template-columns: 110px 40px 48px 40px;
-  align-items: center;
-  gap: 4px;
-}
-.stepper button,
-.quick-picks button,
-.key-row button,
-footer button {
-  min-height: 40px;
-  border: 1px solid #cbd5d7;
-  border-radius: 4px;
-  background: #fff;
-  color: #111;
-  cursor: pointer;
-  font-size: 15px;
-}
-.stepper output {
-  text-align: center;
-  font-size: 18px;
-  font-weight: 600;
-}
-.stepper .tempo-input {
-  width: 100%;
-  text-align: center;
-  font-size: 16px;
-  font-weight: 600;
-  padding: 4px;
-}
-.quick-picks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.quick-picks button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  font-size: 13px;
-}
-.quick-picks button[aria-pressed='true'],
-.quick-picks button[aria-checked='true'],
-.key-row button[aria-checked='true'] {
-  background: #e4f3f2;
-  border-color: #087f8c;
-  color: #075c65;
-}
-.key-row {
-  display: grid;
-  grid-template-columns: repeat(8, minmax(52px, 1fr));
-  gap: 6px;
-}
-.key-row button {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 48px;
-  padding: 4px;
-  line-height: 1.2;
-}
-.key-row strong {
-  font-size: 15px;
-}
-.key-row small {
-  font-size: 11px;
-  color: #526267;
-}
-.option-row,
-.option-column {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  border: 0;
-  padding: 0;
-  margin: 0;
-}
-.option-column {
-  flex-direction: column;
-  gap: 8px;
-}
-.option-row label,
-.option-column label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.option-row input[type='number'] {
-  width: 70px;
-}
-legend {
-  font-weight: 600;
-  padding-bottom: 6px;
-}
-button.danger {
-  color: #9c2d16;
-  align-self: flex-start;
-}
-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 10px 14px;
-  border-top: 1px solid #d9e0e1;
-}
-footer .primary {
-  background: #087f8c;
-  border-color: #087f8c;
-  color: #fff;
-  padding: 0 22px;
-}
-@media (max-width: 700px) {
-  .measure-layout {
-    grid-template-columns: 1fr;
-  }
-  .measure-layout nav {
-    flex-direction: row;
-    flex-wrap: wrap;
-    border-right: 0;
-    border-bottom: 1px solid #d9e0e1;
-  }
-  .key-row {
-    grid-template-columns: repeat(5, minmax(52px, 1fr));
-  }
-}
-</style>
+<style src="./scoreDialogLayout.css"></style>

@@ -947,6 +947,7 @@ test('centered paper toolbar, clean beaming and structural bar edits persist acr
   await expect
     .poll(async () => (await read()).score?.meters)
     .toEqual([{ beat: 4, beats: 3, unit: 4 }])
+  await dialog.getByRole('button', { name: 'Add / delete bars', exact: true }).click()
   await expect(
     dialog.getByRole('button', { name: 'Insert before bar 2', exact: true }),
   ).toBeEnabled()
@@ -971,6 +972,7 @@ test('centered paper toolbar, clean beaming and structural bar edits persist acr
     .getByRole('button', { name: 'Add bars at end', exact: true })
     .click()
   await expect.poll(async () => (await read()).score.length).toBe(16)
+  await dialog.getByRole('button', { name: 'Clef change', exact: true }).click()
   await expect(
     dialog.getByRole('button', { name: 'Set clef at beat', exact: true }),
   ).toBeEnabled()

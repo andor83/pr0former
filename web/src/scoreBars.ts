@@ -600,3 +600,57 @@ export function removeMark(project: Project, partId: string, staffId: string, id
   if (staff) staff.marks = (staff.marks || []).filter((m) => m.id !== id)
   return p
 }
+
+/**
+ * Finale “Create Forward Repeat Bar”: 𝄆 at the start of the bar containing `beat`.
+ * With no matching end yet, the repeat runs to the end of the score (or to the next
+ * repeat); an end placed later shortens it. Inside an existing repeat, it moves that
+ * repeat's start.
+ */
+export function placeRepeatBegin(project: Project, beat: number) {
+  const p = JSON.parse(JSON.stringify(project)) as Project
+  p.score = sharedTimeline(p)
+  const bar = measures(p).find((m) => m.start <= beat + 1e-9 && m.end > beat + 1e-9)
+  if (!bar) throw new Error('Click inside a bar.')
+  const start = bar.start,
+    inside = p.score.repeats.find((r) => r.start < start && r.end > start)
+  if (inside) {
+    inside.start = start
+    if (inside.first_ending != null && inside.first_ending <= start) inside.first_ending = null
+    return p
+  }
+  if (p.score.repeats.some((r) => r.start === start)) return p
+  const next = p.score.repeats.filter((r) => r.start > start).sort((a, b) => a.start - b.start)[0]
+  const end = next ? next.start : p.score.length
+  if (!(end > start)) throw new Error('There is no room for a repeat here.')
+  p.score.repeats = [...p.score.repeats, { start, end, times: 2, first_ending: null }].sort(
+    (a, b) => a.start - b.start,
+  )
+  return p
+}
+/**
+ * Finale “Create Backward Repeat Bar”: 𝄇 at the end of the bar containing `beat`.
+ * Closes an open repeat that spans this bar; otherwise repeats from the top of the
+ * score, or from the end of the previous repeat when one exists (repeats cannot nest).
+ */
+export function placeRepeatEnd(project: Project, beat: number, times = 2) {
+  const p = JSON.parse(JSON.stringify(project)) as Project
+  p.score = sharedTimeline(p)
+  const bar = measures(p).find((m) => m.start <= beat + 1e-9 && m.end > beat + 1e-9)
+  if (!bar) throw new Error('Click inside a bar.')
+  const end = bar.end,
+    spanning = p.score.repeats.find((r) => r.start < end && r.end > end)
+  if (spanning) {
+    spanning.end = end
+    if (spanning.first_ending != null && spanning.first_ending >= end) spanning.first_ending = null
+    return p
+  }
+  if (p.score.repeats.some((r) => r.end === end)) return p
+  const previous = p.score.repeats.filter((r) => r.end <= end).sort((a, b) => b.end - a.end)[0]
+  const start = previous ? previous.end : 0
+  if (!(end > start)) throw new Error('There is no room for a repeat here.')
+  p.score.repeats = [...p.score.repeats, { start, end, times, first_ending: null }].sort(
+    (a, b) => a.start - b.start,
+  )
+  return p
+}
