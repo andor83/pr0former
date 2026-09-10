@@ -10,6 +10,8 @@ for (const feed of ['', 'cue']) {
     // Silent patch: any received audio energy during the count comes from clicks.
     project.graph = { nodes: [{ id: 'cue', kind: 'monitor_output', label: 'Cue', x: 0, y: 0, channels: 2, parameters: {} }], edges: [] }
     project = await (await page.request.put(`/api/projects/${project.id}`, { headers, data: project })).json()
+    // Exercise both resampling directions and the smallest DSP block size.
+    expect((await page.request.put(`/api/projects/${project.id}/system/audio`, {headers,data:{sample_rate:feed ? 96000 : 44100,block_size:32,interfaces:[],input_interfaces:[]}})).ok()).toBe(true)
     const transport = (action: string, count_in_beats = 0) => page.request.post(`/api/projects/${project.id}/transport`, { headers, data: { action, count_in_beats } })
     await page.addInitScript(() => {
       const Native = RTCPeerConnection
@@ -24,7 +26,7 @@ for (const feed of ['', 'cue']) {
     await page.goto('/')
     await expect(page.getByLabel('Count in', { exact: true })).toHaveValue('bar')
     await expect(page.getByRole('option', { name: '1 bar (6 beats)' })).toHaveCount(1)
-    await page.getByRole('button', { name: 'Activate show', exact: true }).click()
+    await page.getByRole('button', { name: 'Enable audio engine', exact: true }).click()
     await page.getByRole('button', { name: 'Monitor', exact: true }).click()
     await page.getByLabel('Monitor feed').selectOption(feed)
     await page.getByRole('button', { name: 'Connect monitor', exact: true }).click()
@@ -63,8 +65,8 @@ for (const feed of ['', 'cue']) {
     await page.waitForTimeout(1100)
     expect(latest.running).toBe(false); expect(latest.beat).toBe(0)
     for (const count of [-1, 1.5, 33, 256]) expect((await transport('play', count)).ok()).toBe(false)
-    await page.getByRole('button', { name: 'Deactivate show', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Activate show', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Disable audio engine', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Enable audio engine', exact: true })).toBeVisible()
     await page.getByLabel('Count in', { exact: true }).selectOption('0')
     await page.getByRole('button', { name: 'Play', exact: true }).click()
     await expect.poll(() => latest?.running).toBe(true)

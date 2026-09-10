@@ -53,5 +53,5 @@ test('spectral math and drawn curves modify live frames and persist through undo
   invalid.graph.nodes.find((n: any) => n.id === 'spectral_curve').parameters.magnitude_curve_0 = 3
   expect((await page.request.put(`/api/projects/${project.id}`, { headers, data: invalid })).status()).toBe(400)
   await page.getByRole('button', { name: 'Close parameters' }).click()
-  await page.getByRole('button', { name: 'Deactivate show', exact: true }).click()
+  await page.getByRole('button', { name: 'Disable audio engine', exact: true }).click()
 })

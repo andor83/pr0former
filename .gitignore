@@ -12,3 +12,14 @@
 /certs/
 
 /recordings/
+
+/desktop/node_modules/
+/desktop/src-tauri/target/
+/desktop/src-tauri/binaries/
+/desktop/src-tauri/resources/
+/desktop/src-tauri/frameworks/
+/desktop/src-tauri/bundle.generated.json
+/desktop/src-tauri/gen/
+/desktop/.build/
+
+/test-results

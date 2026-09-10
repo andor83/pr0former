@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "pr0former",
+  "version": "0.1.0",
+  "identifier": "org.pr0former.desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "capabilities": [],
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": [
+      "binaries/pr0-server",
+      "binaries/ffmpeg"
+    ],
+    "resources": {
+      "resources/": "resources/"
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      },
+      "deb": {
+        "depends": [
+          "libasound2",
+          "libopus0"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "alsa-lib",
+          "opus"
+        ]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ]
+  }
+}

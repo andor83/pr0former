@@ -56,6 +56,10 @@ pub struct Sequencer {
     pub lanes: Vec<Lane>,
     pub last_running: bool,
     pub last_beat: f64,
+    /// Written-position tempo map (beat, bpm), applied edge-triggered so manual
+    /// tempo edits between entries are respected.
+    tempos: Vec<(f64, f64)>,
+    last_written: Option<f64>,
 }
 pub enum External {
     Note {
@@ -72,7 +76,13 @@ impl Sequencer {
     pub fn new(p: &Project) -> Self {
         let autoplay = matches!(p.mode, pr0_core::Mode::Structured);
         let mut prepared = p.clone();
+        let solo = prepared.parts.iter().any(|p| p.solo);
         for part in &mut prepared.parts {
+            if part.muted || (solo && !part.solo) {
+                part.notes.clear();
+                part.automation.clear();
+                part.dynamics = None;
+            }
             let original = part.notes.clone();
             let by_id: std::collections::BTreeMap<_, _> =
                 original.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -189,8 +199,15 @@ impl Sequencer {
                 part_spans.insert(part.id.clone(), local_spans);
             }
         }
+        let tempos = p
+            .score
+            .as_ref()
+            .map(|s| s.tempos.iter().map(|t| (t.beat, t.bpm)).collect())
+            .unwrap_or_default();
         Self {
             autoplay,
+            tempos,
+            last_written: None,
             lanes: prepared
                 .parts
                 .iter()
@@ -382,6 +399,60 @@ impl Sequencer {
             }
         }
     }
+    /// Written score position of the shared traversal for the current clock beat.
+    pub fn written_position(&self, beat: f64) -> f64 {
+        let Some(lane) = self.lanes.first() else {
+            return beat;
+        };
+        if lane.score_spans.is_empty() {
+            return beat;
+        }
+        let elapsed = if lane.looping {
+            (beat - lane.start).rem_euclid(lane.length)
+        } else {
+            (beat - lane.start).min(lane.length)
+        };
+        lane.score_spans
+            .iter()
+            .find(|s| elapsed < s.elapsed + s.end - s.start)
+            .map(|s| s.start + elapsed - s.elapsed)
+            .unwrap_or(elapsed)
+    }
+    /// Edge-triggered tempo map: on start/resume/rewind apply the tempo in force,
+    /// then apply each entry as the written position crosses it.
+    fn apply_tempo_map(&mut self, beat: f64, restart: bool, engine: &mut pr0_dsp::Engine) {
+        if self.tempos.is_empty() {
+            return;
+        }
+        let written = self.written_position(beat);
+        let previous = if restart { None } else { self.last_written };
+        self.last_written = Some(written);
+        let target = match previous {
+            None => self
+                .tempos
+                .iter()
+                .filter(|t| t.0 <= written + 1e-9)
+                .last()
+                .map(|t| t.1),
+            Some(last) if written < last => self
+                .tempos
+                .iter()
+                .filter(|t| t.0 <= written + 1e-9)
+                .last()
+                .map(|t| t.1),
+            Some(last) => self
+                .tempos
+                .iter()
+                .filter(|t| t.0 > last + 1e-9 && t.0 <= written + 1e-9)
+                .last()
+                .map(|t| t.1),
+        };
+        if let Some(bpm) = target {
+            if (engine.clock.bpm - bpm).abs() > 1e-9 {
+                engine.clock.set_tempo(bpm);
+            }
+        }
+    }
     pub fn reset(&mut self, engine: &mut pr0_dsp::Engine, io: &SyncSender<External>) {
         for lane in &mut self.lanes {
             lane.release(engine, io);
@@ -469,11 +540,14 @@ impl Sequencer {
             }
         }
         let resuming = running && !self.last_running;
+        let rewound = beat < self.last_beat;
         self.last_beat = beat;
         self.last_running = running;
         if !running {
+            self.last_written = None;
             return;
         }
+        self.apply_tempo_map(beat, resuming || rewound, engine);
         if self.autoplay
             && self
                 .lanes
@@ -1212,9 +1286,85 @@ mod score_tests {
     use super::*;
     use pr0_core::score::*;
     #[test]
+    fn tempo_map_changes_clock_tempo_at_written_positions_and_respects_manual_edits() {
+        let mut p =
+            pr0_core::demo_project("tempo".into(), "tempo".into(), pr0_core::Mode::Structured);
+        p.score = Some(
+            serde_json::from_value(serde_json::json!({
+                "version": 1, "length": 8.0, "loop_score": false,
+                "meters": [], "keys": [], "repeats": [],
+                "tempos": [{"beat": 0.0, "bpm": 60.0}, {"beat": 2.0, "bpm": 120.0}]
+            }))
+            .unwrap(),
+        );
+        let mut engine = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        engine.clock.running = true;
+        engine.clock.bpm = 100.;
+        let mut seq = Sequencer::new(&p);
+        let (tx, rx) = sync_channel(256);
+        seq.tick(&mut engine, &tx);
+        assert_eq!(engine.clock.bpm, 60.);
+        let mut guard = 0;
+        while engine.clock.beat < 2. && guard < 200_000 {
+            engine.render(&[], &mut [[0.; 8]; 1]);
+            seq.tick(&mut engine, &tx);
+            while rx.try_recv().is_ok() {}
+            guard += 1;
+        }
+        assert_eq!(engine.clock.bpm, 120.);
+        // A manual tempo edit after the last map entry stays in force.
+        engine.clock.set_tempo(90.);
+        for _ in 0..10 {
+            engine.render(&[], &mut [[0.; 8]; 1]);
+            seq.tick(&mut engine, &tx);
+        }
+        assert_eq!(engine.clock.bpm, 90.);
+        // Rewinding re-applies the tempo in force at the new position.
+        engine.clock.beat = 0.;
+        seq.tick(&mut engine, &tx);
+        assert_eq!(engine.clock.bpm, 60.);
+    }
+    #[test]
+    fn mute_and_solo_suppress_events_and_release_held_notes() {
+        let mut p = pr0_core::demo_project("mix".into(), "mix".into(), pr0_core::Mode::Structured);
+        p.parts[0].midi_port = Some("test-port".into());
+        let mut second = p.parts[0].clone();
+        second.id = "second".into();
+        p.parts.push(second);
+        let mut seq = Sequencer::new(&p);
+        let mut e = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        e.clock.running = true;
+        let (tx, rx) = sync_channel(256);
+        seq.tick(&mut e, &tx);
+        while rx.try_recv().is_ok() {}
+        p.parts[0].muted = true;
+        let mut prepared = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        prepared.clock = e.clock;
+        let next = seq.replace(&p, &mut e, &mut prepared, &tx);
+        assert!(next.lanes[0].events.is_empty());
+        assert!(!next.lanes[1].events.is_empty());
+        assert!(
+            rx.try_iter()
+                .any(|event| matches!(event, External::Note { velocity: 0, .. }))
+        );
+        p.parts[1].solo = true;
+        p.parts[0].muted = false;
+        let next = Sequencer::new(&p);
+        assert!(next.lanes[0].events.is_empty());
+        assert!(!next.lanes[1].events.is_empty());
+        p.parts[1].solo = false;
+        assert!(
+            Sequencer::new(&p)
+                .lanes
+                .iter()
+                .all(|l| !l.events.is_empty())
+        );
+    }
+    #[test]
     fn shared_repeat_positions_stop_and_restart_follow_engine_beats() {
         let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Structured);
         p.score = Some(Timeline {
+            barlines: vec![],
             version: 1,
             length: 8.,
             loop_score: false,
@@ -1231,7 +1381,8 @@ mod score_tests {
                 first_ending: None,
             }],
             navigation: None,
-        });
+            tempos: vec![],
+            });
         let mut seq = Sequencer::new(&p);
         assert_eq!(seq.lanes[0].length, 12.);
         assert_eq!(seq.playback(4.5)[0].position, 0.5);
@@ -1253,6 +1404,7 @@ mod score_tests {
         let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
         p.parts[0].loop_beats = 4.;
         p.score = Some(Timeline {
+            barlines: vec![],
             version: 1,
             length: 8.,
             loop_score: false,
@@ -1265,7 +1417,8 @@ mod score_tests {
                 first_ending: None,
             }],
             navigation: None,
-        });
+            tempos: vec![],
+            });
         let seq = Sequencer::new(&p);
         assert!(!seq.lanes[0].playing);
         assert!(seq.lanes[0].looping);

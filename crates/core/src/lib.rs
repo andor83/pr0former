@@ -172,6 +172,10 @@ pub struct Note {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Part {
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub solo: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamics: Option<score::Dynamics>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -558,6 +562,68 @@ pub fn catalog() -> Vec<Descriptor> {
         ],
         vec![],
         &["score", "notes", "part input"],
+    );
+    add(
+        "convolution",
+        "Convolution",
+        "∗",
+        "Audio",
+        "Continuously convolve overlapping audio grains from A with the latest audio window from B as a changing impulse response. Channels convolve independently. Normalize limits each B window's absolute sum; Wet/dry delays the dry path to match the analysis window. This is a live granular effect, not a fixed long reverb impulse response.",
+        vec![port("a", Audio), port("b", Audio)],
+        vec![port("out", Audio)],
+        vec![
+            Parameter {
+                structural: true,
+                ..param("window", "Window size", "samples", 128., 2048., 256.)
+            },
+            param("normalize", "Normalize response", "", 0., 1., 1.),
+            param("mix", "Wet/dry", "", 0., 1., 1.),
+        ],
+        &["live convolution", "cross synthesis"],
+    );
+    add(
+        "granular_synth",
+        "Granular synth",
+        "⋮",
+        "Audio",
+        "Sample-based granular instrument with 16 MIDI voices and 128 overlapping Hann grains. Connect pitch, velocity, gate, trigger and pitch-specific note_off from Piano, MIDI input or Part MIDI. Position selects a point in the sample; Spray scatters grain starts around it. Density is grains per second per held voice. The fixed grain pool steals grains at capacity.",
+        ["pitch", "velocity", "gate", "trigger", "note_off"]
+            .into_iter()
+            .map(|id| port(id, Control))
+            .collect(),
+        vec![port("out", Audio)],
+        vec![
+            Parameter {
+                structural: true,
+                ..param("asset", "Sample ID", "", 0., 1000000000., 0.)
+            },
+            param("root_note", "Root MIDI note", "", 0., 127., 60.),
+            param("position", "Position", "", 0., 1., 0.5),
+            param("spray", "Spray", "ms", 0., 500., 30.),
+            param("grain_ms", "Grain duration", "ms", 5., 500., 60.),
+            param("density", "Density", "grains/s", 1., 100., 30.),
+            param("amplitude", "Amplitude", "", 0., 1., 0.5),
+            param("release", "Release", "ms", 1., 2000., 120.),
+        ],
+        &["granular sampler", "grain cloud"],
+    );
+    add(
+        "granular_pitch_shift",
+        "Granular pitch shift",
+        "⇅",
+        "Audio",
+        "Streaming audio pitch shifting with two overlapping Hann-windowed read heads. Grain duration sets the tradeoff between response and modulation artifacts. Dry audio is delayed to match the zero-shift wet path; pitch changes latch at grain boundaries. No sample upload or offline processing is required.",
+        vec![port("in", Audio)],
+        vec![port("out", Audio)],
+        vec![
+            param("semitones", "Pitch shift", "semitones", -24., 24., 0.),
+            Parameter {
+                structural: true,
+                ..param("grain_ms", "Grain duration", "ms", 10., 200., 20.)
+            },
+            param("mix", "Wet/dry", "", 0., 1., 1.),
+        ],
+        &["realtime pitch shift", "live granular"],
     );
     add(
         "pitch_tracker",
@@ -1734,6 +1800,13 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
+            if n.kind == "convolution"
+                && n.parameters
+                    .get("window")
+                    .is_some_and(|v| v.fract() != 0. || !(*v as usize).is_power_of_two())
+            {
+                return Err("Convolution window must be a power of two".into());
+            }
             if n.kind == "pitch_tracker" {
                 let slots = n.parameters.get("slots").copied().unwrap_or(1.);
                 let size = n.parameters.get("fft_size").copied().unwrap_or(8192.);
@@ -1743,7 +1816,7 @@ impl Graph {
                     );
                 }
             }
-            if n.kind == "poly_sampler"
+            if matches!(n.kind.as_str(), "poly_sampler" | "granular_synth")
                 && n.parameters
                     .get("root_note")
                     .is_some_and(|v| v.fract() != 0.)
@@ -2218,6 +2291,9 @@ impl Project {
                 return Err("Expanded score exceeds the 320,000-note preparation budget".into());
             }
         }
+        if self.parts.iter().filter(|p| p.solo).count() > 1 {
+            return Err("Only one part may be soloed".into());
+        }
         if self.parts.len() > 32 {
             return Err("At most 32 parts".into());
         }
@@ -2390,6 +2466,8 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         beat_unit: 4,
         graph: Graph { nodes, edges },
         parts: vec![Part {
+            muted: false,
+            solo: false,
             staves: vec![],
             automation: vec![],
             dynamics: None,

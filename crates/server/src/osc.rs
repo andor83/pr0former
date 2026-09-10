@@ -333,7 +333,7 @@ pub fn action(m: &rosc::OscMessage) -> Option<Action> {
     }
 }
 pub async fn get(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
-    user(&app, &headers)?;
+    crate::accounts::admin(&app, &headers)?;
     Ok(Json(app.osc.snapshot()))
 }
 pub async fn put(
@@ -344,9 +344,8 @@ pub async fn put(
 ) -> Api<Json<Value>> {
     csrf(&headers)?;
     let u = user(&app, &headers)?;
-    if role(&app, &id, &u)? != "owner" {
-        return Err(bad("Owner access required for OSC settings"));
-    }
+    crate::accounts::admin(&app, &headers)?;
+    role(&app, &id, &u)?;
     let _guard = app.setup.lock().await;
     if app.active.lock().unwrap().is_some() {
         return Err(bad("Deactivate the show before changing OSC bindings"));

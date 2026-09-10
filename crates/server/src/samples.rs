@@ -42,7 +42,9 @@ pub async fn upload(
     tokio::fs::write(&source, &bytes).await.map_err(bad)?;
     let rate = crate::settings::read().sample_rate;
     // fd is seekable but cannot open nested local files or network URLs from uploaded playlists.
-    let mut command = tokio::process::Command::new("ffmpeg");
+    let mut command = tokio::process::Command::new(
+        std::env::var_os("PR0_FFMPEG").unwrap_or_else(|| "ffmpeg".into()),
+    );
     command
         .kill_on_drop(true)
         .args([
@@ -132,7 +134,7 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
     for node in &project.graph.nodes {
         if !matches!(
             node.kind.as_str(),
-            "sample" | "phase_vocoder" | "poly_sampler"
+            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth"
         ) {
             continue;
         }
@@ -217,7 +219,7 @@ pub fn cache_project(project: &pr0_core::Project, rate: u32) -> Result<(), Strin
     for node in &project.graph.nodes {
         if matches!(
             node.kind.as_str(),
-            "sample" | "phase_vocoder" | "poly_sampler"
+            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth"
         ) {
             let asset = node.parameters.get("asset").copied().unwrap_or(0.) as u32;
             if asset != 0 {
@@ -340,14 +342,46 @@ pub struct RateAdapter {
     to: u32,
     samples: Vec<f32>,
     phase: u64,
+    phase_step: u32,
+    kernels: Vec<[f64; 65]>,
 }
 impl RateAdapter {
     pub fn new(from: u32, to: u32) -> Self {
+        assert!(from > 0 && to > 0, "validated nonzero sample rates");
+        let (mut a, mut b) = (from, to);
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        let phase_step = a;
+        let cutoff = (to as f64 / from as f64).min(1.) * 0.94;
+        // Rational rates repeat exactly. Preparing each fractional-phase kernel
+        // avoids 130 trig calls per stereo output frame on the audio worker.
+        let kernels = if from == to {
+            Vec::new()
+        } else {
+            (0..to / phase_step)
+                .map(|phase| {
+                    let fraction = (phase * phase_step) as f64 / to as f64;
+                    std::array::from_fn(|tap| {
+                        let x = fraction + 32. - tap as f64;
+                        let a = std::f64::consts::PI * x * cutoff;
+                        let sinc = if a.abs() < 1e-10 {
+                            cutoff
+                        } else {
+                            a.sin() / a * cutoff
+                        };
+                        sinc * (0.5 + 0.5 * (std::f64::consts::PI * x / 33.).cos())
+                    })
+                })
+                .collect()
+        };
         Self {
             from,
             to,
             samples: vec![],
             phase: 0,
+            phase_step,
+            kernels,
         }
     }
     pub fn process(&mut self, pcm: &[f32]) -> Vec<f32> {
@@ -356,24 +390,20 @@ impl RateAdapter {
         }
         self.samples.extend_from_slice(pcm);
         let frames = self.samples.len() / 2;
-        let cutoff = (self.to as f64 / self.from as f64).min(1.) * 0.94;
-        let mut result = Vec::new();
-        while self.phase as f64 / self.to as f64 + 33. < frames as f64 {
-            let position = self.phase as f64 / self.to as f64;
-            let center = position.floor() as isize;
+        let limit = frames.saturating_sub(33) as u64 * self.to as u64;
+        let available = limit.saturating_sub(self.phase).div_ceil(self.from as u64) as usize;
+        let mut result = Vec::with_capacity(available * 2);
+        while self.phase < limit {
+            let center = (self.phase / self.to as u64) as isize;
+            let phase = (self.phase % self.to as u64) as usize / self.phase_step as usize;
+            let kernel = &self.kernels[phase];
             let mut value = [0_f64; 2];
             let mut sum = 0.;
-            for k in center - 32..=center + 32 {
+            for (tap, &w) in kernel.iter().enumerate() {
+                let k = center + tap as isize - 32;
                 if k < 0 {
                     continue;
                 }
-                let x = position - k as f64;
-                let a = std::f64::consts::PI * x * cutoff;
-                let w = if a.abs() < 1e-10 {
-                    cutoff
-                } else {
-                    a.sin() / a * cutoff
-                } * (0.5 + 0.5 * (std::f64::consts::PI * x / 33.).cos());
                 sum += w;
                 for ch in 0..2 {
                     value[ch] += self.samples[k as usize * 2 + ch] as f64 * w;
@@ -390,6 +420,90 @@ impl RateAdapter {
 }
 #[cfg(test)]
 mod streaming_tests {
+    // Original per-sample trigonometric filter as an independent reference.
+    fn reference(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+        if from == to {
+            return input.to_vec();
+        }
+        let cutoff = (to as f64 / from as f64).min(1.) * 0.94;
+        let mut phase = 0_u64;
+        let mut output = Vec::new();
+        while phase as f64 / to as f64 + 33. < (input.len() / 2) as f64 {
+            let position = phase as f64 / to as f64;
+            let center = position.floor() as isize;
+            let mut sum = 0.;
+            let mut value = [0.; 2];
+            for k in center - 32..=center + 32 {
+                if k < 0 {
+                    continue;
+                }
+                let x = position - k as f64;
+                let a = std::f64::consts::PI * x * cutoff;
+                let w = if a.abs() < 1e-10 {
+                    cutoff
+                } else {
+                    a.sin() / a * cutoff
+                } * (0.5 + 0.5 * (std::f64::consts::PI * x / 33.).cos());
+                sum += w;
+                for ch in 0..2 {
+                    value[ch] += input[k as usize * 2 + ch] as f64 * w;
+                }
+            }
+            output.extend(value.map(|v| (v / sum) as f32));
+            phase += from as u64;
+        }
+        output
+    }
+    #[test]
+    fn prepared_resampling_matches_original_filter_at_every_supported_rate() {
+        for rate in [44100, 48000, 88200, 96000] {
+            for (from, to) in [(rate, 48000), (48000, rate)] {
+                let input: Vec<_> = (0..4096)
+                    .flat_map(|i| [(i as f32 * 0.37).sin(), (i as f32 * 1.7).cos() * 0.4])
+                    .collect();
+                let expected = reference(&input, from, to);
+                let mut adapter = super::RateAdapter::new(from, to);
+                let actual: Vec<_> = input
+                    .chunks(62)
+                    .flat_map(|chunk| adapter.process(chunk))
+                    .collect();
+                assert_eq!(actual.len(), expected.len());
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&expected)
+                        .all(|(a, b)| (a - b).abs() < 1e-6),
+                    "{from} -> {to}"
+                );
+                assert!(
+                    adapter.samples.len() <= 136,
+                    "streaming history remains bounded"
+                );
+            }
+        }
+    }
+    #[test]
+    #[ignore = "manual software throughput measurement; not a device deadline test"]
+    fn resampler_throughput() {
+        for from in [44100, 96000] {
+            let input: Vec<_> = (0..from)
+                .flat_map(|i| [(i as f32 * 0.37).sin(); 2])
+                .collect();
+            let start = std::time::Instant::now();
+            let original = reference(std::hint::black_box(&input), from, 48000);
+            let old = start.elapsed();
+            let mut adapter = super::RateAdapter::new(from, 48000);
+            let start = std::time::Instant::now();
+            let result = adapter.process(std::hint::black_box(&input));
+            let new = start.elapsed();
+            assert_eq!(original.len(), result.len());
+            eprintln!(
+                "{from} -> 48000 stereo, one second PCM: reference={old:?}, prepared={new:?}, speedup={:.1}x",
+                old.as_secs_f64() / new.as_secs_f64()
+            );
+        }
+    }
+
     #[test]
     fn packet_boundaries_do_not_change_conversion() {
         for (from, to) in [

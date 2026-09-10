@@ -31,7 +31,7 @@ const p: Part = {
 }
 describe('score commands', () => {
   it('uses the agreed duration mapping and preserves onset and dots', () => {
-    expect(durationKeys[3]).toBe(1)
+    expect(durationKeys[4]).toBe(1)
     let next = changeNote(n, p, { kind: 'dots' })
     expect(next.duration).toBe(1.5)
     next = changeNote(next, p, { kind: 'duration', value: 0.25 })

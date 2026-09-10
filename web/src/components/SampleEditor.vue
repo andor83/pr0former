@@ -2,12 +2,13 @@
 import {nextTick,onBeforeUnmount,onMounted,ref} from 'vue'
 import {api} from '../api'
 import {midiNoteLabel,type SampleEntry} from '../samples'
-const props=defineProps<{projectId:string;sample:SampleEntry}>()
+const props=defineProps<{projectId?:string;sample:SampleEntry}>()
 const emit=defineEmits<{close:[];saved:[]}>()
 const dialog=ref<HTMLDialogElement>(),canvas=ref<HTMLCanvasElement>(),audio=ref<HTMLAudioElement>()
+const endpoint=()=>props.projectId ? `/api/projects/${props.projectId}/samples/${props.sample.id}` : `/api/samples/${props.sample.id}`
 const draft=ref({...props.sample}),busy=ref(false),error=ref(''),url=ref(''),position=ref(0),playing=ref(false)
 const controller=new AbortController();let context:AudioContext|undefined
-async function save(){busy.value=true;try{await api(`/projects/${props.projectId}/samples/${props.sample.id}`,'PUT',draft.value);emit('saved');emit('close')}catch(e){error.value=String(e)}finally{busy.value=false}}
+async function save(){busy.value=true;try{await api(endpoint().slice(4),'PUT',draft.value);emit('saved');emit('close')}catch(e){error.value=String(e)}finally{busy.value=false}}
 function seek(value:number){position.value=Math.max(0,Math.min(props.sample.duration,value));if(audio.value)audio.value.currentTime=position.value}
 function scrub(e:PointerEvent){const target=e.currentTarget as HTMLElement;target.setPointerCapture(e.pointerId);seekAt(e,target)}
 function seekAt(e:PointerEvent,target:HTMLElement){const box=target.getBoundingClientRect();seek((e.clientX-box.left)/box.width*props.sample.duration)}
@@ -15,7 +16,7 @@ async function play(){try{if(!audio.value)return;if(playing.value)audio.value.pa
 onMounted(async()=>{
   dialog.value?.showModal()
   try{
-    const response=await fetch(`/api/projects/${props.projectId}/samples/${props.sample.id}/audio`,{signal:controller.signal});if(!response.ok)throw new Error('Sample audio unavailable')
+    const response=await fetch(`${endpoint()}/audio`,{signal:controller.signal});if(!response.ok)throw new Error('Sample audio unavailable')
     const bytes=await response.arrayBuffer();if(controller.signal.aborted)return
     context=new AudioContext();const buffer=await context.decodeAudioData(bytes.slice(0));await context.close();context=undefined
     if(controller.signal.aborted)return
@@ -33,7 +34,7 @@ onBeforeUnmount(()=>{controller.abort();audio.value?.pause();if(context)void con
 <div class="parameter-list">
   <p>{{sample.channels}} channels · {{sample.sample_rate.toLocaleString()}} Hz · {{sample.duration.toFixed(2)}} s · {{sample.author}}</p>
   <div class="sample-waveform" @pointerdown.prevent="scrub" @pointermove.prevent="e=>{if((e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId))seekAt(e,e.currentTarget as HTMLElement)}"><canvas ref="canvas" aria-label="Full sample waveform"></canvas><i :style="{left:`${position/Math.max(.001,sample.duration)*100}%`}"></i></div>
-  <input aria-label="Sample position" type="range" min="0" :max="sample.duration" step="0.001" :value="position" :disabled="!url" @input="seek(Number(($event.target as HTMLInputElement).value))">
+  <input aria-label="Sample position" type="range" min="0" :max="sample.duration" step="0.01" :value="position" :disabled="!url" @input="seek(Number(($event.target as HTMLInputElement).value))">
   <div class="sample-playback"><button class="button" :disabled="!url" @click="play">{{playing?'Pause sample':'Play sample'}}</button><output>{{position.toFixed(2)}} / {{sample.duration.toFixed(2)}} s</output></div>
   <audio ref="audio" :src="url||undefined" @timeupdate="position=audio?.currentTime||0" @play="playing=true" @pause="playing=false" @ended="playing=false"></audio>
   <label>Name<input v-model="draft.name" maxlength="256" :disabled="!sample.can_edit||busy"></label>
@@ -44,7 +45,7 @@ onBeforeUnmount(()=>{controller.abort();audio.value?.pause();if(context)void con
   <label>Root pitch<select aria-label="Root pitch" :value="draft.root_note??''" :disabled="!sample.can_edit||busy" @change="draft.root_note=($event.target as HTMLSelectElement).value===''?null:Number(($event.target as HTMLSelectElement).value)"><option value="">Not set</option><option v-for="note in 128" :key="note-1" :value="note-1">{{midiNoteLabel(note-1)}}</option></select></label>
   <p class="feature-note">Sets the root MIDI note when this sample is assigned to a pitched sampler. Existing sampler settings and connected root-note controls are preserved.</p>
   <label class="check-label"><input v-model="draft.global" type="checkbox" :disabled="!sample.can_publish||busy">Global — available to every user and project</label>
-  <p class="feature-note">Project members can access samples already added to their project. Turning Global off hides this sample from future browsing; existing project copies remain available.</p>
+  <p class="feature-note">Project members can access samples already added to their project. Turning Global off hides the sample from future browsing; existing project copies remain available. Once shared globally, deletion requires an administrator, even after unsharing.</p>
   <p v-if="error" class="field-error" role="alert">{{error}}</p>
 </div>
 <footer class="modal-footer"><button class="button primary" :disabled="!sample.can_edit||busy||!draft.name.trim()" @click="save">Save metadata</button></footer>

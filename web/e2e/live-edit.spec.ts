@@ -31,13 +31,14 @@ test('live graph editing, FM conversion, context menus and keyboard transport in
     await page.keyboard.down('Space')
     await page.keyboard.down('Space')
     await page.keyboard.up('Space')
-    await expect.poll(() => commands.slice(before)).toEqual(['activate', 'play'])
+    // Play enables the engine (a separate endpoint) and then starts the show.
+    await expect.poll(() => commands.slice(before)).toEqual(['play'])
     await expect.poll(() => latest?.project_id === project.id && latest?.running).toBe(true)
-    expect(commands.slice(before)).toEqual(['activate', 'play'])
+    expect(commands.slice(before)).toEqual(['play'])
     const sample = latest.sample
     await page.getByLabel('Search nodes').fill('Audio to control')
     await page.getByLabel('Search nodes').press('Space')
-    expect(commands.length).toBe(before + 2)
+    expect(commands.length).toBe(before + 1)
     await page.locator('.library-node').filter({ hasText: 'Audio to control' }).click()
     await expect.poll(async () => (await load()).graph.nodes.length).toBe(4)
     const converter = (await load()).graph.nodes.find((n: any) => n.kind === 'audio_to_control').id
@@ -67,7 +68,7 @@ test('live graph editing, FM conversion, context menus and keyboard transport in
     expect(latest.values.Carrier.frequency).toBeLessThan(541)
     await page.getByRole('button', { name: 'Edit Carrier', exact: true }).click()
     await expect(page.getByRole('spinbutton', { name: 'Frequency', exact: true })).toHaveCount(0)
-    await page.getByRole('button', { name: 'Disconnect', exact: true }).click()
+    await page.getByRole('button', { name: /^Disconnect / }).click()
     await expect.poll(async () => (await load()).graph.edges.length).toBe(2)
     await page.getByRole('button', { name: 'Close parameters' }).click()
     await focusGraph()
@@ -95,7 +96,7 @@ test('live graph editing, FM conversion, context menus and keyboard transport in
     const invalid = await load()
     invalid.graph.edges.push({ id: 'bad', source: 'Modulator', source_port: 'out', target: 'Carrier', target_port: 'frequency' })
     expect((await page.request.put(`/api/projects/${project.id}`, { headers, data: invalid })).status()).toBe(400)
-    await page.getByRole('button', { name: 'Deactivate show', exact: true }).click()
+    await page.getByRole('button', { name: 'Disable audio engine', exact: true }).click()
   }
   expect(errors).toEqual([])
 })

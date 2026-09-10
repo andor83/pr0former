@@ -17,7 +17,7 @@ const xAt = (beat: number) =>
 const beatAt = (x: number) =>
   scoreBeat(x, props.anchors, props.scale, props.origin)
 const emit = defineEmits<{ update: [part: Part] }>()
-const expanded = ref(!props.performance),
+const expanded = ref(!!props.part.automation?.length),
   mode = ref<'point' | 'ramp'>('point'),
   selected = ref(''),
   laneId = ref(''),
@@ -225,7 +225,7 @@ function shown(e: AutomationEvent) {
     <header class="midi-header">
       <button :aria-expanded="expanded" @click="expanded = !expanded">
         {{ expanded ? '▾' : '▸' }} MIDI lanes · {{ lanes.length }}</button
-      ><template v-if="!performance"
+      ><template v-if="!performance && expanded"
         ><button :disabled="!editable || lanes.length >= 32" @click="addLane">
           ＋ MIDI lane</button
         ><select v-model="mode" aria-label="MIDI drawing tool">
@@ -246,8 +246,10 @@ function shown(e: AutomationEvent) {
         <div class="midi-label">
           <button
             @click="
-              laneId = lane.id;
-              selected = ''
+              () => {
+                laneId = lane.id
+                selected = ''
+              }
             "
           >
             {{ lane.name }}</button
@@ -269,7 +271,10 @@ function shown(e: AutomationEvent) {
           @pointermove="move"
           @pointerup="up"
           @pointercancel="
-            drag = null; preview = null
+            () => {
+              drag = null
+              preview = null
+            }
           "
         >
           <path
@@ -282,7 +287,10 @@ function shown(e: AutomationEvent) {
             :data-midi-event="item.id"
             :class="{ selected: selected === item.id }"
             @click.stop="
-              selected = item.id; laneId = lane.id
+              () => {
+                selected = item.id
+                laneId = lane.id
+              }
             "
           >
             <rect
@@ -334,146 +342,149 @@ function shown(e: AutomationEvent) {
           </g>
         </svg>
       </div>
-      <div
+      <details
         v-if="selectedLane && !performance"
         class="midi-inspector"
         @pointerdown.stop
       >
-        <label
-          >Lane name<input
-            :value="selectedLane.name"
-            :disabled="!editable"
-            @change="
-              update({
-                ...selectedLane!,
-                name: ($event.target as HTMLInputElement).value,
-              })
-            " /></label
-        ><label
-          >Message<select
-            :value="selectedLane.message"
-            :disabled="!editable || selectedLane.events.length > 0"
-            @change="
-              update({
-                ...selectedLane!,
-                message: ($event.target as HTMLSelectElement)
-                  .value as AutomationLane['message'],
-              })
-            "
-          >
-            <option
-              v-for="m in [
-                'note',
-                'cc',
-                'bend',
-                'program',
-                'pressure',
-                'poly_pressure',
-              ]"
-              :key="m"
-            >
-              {{ m }}
-            </option>
-          </select></label
-        ><label
-          >Channel<input
-            type="number"
-            min="1"
-            max="16"
-            :value="selectedLane.channel"
-            :disabled="!editable"
-            @change="
-              update({
-                ...selectedLane!,
-                channel: Number(($event.target as HTMLInputElement).value),
-              })
-            " /></label
-        ><label
-          >Controller / pitch<input
-            type="number"
-            min="0"
-            max="127"
-            :value="selectedLane.number"
-            :disabled="!editable"
-            @change="
-              update({
-                ...selectedLane!,
-                number: Number(($event.target as HTMLInputElement).value),
-              })
-            "
-        /></label>
-        <label
-          >Initial value<input
-            type="number"
-            min="0"
-            :max="maximum(selectedLane)"
-            :value="
-              selectedLane.initial ??
-              (selectedLane.message === 'bend' ? 8192 : 0)
-            "
-            :disabled="!editable"
-            @change="
-              update({
-                ...selectedLane!,
-                initial: Number(($event.target as HTMLInputElement).value),
-              })
-            " /></label
-        ><template v-if="event"
-          ><label
-            v-for="field in ['beat', 'duration', 'start', 'end'] as const"
-            :key="field"
-            >{{ field
-            }}<input
-              type="number"
-              min="0"
-              step="any"
-              :value="event[field]"
+        <summary>MIDI input · lane and event settings</summary>
+        <div class="midi-fields">
+          <label
+            >Lane name<input
+              :value="selectedLane.name"
               :disabled="!editable"
               @change="
-                edit({
-                  [field]: Number(($event.target as HTMLInputElement).value),
+                update({
+                  ...selectedLane!,
+                  name: ($event.target as HTMLInputElement).value,
                 })
               " /></label
           ><label
-            >Curve<select
-              :value="event.curve"
-              :disabled="!editable"
+            >Message<select
+              :value="selectedLane.message"
+              :disabled="!editable || selectedLane.events.length > 0"
               @change="
-                edit({
-                  curve: ($event.target as HTMLSelectElement)
-                    .value as MidiCurve,
+                update({
+                  ...selectedLane!,
+                  message: ($event.target as HTMLSelectElement)
+                    .value as AutomationLane['message'],
                 })
               "
             >
               <option
-                v-for="c in [
-                  'step',
-                  'linear',
-                  'ease_in',
-                  'ease_out',
-                  's_curve',
+                v-for="m in [
+                  'note',
+                  'cc',
+                  'bend',
+                  'program',
+                  'pressure',
+                  'poly_pressure',
                 ]"
-                :key="c"
+                :key="m"
               >
-                {{ c }}
+                {{ m }}
               </option>
             </select></label
-          ><button :disabled="!editable" @click="remove">
-            Delete event
-          </button></template
-        >
-        <button
-          :disabled="!editable"
-          @click="
-            emit('update', {
-              ...part,
-              automation: lanes.filter((l) => l.id !== selectedLane!.id),
-            })
-          "
-        >
-          Delete lane
-        </button>
-      </div>
+          ><label
+            >Channel<input
+              type="number"
+              min="1"
+              max="16"
+              :value="selectedLane.channel"
+              :disabled="!editable"
+              @change="
+                update({
+                  ...selectedLane!,
+                  channel: Number(($event.target as HTMLInputElement).value),
+                })
+              " /></label
+          ><label
+            >Controller / pitch<input
+              type="number"
+              min="0"
+              max="127"
+              :value="selectedLane.number"
+              :disabled="!editable"
+              @change="
+                update({
+                  ...selectedLane!,
+                  number: Number(($event.target as HTMLInputElement).value),
+                })
+              "
+          /></label>
+          <label
+            >Initial value<input
+              type="number"
+              min="0"
+              :max="maximum(selectedLane)"
+              :value="
+                selectedLane.initial ??
+                (selectedLane.message === 'bend' ? 8192 : 0)
+              "
+              :disabled="!editable"
+              @change="
+                update({
+                  ...selectedLane!,
+                  initial: Number(($event.target as HTMLInputElement).value),
+                })
+              " /></label
+          ><template v-if="event"
+            ><label
+              v-for="field in ['beat', 'duration', 'start', 'end'] as const"
+              :key="field"
+              >{{ field
+              }}<input
+                type="number"
+                min="0"
+                step="any"
+                :value="event[field]"
+                :disabled="!editable"
+                @change="
+                  edit({
+                    [field]: Number(($event.target as HTMLInputElement).value),
+                  })
+                " /></label
+            ><label
+              >Curve<select
+                :value="event.curve"
+                :disabled="!editable"
+                @change="
+                  edit({
+                    curve: ($event.target as HTMLSelectElement)
+                      .value as MidiCurve,
+                  })
+                "
+              >
+                <option
+                  v-for="c in [
+                    'step',
+                    'linear',
+                    'ease_in',
+                    'ease_out',
+                    's_curve',
+                  ]"
+                  :key="c"
+                >
+                  {{ c }}
+                </option>
+              </select></label
+            ><button :disabled="!editable" @click="remove">
+              Delete event
+            </button></template
+          >
+          <button
+            :disabled="!editable"
+            @click="
+              emit('update', {
+                ...part,
+                automation: lanes.filter((l) => l.id !== selectedLane!.id),
+              })
+            "
+          >
+            Delete lane
+          </button>
+        </div>
+      </details>
     </template>
   </section>
 </template>
@@ -538,11 +549,13 @@ function shown(e: AutomationEvent) {
 }
 .midi-lane .selected path,
 .midi-lane .selected rect {
-  stroke: var(--cyan);
+  stroke: #16803c;
 }
 .midi-lane .selected circle {
-  fill: var(--cyan);
+  fill: #16803c;
 }
+.midi-lane g:not(.selected):hover path, .midi-lane g:not(.selected):hover rect {stroke:#e87816}
+.midi-lane g:not(.selected):hover circle {fill:#e87816}
 .midi-inspector {
   position: sticky;
   left: 0;
@@ -565,5 +578,37 @@ function shown(e: AutomationEvent) {
 .midi-header select {
   width: auto;
   font-size: 11px;
+}
+.midi-lane g:not(.selected):hover path, .midi-lane g:not(.selected):hover rect {stroke:#e87816}
+.midi-lane g:not(.selected):hover circle {fill:#e87816}
+.midi-inspector {
+  display: block;
+  padding: 4px 10px;
+  font-size: 11px;
+  position: sticky;
+  left: 0;
+  max-width: 850px;
+}
+.midi-inspector summary {
+  cursor: pointer;
+}
+.midi-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+}
+.midi-header {
+  padding: 2px 8px;
+  gap: 5px;
+}
+.midi-header button,
+.midi-header select {
+  min-height: 23px;
+  padding: 2px 5px;
+  font-size: 10px;
+}
+.midi-header small {
+  display: none;
 }
 </style>

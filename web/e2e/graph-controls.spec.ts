@@ -43,5 +43,5 @@ test('graphical controls, group context menu, duplication and live subgraph conv
   await page.getByLabel('Trigger Manual').click();await expect.poll(()=>latest?.values?.Count?._out).toBe(before+1)
   const revision=(await load()).revision
   expect((await page.request.put(`/api/projects/${p.id}/control`,{headers,data:{node:'Result',revision,value:1}})).status()).toBe(400)
-  await page.getByRole('button',{name:'Deactivate show',exact:true}).click()
+  await page.getByRole('button', { name: 'Disable audio engine', exact: true }).click()
 })

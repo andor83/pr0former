@@ -21,7 +21,7 @@ const visualization=computed(()=>telemetry?.value?.visualizations?.[props.id])
 const isMath = computed(() => props.data.descriptor.category === 'Math')
 const signal = computed(() => props.data.descriptor.outputs[0]?.signal || props.data.descriptor.inputs[0]?.signal || 'control')
 const inputs = computed(() => [...props.data.descriptor.inputs, ...props.data.descriptor.parameters.filter(p => !p.structural).map(p => ({ id: p.id, label: p.label, signal: 'control' as const }))])
-const height = computed(() => props.data.node.kind === 'pitch_tracker' ? 210 : props.data.node.kind === 'piano' ? 307 : props.data.node.kind === 'control_input' ? 260 : visualizer.value ? props.data.node.kind==='control_visualizer'?190:150+Math.ceil(props.data.node.channels/2)*(props.data.node.kind==='spectral_visualizer'?148:104) : Math.max(isMath.value ? 124 : 156, (props.data.node.kind === 'subgraph' ? 112 : 72) + Math.max(inputs.value.length, props.data.descriptor.outputs.length) * 30))
+const height = computed(() => props.data.node.kind === 'pitch_tracker' ? Math.max(210,172+30*(props.data.node.parameters.slots??1)) : props.data.node.kind === 'piano' ? 307 : props.data.node.kind === 'control_input' ? 260 : visualizer.value ? props.data.node.kind==='control_visualizer'?190:150+Math.ceil(props.data.node.channels/2)*(props.data.node.kind==='spectral_visualizer'?148:104) : Math.max(isMath.value ? 124 : 156, (props.data.node.kind === 'subgraph' ? 112 : 72) + Math.max(inputs.value.length, props.data.descriptor.outputs.length) * 30))
 function controlSelect(event: MouseEvent) {
   if (event.ctrlKey && event.button === 0 && !(event.target instanceof Element && event.target.closest('button,.vue-flow__handle'))) {
     event.preventDefault();event.stopPropagation();props.data.toggleSelection(props.id)
@@ -52,10 +52,10 @@ function controlSelect(event: MouseEvent) {
       <Handle :id="port.id" type="target" :position="Position.Left" :class="port.signal" @click.stop="data.connectPort(id, port.id, 'target')" />
       <span>{{ port.label }}</span>
     </div>
-    <div v-for="(port, index) in (data.node.kind==='pitch_tracker'?[]:data.descriptor.outputs)" :key="`out-${port.id}`" class="port-row output-port" :style="{ top: `${65 + index * 30}px` }">
+    <div v-for="(port, index) in data.descriptor.outputs" :key="`out-${port.id}`" class="port-row output-port" :style="{ top: `${65 + index * 30}px` }">
       <span>{{ port.label }}</span><Handle :id="port.id" type="source" :position="Position.Right" :class="port.signal" @click.stop="data.connectPort(id, port.id, 'source')" />
     </div>
-    <PitchTrackerReadout v-if="data.node.kind==='pitch_tracker'" :slots="data.node.parameters.slots??1" :values="values" :stale="!data.active||(telemetryStale??true)" @connect="port=>data.connectPort(id,port,'source')" />
+    <PitchTrackerReadout v-if="data.node.kind==='pitch_tracker'" :slots="data.node.parameters.slots??1" :values="values" :stale="!data.active||(telemetryStale??true)" />
     <PianoKeys v-if="data.node.kind==='piano'" :octave="data.node.parameters.octave??4" :octaves="data.node.parameters.octaves??1" :values="values" :stale="!data.active || (telemetryStale??true)" :disabled="!data.editable || !data.active || (telemetryStale??true)" @note="(pitch,velocity)=>data.piano(data.projectId,id,pitch,velocity)" />
     <GraphControl v-if="data.node.kind==='control_input'" :node="data.node" :connected="data.driven" :data="visualization" :stale="telemetryStale??true" :active="data.active" :editable="data.editable" @value="value=>data.setControl(id,value)" @bang="data.bang(id)" />
     <DataVisualizer v-if="visualizer" :kind="data.node.kind" :data="visualization" :sample-rate="telemetry?.sample_rate || 48000" :block-size="telemetry?.block_size || 128" :stale="telemetryStale??true" compact />

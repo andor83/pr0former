@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Staff {
     #[serde(default)]
+    pub hidden_rests: Vec<HiddenRest>,
+    #[serde(default)]
     pub key_mode: Option<String>,
     #[serde(default)]
     pub clef_changes: Vec<ClefChange>,
@@ -14,6 +16,9 @@ pub struct Staff {
     pub midi_channel: Option<u8>,
     #[serde(default)]
     pub midi_port: Option<String>,
+    /// Staff-attached text: cues, rehearsal letters, expressions, tempo words, lyrics.
+    #[serde(default)]
+    pub marks: Vec<StaffMark>,
     pub id: String,
     pub name: String,
     pub clef: String,
@@ -21,6 +26,20 @@ pub struct Staff {
     pub key_signature: Option<String>,
     #[serde(default)]
     pub transpose: i8,
+}
+pub const MARK_KINDS: [&str; 6] = ["text", "rehearsal", "cue", "expression", "tempo", "lyric"];
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StaffMark {
+    pub id: String,
+    pub beat: f64,
+    pub kind: String,
+    pub text: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HiddenRest {
+    pub beat: f64,
+    pub duration: f64,
+    pub voice: u8,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClefChange {
@@ -80,6 +99,18 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
     }
     let mut ids = BTreeSet::new();
     for s in &part.staves {
+        if s.hidden_rests.len() > 10000
+            || s.hidden_rests.iter().any(|r| {
+                !r.beat.is_finite()
+                    || !r.duration.is_finite()
+                    || r.beat < 0.
+                    || r.duration <= 0.
+                    || r.beat + r.duration > 8192.
+                    || !(1..=4).contains(&r.voice)
+            })
+        {
+            return Err("Invalid hidden rest range".into());
+        }
         let mut last = -1.;
         for c in &s.clef_changes {
             if !c.beat.is_finite()
@@ -94,6 +125,24 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
         }
         if s.clef_changes.len() > 1024 {
             return Err("Too many clef changes".into());
+        }
+        if s.marks.len() > 1024 {
+            return Err("Too many staff marks".into());
+        }
+        let mut mark_ids = BTreeSet::new();
+        for m in &s.marks {
+            if m.id.is_empty()
+                || m.id.len() > 120
+                || !mark_ids.insert(&m.id)
+                || !m.beat.is_finite()
+                || m.beat < 0.
+                || m.beat > 4096.
+                || !MARK_KINDS.contains(&m.kind.as_str())
+                || m.text.trim().is_empty()
+                || m.text.len() > 256
+            {
+                return Err("Invalid staff mark".into());
+            }
         }
         if s.key_mode
             .as_ref()
@@ -220,15 +269,99 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn tempo_map_and_staff_marks_validate_and_default_empty() {
+        let mut p = crate::demo_project("x".into(), "x".into(), crate::Mode::Structured);
+        let staff: Staff =
+            serde_json::from_value(serde_json::json!({"id":"s", "name":"Upper", "clef":"treble"}))
+                .unwrap();
+        assert!(staff.marks.is_empty());
+        p.parts[0].staves.push(staff);
+        p.parts[0].staves[0].marks.push(StaffMark {
+            id: "m1".into(),
+            beat: 4.,
+            kind: "cue".into(),
+            text: "start granular".into(),
+        });
+        let timeline: Timeline = serde_json::from_value(serde_json::json!({
+            "version": 1, "length": 16.0, "loop_score": false,
+            "meters": [], "keys": [], "repeats": [],
+            "tempos": [{"beat": 0.0, "bpm": 90.0}, {"beat": 8.0, "bpm": 132.0}]
+        }))
+        .unwrap();
+        assert_eq!(timeline.tempo_at(7.9), Some(90.));
+        assert_eq!(timeline.tempo_at(8.), Some(132.));
+        let empty: Timeline = serde_json::from_value(serde_json::json!({
+            "version": 1, "length": 16.0, "loop_score": false
+        }))
+        .unwrap();
+        assert!(empty.tempos.is_empty());
+        assert_eq!(empty.tempo_at(3.), None);
+        p.score = Some(timeline);
+        assert!(p.validate().is_ok());
+        for (beat, bpm) in [(-1., 100.), (17., 100.), (2., 0.5), (2., 401.), (2., f64::NAN)] {
+            p.score.as_mut().unwrap().tempos = vec![TempoChange { beat, bpm }];
+            assert!(p.validate().is_err(), "tempo {beat} {bpm}");
+        }
+        p.score.as_mut().unwrap().tempos =
+            vec![TempoChange { beat: 4., bpm: 100. }, TempoChange { beat: 4., bpm: 120. }];
+        assert!(p.validate().is_err());
+        p.score.as_mut().unwrap().tempos.clear();
+        for (kind, text, beat) in [("nonsense", "x", 0.), ("cue", "   ", 0.), ("cue", "x", -1.)] {
+            p.parts[0].staves[0].marks[0] = StaffMark {
+                id: "m1".into(),
+                beat,
+                kind: kind.into(),
+                text: text.into(),
+            };
+            assert!(p.validate().is_err(), "mark {kind} {text} {beat}");
+        }
+        p.parts[0].staves[0].marks = vec![
+            StaffMark { id: "a".into(), beat: 0., kind: "text".into(), text: "x".into() },
+            StaffMark { id: "a".into(), beat: 1., kind: "text".into(), text: "y".into() },
+        ];
+        assert!(p.validate().is_err());
+    }
+    #[test]
+    fn hidden_rest_ranges_are_bounded_and_legacy_staff_defaults_are_empty() {
+        let mut p = crate::demo_project("x".into(), "x".into(), crate::Mode::Structured);
+        let staff: Staff =
+            serde_json::from_value(serde_json::json!({"id":"s", "name":"Upper", "clef":"treble"}))
+                .unwrap();
+        assert!(staff.hidden_rests.is_empty());
+        p.parts[0].staves.push(staff);
+        p.parts[0].staves[0].hidden_rests.push(HiddenRest {
+            beat: 4.,
+            duration: 2.,
+            voice: 1,
+        });
+        assert!(p.validate().is_ok());
+        for (beat, duration, voice) in [
+            (-1., 2., 1),
+            (0., 0., 1),
+            (8192., 1., 1),
+            (0., 1., 5),
+            (f64::NAN, 1., 1),
+        ] {
+            p.parts[0].staves[0].hidden_rests[0] = HiddenRest {
+                beat,
+                duration,
+                voice,
+            };
+            assert!(p.validate().is_err());
+        }
+    }
+    #[test]
     fn legacy_and_spelled_transposing_notes_validate() {
         let mut p = crate::demo_project("x".into(), "x".into(), crate::Mode::Structured);
         assert!(p.validate().is_ok());
         p.parts[0].staves.push(Staff {
+            hidden_rests: vec![],
             key_mode: None,
             clef_changes: vec![],
             instrument_node: None,
             midi_channel: None,
             midi_port: None,
+            marks: vec![],
             id: "s".into(),
             name: "Upper".into(),
             clef: "treble".into(),
@@ -292,6 +425,8 @@ pub struct Navigation {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Timeline {
+    #[serde(default)]
+    pub barlines: Vec<Barline>,
     pub version: u8,
     pub length: f64,
     pub loop_score: bool,
@@ -303,6 +438,19 @@ pub struct Timeline {
     pub repeats: Vec<Repeat>,
     #[serde(default)]
     pub navigation: Option<Navigation>,
+    /// Tempo map in written positions; the project tempo applies before the first entry.
+    #[serde(default)]
+    pub tempos: Vec<TempoChange>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TempoChange {
+    pub beat: f64,
+    pub bpm: f64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Barline {
+    pub beat: f64,
+    pub style: String,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
@@ -313,14 +461,31 @@ pub struct Span {
 impl Timeline {
     pub fn validate(&self) -> Result<(), String> {
         let valid = |b: f64| b.is_finite() && b >= 0. && b <= self.length;
+        if self.barlines.len() > 1024
+            || self.barlines.iter().any(|b| {
+                !valid(b.beat) || !["double", "final", "dashed"].contains(&b.style.as_str())
+            })
+        {
+            return Err("Invalid special barline".into());
+        }
+
         if self.version != 1
             || !self.length.is_finite()
             || !(0.25..=4096.).contains(&self.length)
             || self.meters.len() > 1024
             || self.keys.len() > 1024
             || self.repeats.len() > 64
+            || self.tempos.len() > 1024
         {
             return Err("Invalid score timeline".into());
+        }
+        let mut last = -1.;
+        for t in &self.tempos {
+            if !valid(t.beat) || t.beat <= last || !t.bpm.is_finite() || !(1.0..=400.).contains(&t.bpm)
+            {
+                return Err("Invalid or unordered tempo change".into());
+            }
+            last = t.beat;
         }
         let mut last = -1.;
         for m in &self.meters {
@@ -377,6 +542,14 @@ impl Timeline {
             }
         }
         Ok(())
+    }
+    /// Tempo in force at a written position, if the map defines one there.
+    pub fn tempo_at(&self, beat: f64) -> Option<f64> {
+        self.tempos
+            .iter()
+            .filter(|t| t.beat <= beat + 1e-9)
+            .last()
+            .map(|t| t.bpm)
     }
     /// Bounded traversal preparation, never called from render or callbacks.
     pub fn spans(&self) -> Vec<Span> {
@@ -440,6 +613,7 @@ mod timeline_tests {
     #[test]
     fn repeats_endings_and_navigation_are_bounded() {
         let mut t = Timeline {
+            barlines: vec![],
             version: 1,
             length: 16.,
             loop_score: false,
@@ -452,6 +626,7 @@ mod timeline_tests {
                 first_ending: Some(4.),
             }],
             navigation: None,
+            tempos: vec![],
         };
         assert!(t.validate().is_ok());
         assert_eq!(

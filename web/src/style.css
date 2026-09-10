@@ -157,5 +157,15 @@ body{position:fixed;inset:0}
   .parameter-modal input:not([type=checkbox]):not([type=radio]):not([type=range]),.parameter-modal select,.parameter-modal textarea,.auth-card input{font-size:16px}
 }
 
+.transport-right .browser-monitor-toggle{flex:0 0 36px;width:36px;min-width:36px;height:36px;min-height:36px;padding:8px;border:1px solid var(--line);border-radius:6px;margin-left:4px}.transport-right .browser-monitor-toggle.monitor-on{color:var(--cyan);border-color:var(--cyan);background:#203635}.transport-right .browser-monitor-toggle:disabled{opacity:.4}@media(pointer:coarse){.transport-right .browser-monitor-toggle{flex-basis:44px;width:44px;min-width:44px;height:44px;min-height:44px}}
+
+/* Give node settings labels real layout spacing, including embedded editors. */
+.node-parameter-modal .parameter-list label:has(>input:not([type=checkbox]):not([type=radio])),
+.node-parameter-modal .parameter-list label:has(>select),
+.node-parameter-modal .parameter-list label:has(>textarea){display:flex;flex-direction:column;align-items:stretch;gap:10px}
+.node-parameter-modal .parameter-row>label{display:block;margin-bottom:12px}
+.node-parameter-modal .parameter-heading{margin-bottom:18px}
+
 .score-content{display:flex;flex-direction:column;overflow:hidden!important;padding:12px!important}.score-content>.score-workspace{flex:1;min-height:0}.score-content>.score-actions{flex-shrink:0}
+
 .signal-edge.midi{stroke:var(--violet);stroke-dasharray:3 3}.vue-flow__handle.midi{background:var(--violet);border-color:var(--violet)}

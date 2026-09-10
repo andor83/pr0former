@@ -12,6 +12,24 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
+/// Resolve HEAD without a `git` binary (build environments with a minimal PATH).
+fn head_from_files(root: &Path) -> Option<String> {
+    let git_dir = root.join(".git");
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let Some(reference) = head.strip_prefix("ref: ") else {
+        return (head.len() == 40).then(|| head.to_owned());
+    };
+    if let Ok(hash) = std::fs::read_to_string(git_dir.join(reference)) {
+        return Some(hash.trim().to_owned());
+    }
+    let packed = std::fs::read_to_string(git_dir.join("packed-refs")).ok()?;
+    packed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .find(|(_, name)| *name == reference)
+        .map(|(hash, _)| hash.to_owned())
+}
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -36,7 +54,9 @@ fn main() {
         }
     }
     println!("cargo:rerun-if-changed=build.rs");
-    let hash = git(&root, &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let hash = git(&root, &["rev-parse", "HEAD"])
+        .or_else(|| head_from_files(&root))
+        .unwrap_or_else(|| "unknown".into());
     let dirty = git(
         &root,
         &["status", "--porcelain", "--untracked-files=normal"],

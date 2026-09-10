@@ -11,9 +11,11 @@ test('monitor sidebar, process stats and physical device groups and individual c
   expect((await page.request.put(`/api/projects/${p.id}/system/audio`,{headers,data:{sample_rate:48000,block_size:128,interfaces:[],input_interfaces:[]}})).ok()).toBeTruthy()
   // UI fixtures only: the test server explicitly disables native device access.
   let publish=true, active=true
+  let discoveries=0, resourcePolls=0
+  page.on('request',r=>{if(r.url().endsWith('/api/system/stats'))resourcePolls++})
   const inputDevice={id:101,name:'Eight-channel capture',channels:8,levels:Array.from({length:8},(_,i)=>({channel:i+1,peak:[0.1,0.5,1.2][i%3]}))}
   const outputDevice={id:202,name:'Sixteen-channel output',channels:16,levels:[{channel:1,peak:0.1},{channel:9,peak:1.2}]}
-  await page.route('**/api/devices',route=>route.fulfill({json:{interfaces:[outputDevice],input_interfaces:[inputDevice,{id:102,name:'Idle microphone',channels:1}],midi_inputs:[],midi_outputs:[]}}))
+  await page.route('**/api/devices',route=>{discoveries++;return route.fulfill({json:{interfaces:[outputDevice],input_interfaces:[inputDevice,{id:102,name:'Idle microphone',channels:1}],midi_inputs:[],midi_outputs:[]}})})
   await page.routeWebSocket('**/api/projects/*/events',ws=>{
     const server=ws.connectToServer()
     server.onMessage(message=>{
@@ -37,6 +39,9 @@ test('monitor sidebar, process stats and physical device groups and individual c
   await expect(sidebar.getByLabel('Monitor feed')).toBeVisible()
   await expect(page.getByRole('region',{name:'Inputs VU meters'}).getByRole('meter')).toHaveCount(9)
   await expect(page.getByRole('region',{name:'Outputs VU meters'}).getByRole('meter')).toHaveCount(2)
+  const discoveryCount=discoveries, statsCount=resourcePolls
+  await expect.poll(()=>resourcePolls,{timeout:5000}).toBeGreaterThan(statsCount)
+  expect(discoveries).toBe(discoveryCount) // process stats polling must not enumerate audio/MIDI devices
   const left=await sidebar.boundingBox(),right=await page.locator('.meter-banks').boundingBox()
   expect(right!.x).toBeGreaterThanOrEqual(left!.x+left!.width)
   expect(right!.width).toBeGreaterThan(left!.width*2)
@@ -57,11 +62,35 @@ test('monitor sidebar, process stats and physical device groups and individual c
   await expect(main.locator('.vu-fill')).toHaveCSS('background-color','rgb(241, 109, 105)')
   await expect(main.getByRole('meter')).toHaveAttribute('aria-valuetext',/clipping/)
   await expect(page.getByRole('meter',{name:/Browser input|Headphones/})).toHaveCount(0)
+  const geometry=()=>page.locator('.meter-banks').evaluate(root=>({
+    strips:Array.from(root.querySelectorAll('.vu-strip')).map(el=>{const r=el.getBoundingClientRect();return [r.x,r.y,r.width,r.height]}),
+    overflow:Array.from(root.querySelectorAll('.meter-bank,.device-groups,.device-group,.meter-bank-body,.vu-strip')).map(el=>el.scrollHeight-el.clientHeight),
+    tracks:Array.from(root.querySelectorAll('.vu-track')).map(el=>el.getBoundingClientRect().height),
+  }))
+  const assertFits=async()=>{
+    const g=await geometry()
+    expect(Math.max(...g.overflow)).toBeLessThanOrEqual(1)
+    expect(new Set(g.strips.map(r=>r[2])).size).toBe(1)
+    expect(Math.min(...g.tracks)).toBeGreaterThan(30)
+    return g
+  }
+  const before=await assertFits()
+  inputDevice.levels.forEach((level,i)=>{level.peak=[0,0.99,0.0001][i%3]!})
+  await expect(capture.locator('[data-channel="1"] .vu-value')).toContainText('−∞')
+  await expect(capture.locator('[data-channel="2"] .vu-value')).toContainText('-0.1')
+  expect((await assertFits()).strips).toEqual(before.strips)
   await page.screenshot({path:'test-results/monitor-desktop.png'})
   await page.setViewportSize({width:768,height:1024})
   await expect(sidebar).toBeVisible()
   await expect(page.locator('.project-heading .revision')).toBeVisible()
   await page.screenshot({path:'test-results/monitor-tablet.png'})
+  await assertFits()
+  await page.setViewportSize({width:900,height:600})
+  await assertFits()
+  await page.screenshot({path:'test-results/monitor-short.png'})
+  await page.setViewportSize({width:390,height:844})
+  await assertFits()
+  await page.screenshot({path:'test-results/monitor-phone.png'})
   publish=false
   await expect(main).toHaveClass(/stale/)
   await expect(main.getByRole('meter')).toHaveAttribute('aria-valuetext','No current hardware data')

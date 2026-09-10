@@ -16,8 +16,9 @@ test('looper records independent tracks, quantizes in meter, and preserves loops
   await page.goto('/')
   await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
   await command('Record',1)
-  await expect.poll(()=>latest?.values.Loop._track_1_recording).toBe(1)
-  await expect.poll(()=>latest?.values.Loop._track_1_seconds||0).toBeGreaterThan(.1)
+  // Engine start-up and the first telemetry snapshot can take a few seconds on a cold server.
+  await expect.poll(()=>latest?.values?.Loop?._track_1_recording,{timeout:20000}).toBe(1)
+  await expect.poll(()=>latest?.values?.Loop?._track_1_seconds||0).toBeGreaterThan(.1)
   await command('Stop record',1)
   await expect.poll(()=>latest?.values.Loop._track_1_recording).toBe(0)
   const length=latest.values.Loop._track_1_seconds

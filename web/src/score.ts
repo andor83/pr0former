@@ -1,7 +1,9 @@
 import type { Note, NoteNotation, Part, Staff, RationalTime } from './types'
 import { durationGlyphs } from './notation'
-export const durationKeys = [0.125, 0.25, 0.5, 1, 2, 4, 8, 0.0625]
+/** Finale Speedy/Simple Entry keypad order: 1 = 64th … 5 = quarter … 8 = double whole. */
+export const durationKeys = [0.0625, 0.125, 0.25, 0.5, 1, 2, 4, 8]
 export const durationLabels = [
+  '64th',
   '32nd',
   '16th',
   'Eighth',
@@ -9,9 +11,59 @@ export const durationLabels = [
   'Half',
   'Whole',
   'Double whole',
-  '64th',
 ]
-export const durationSymbols = ['𝅘𝅥𝅰', '𝅘𝅥𝅯', '♪', '♩', '𝅗𝅥', '𝅝', '𝅜', '𝅘𝅥𝅱']
+export const durationSymbols = ['𝅘𝅥𝅱', '𝅘𝅥𝅰', '𝅘𝅥𝅯', '♪', '♩', '𝅗𝅥', '𝅝', '𝅜']
+export const stepLetters = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
+/** Diatonic step of `letter` nearest to `near` (Finale letter entry picks the closest octave). */
+export function nearestLetterStep(letter: string, near: number): number {
+  const index = stepLetters.indexOf(letter.toUpperCase())
+  if (index < 0) return near
+  const current = ((near % 7) + 7) % 7,
+    up = (index - current + 7) % 7,
+    down = up - 7
+  return near + (Math.abs(up) <= Math.abs(down) ? up : down)
+}
+/** Written duration in quarter beats for a base value with dots and a tuplet ratio. */
+export function writtenDuration(
+  base: number,
+  dots = 0,
+  tupletActual = 1,
+  tupletNormal = 1,
+) {
+  return (base * (2 - 2 ** -dots) * tupletNormal) / tupletActual
+}
+/** Caret stops: note onsets and releases in the staff/voice, plus bar boundaries. */
+export function caretStops(
+  notes: Note[],
+  part: Part,
+  staff: string,
+  voice: number,
+  bars: { start: number; end: number }[],
+): number[] {
+  const stops = new Set<number>([0])
+  for (const m of bars) {
+    stops.add(m.start)
+    stops.add(m.end)
+  }
+  for (const n of notes) {
+    const v = metadata(n, part)
+    if (v.staff !== staff || v.voice !== voice || v.grace_to) continue
+    stops.add(n.beat)
+    stops.add(n.beat + n.duration)
+  }
+  return [...stops].sort((a, b) => a - b)
+}
+export function nextCaretStop(
+  stops: number[],
+  beat: number,
+  direction: 1 | -1,
+  fallback: number,
+): number {
+  const eps = 1e-6
+  if (direction > 0) return stops.find((s) => s > beat + eps) ?? beat + fallback
+  const previous = [...stops].reverse().find((s) => s < beat - eps)
+  return Math.max(0, previous ?? beat - fallback)
+}
 export const keyNames = [
   'Cb',
   'Gb',

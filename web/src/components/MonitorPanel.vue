@@ -105,6 +105,12 @@ async function connect() {
     if (attempt) await disconnect(); else state.value = 'disconnected'
   }
 }
+async function toggle() {
+  if (state.value === 'disconnecting') return
+  if (current) await disconnect()
+  else await connect()
+}
+defineExpose({ toggle, state, error })
 function level() { if (monitor.value) monitor.value.volume = volume.value }
 watch(() => props.active, active => { if (!active && current) void disconnect() })
 onBeforeUnmount(() => { void disconnect() })

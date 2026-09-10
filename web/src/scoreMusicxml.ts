@@ -68,10 +68,26 @@ export function exportScoreMusicXML(
     project.beats_per_bar,
     project.beat_unit || 4,
     project.score?.meters,
-  ).flatMap(m=>{
-    const cuts=[...new Set([m.start,...(project.score?.repeats||[]).flatMap(r=>[r.start,r.end,...(r.first_ending==null?[]:[r.first_ending])]).filter(b=>b>m.start&&b<m.end),m.end])].sort((a,b)=>a-b)
-    return cuts.slice(0,-1).map((start,i)=>({...m,start,end:cuts[i+1]!}))
-  }).map((m,i)=>({...m,number:i+1}))
+  )
+    .flatMap((m) => {
+      const cuts = [
+        ...new Set([
+          m.start,
+          ...(project.score?.repeats || [])
+            .flatMap((r) => [
+              r.start,
+              r.end,
+              ...(r.first_ending == null ? [] : [r.first_ending]),
+            ])
+            .filter((b) => b > m.start && b < m.end),
+          m.end,
+        ]),
+      ].sort((a, b) => a - b)
+      return cuts
+        .slice(0, -1)
+        .map((start, i) => ({ ...m, start, end: cuts[i + 1]! }))
+    })
+    .map((m, i) => ({ ...m, number: i + 1 }))
   const list = parts
     .map(
       (p, i) =>
@@ -92,7 +108,7 @@ export function exportScoreMusicXML(
           ),
         )
       const bars = measures
-        .map((m) => {
+        .map((m, i) => {
           let cursor = m.start,
             content = attributes(p, project, m.start)
           for (const r of project.score?.repeats || []) {
@@ -170,6 +186,35 @@ export function exportScoreMusicXML(
                 )
             }
           }
+          if (pi === 0) {
+            const tempos = project.score?.tempos || []
+            if (i === 0 && !tempos.some((t) => t.beat === 0))
+              content += direction(
+                m.start,
+                `<direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${project.bpm}</per-minute></metronome></direction-type>`,
+                `<sound tempo="${project.bpm}"/>`,
+              )
+            for (const t of tempos)
+              if (t.beat >= m.start && t.beat < m.end)
+                content += direction(
+                  t.beat,
+                  `<direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${t.bpm}</per-minute></metronome></direction-type>`,
+                  `<sound tempo="${t.bpm}"/>`,
+                )
+          }
+          ss.forEach((s, si) => {
+            for (const mark of s.marks || [])
+              if (mark.beat >= m.start && mark.beat < m.end)
+                content += direction(
+                  mark.beat,
+                  `<direction-type>${
+                    mark.kind === 'rehearsal'
+                      ? `<rehearsal>${escape(mark.text)}</rehearsal>`
+                      : `<words${mark.kind === 'expression' ? ' font-style="italic"' : ''}${mark.kind === 'cue' ? ' font-weight="bold"' : ''}${mark.kind === 'lyric' ? ' placement="below"' : ''}>${escape(mark.text)}</words>`
+                  }</direction-type>`,
+                  `<staff>${si + 1}</staff>`,
+                )
+          })
           // Attribute changes have a musical cursor even when no note occurs there.
           const changes = [
             ...new Set([
@@ -216,7 +261,8 @@ export function exportScoreMusicXML(
             if (v.octave) content += octaveDirection('stop')
             cursor = start + (grace ? 0 : duration)
           }
-          if(cursor<m.end)content+=`<forward><duration>${Math.round((m.end-cursor)*divisions)}</duration></forward>`
+          if (cursor < m.end)
+            content += `<forward><duration>${Math.round((m.end - cursor) * divisions)}</duration></forward>`
           for (const r of project.score?.repeats || [])
             if (r.end === m.end)
               content += `<barline location="right">${r.first_ending != null ? '<ending number="1" type="stop"/>' : ''}<repeat direction="backward" times="${r.times}"/></barline>`
@@ -247,6 +293,7 @@ export function importScoreMusicXML(xml: string): {
     throw new Error('Expected uncompressed score-partwise MusicXML')
   const warnings = new Set<string>(),
     parts: Part[] = [],
+    tempos = new Map<number, number>(),
     meters = new Map<number, { beat: number; beats: number; unit: number }>(),
     keys = new Map<
       number,
@@ -404,7 +451,7 @@ export function importScoreMusicXML(xml: string): {
         } else if (item.tagName === 'backup' || item.tagName === 'forward') {
           position +=
             (num(item, 'duration') / div) * (item.tagName === 'backup' ? -1 : 1)
-          furthest=Math.max(furthest,position)
+          furthest = Math.max(furthest, position)
         } else if (item.tagName === 'note') {
           const s = staff(num(item, 'staff', 1)),
             grace = !!item.querySelector('grace'),
@@ -594,6 +641,52 @@ export function importScoreMusicXML(xml: string): {
                 up: type === 'crescendo',
               })
           }
+          const perMinute =
+            sound?.getAttribute('tempo') ??
+            item.querySelector('metronome > per-minute')?.textContent
+          if (parts.length === 0 && perMinute) {
+            const bpm = Number(perMinute)
+            if (Number.isFinite(bpm) && bpm >= 1 && bpm <= 400)
+              tempos.set(at, bpm)
+          }
+          const words = item.querySelector(
+            'direction-type > words, direction-type > rehearsal',
+          )
+          const navigationWord =
+            sound &&
+            ['dacapo', 'dalsegno', 'segno', 'fine', 'tocoda', 'coda'].some((a) =>
+              sound.hasAttribute(a),
+            )
+          if (
+            words?.textContent?.trim() &&
+            !navigationWord &&
+            !['D.C.', 'D.S.', 'Segno', 'Fine', 'To coda', 'Coda'].includes(
+              words.textContent.trim(),
+            )
+          ) {
+            const s = staff(num(item, 'staff', 1)),
+              text = words.textContent.trim().slice(0, 256)
+            s.marks = [
+              ...(s.marks || []),
+              {
+                id: newId(),
+                beat: at,
+                kind:
+                  words.tagName === 'rehearsal'
+                    ? 'rehearsal'
+                    : words.getAttribute('placement') === 'below'
+                      ? 'lyric'
+                      : words.getAttribute('font-style') === 'italic'
+                        ? 'expression'
+                        : words.getAttribute('font-weight') === 'bold'
+                          ? 'cue'
+                          : /^(rit|rall|accel|a tempo|tempo|allegro|adagio|andante|presto|lento|largo|vivace|moderato)/i.test(text)
+                            ? 'tempo'
+                            : 'text',
+                text,
+              },
+            ]
+          }
           if (parts.length === 0 && sound) {
             if (sound.hasAttribute('dacapo')) jump = { at, target: 'dc' }
             if (sound.hasAttribute('dalsegno')) jump = { at, target: 'ds' }
@@ -641,6 +734,9 @@ export function importScoreMusicXML(xml: string): {
   score.length = scoreLength
   score.meters = [...meters.values()].sort((a, b) => a.beat - b.beat)
   score.keys = [...keys.values()].sort((a, b) => a.beat - b.beat)
+  score.tempos = [...tempos.entries()]
+    .map(([beat, bpm]) => ({ beat, bpm }))
+    .sort((a, b) => a.beat - b.beat)
   if (jump)
     score.navigation = {
       at: jump.at,
@@ -664,6 +760,11 @@ export function importScoreMusicXML(xml: string): {
 /** Native project JSON remains the lossless format for graph and performance settings. */
 export function musicXMLExportWarnings(project: Project): string[] {
   const warnings: string[] = []
+  if(project.score?.barlines?.length || project.parts.some(p => p.muted || p.solo)) warnings.push('Special barline styles and mute/solo settings remain in the native project.')
+  if (project.parts.some((p) => p.staves?.some((s) => s.hidden_rests?.length)))
+    warnings.push(
+      'Hidden rest layout is omitted from MusicXML. Keep the native project to retain it.',
+    )
   if (project.parts.some((p) => p.automation?.length))
     warnings.push(
       'Raw MIDI lanes are omitted from MusicXML. Keep the native project to retain them.',

@@ -59,5 +59,5 @@ test('nested subgraph ports, live edits, naming, duplication and subtree undo', 
   expect(latest.running).toBe(true)
   await page.getByRole('button',{name:'Undo',exact:true}).click()
   await expect.poll(async()=>(await load()).graph.nodes.length).toBe(16)
-  await page.getByRole('button',{name:'Deactivate show',exact:true}).click()
+  await page.getByRole('button', { name: 'Disable audio engine', exact: true }).click()
 })

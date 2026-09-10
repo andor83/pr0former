@@ -1,13 +1,17 @@
+mod accounts;
 mod audio;
 mod bind;
 mod build_info;
+mod desktop;
 mod hardware_meter;
 mod loops;
 mod media;
+mod monitor_packets;
 mod node_io;
 mod osc;
 mod output_buffer;
 mod performance;
+mod presence;
 mod recordings;
 mod resources;
 mod revisions;
@@ -42,12 +46,14 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 struct App {
+    presence: Arc<Mutex<presence::Presence>>,
     resources: Arc<Mutex<resources::Stats>>,
     osc: Arc<osc::Runtime>,
     db: Arc<Mutex<Connection>>,
     events: broadcast::Sender<Value>,
     engine: std::sync::mpsc::SyncSender<audio::Command>,
     active: Arc<Mutex<Option<String>>>,
+    performance: Arc<Mutex<Option<String>>>,
     graph: Arc<Mutex<Option<String>>>,
     setup: Arc<tokio::sync::Mutex<()>>,
     logs: Arc<settings::Logs>,
@@ -104,7 +110,7 @@ fn user(app: &App, headers: &HeaderMap) -> Api<String> {
         .lock()
         .unwrap()
         .query_row(
-            "SELECT user_id FROM sessions WHERE token=?1 AND expires>?2",
+            "SELECT s.user_id FROM sessions s JOIN user_profiles p ON p.user_id=s.user_id WHERE s.token=?1 AND s.expires>?2 AND p.enabled=1 AND p.deleted=0",
             params![token, now()],
             |r| r.get(0),
         )
@@ -316,7 +322,7 @@ async fn login(
         .lock()
         .unwrap()
         .query_row(
-            "SELECT id,password FROM users WHERE username=?1",
+            "SELECT u.id,u.password FROM users u JOIN user_profiles p ON p.user_id=u.id WHERE u.username=?1 AND p.enabled=1 AND p.deleted=0",
             [c.username.trim().to_lowercase()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -344,7 +350,7 @@ async fn login(
     );
     Ok((
         [(header::SET_COOKIE, cookie)],
-        Json(json!({"id":id,"username":c.username})),
+        Json(accounts::profile(&app.db.lock().unwrap(), &id)?),
     )
         .into_response())
 }
@@ -367,15 +373,7 @@ async fn logout(State(app): State<App>, headers: HeaderMap) -> Api<Response> {
 }
 async fn me(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
     let id = user(&app, &headers)?;
-    let username: String = app
-        .db
-        .lock()
-        .unwrap()
-        .query_row("SELECT username FROM users WHERE id=?1", [&id], |r| {
-            r.get(0)
-        })
-        .map_err(internal)?;
-    Ok(Json(json!({"id":id,"username":username})))
+    accounts::profile(&app.db.lock().unwrap(), &id).map(Json)
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     let count: i64 = app
@@ -392,18 +390,23 @@ async fn status(State(app): State<App>) -> Json<Value> {
 async fn list_projects(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
     let id = user(&app, &headers)?;
     let db = app.db.lock().unwrap();
-    let mut s=db.prepare("SELECT p.body,m.role FROM projects p JOIN members m ON m.project_id=p.id WHERE m.user_id=?1 ORDER BY p.rowid DESC").map_err(internal)?;
+    let mut s=db.prepare("SELECT p.body,m.role,(SELECT opened FROM project_recents WHERE user_id=?1 AND project_id=p.id),(SELECT group_concat(u.username,', ') FROM members own JOIN users u ON u.id=own.user_id WHERE own.project_id=p.id AND own.role='owner') FROM projects p JOIN members m ON m.project_id=p.id WHERE m.user_id=?1 ORDER BY p.rowid DESC").map_err(internal)?;
     let rows = s
         .query_map([id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<u64>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
         })
         .map_err(internal)?;
     let mut result = vec![];
     for row in rows {
-        let (body, role) = row.map_err(internal)?;
+        let (body, role, opened, owner) = row.map_err(internal)?;
         let p: Project = serde_json::from_str(&body).map_err(internal)?;
         result
-            .push(json!({"id":p.id,"name":p.name,"mode":p.mode,"role":role,"revision":p.revision}));
+            .push(json!({"id":p.id,"name":p.name,"mode":p.mode,"role":role,"revision":p.revision,"bpm":p.bpm,"beats_per_bar":p.beats_per_bar,"beat_unit":p.beat_unit,"schema_version":p.schema_version,"parts":p.parts.len(),"nodes":p.graph.nodes.len(),"opened":opened,"owner":owner}));
     }
     Ok(Json(json!(result)))
 }
@@ -440,6 +443,7 @@ async fn create_project(
         params![p.id, body],
     )
     .map_err(internal)?;
+    tx.execute("INSERT INTO project_recents(user_id,project_id,opened) VALUES(?1,?2,(SELECT COALESCE(MAX(opened),0)+1 FROM project_recents WHERE user_id=?1))",params![owner,p.id]).map_err(internal)?;
     tx.commit().map_err(internal)?;
     Ok(Json(p))
 }
@@ -466,55 +470,7 @@ fn validate_live_update(previous: &Project, next: &Project) -> Result<(), String
     if next.mode != previous.mode {
         return Err("Mode changes require deactivation".into());
     }
-    if previous.mode == Mode::Structured {
-        let mut graph_edit = previous.clone();
-        graph_edit.graph = next.graph.clone();
-        graph_edit.revision = next.revision;
-        // Deleting an instrument detaches its score route; other score edits
-        // still require deactivation in structured mode.
-        for part in &mut graph_edit.parts {
-            for staff in &mut part.staves {
-                if staff.instrument_node.as_ref().is_some_and(|id| {
-                    previous.graph.nodes.iter().any(|n| &n.id == id)
-                        && !next.graph.nodes.iter().any(|n| &n.id == id)
-                }) {
-                    staff.instrument_node = None;
-                }
-                if let Some(restored) = next
-                    .parts
-                    .iter()
-                    .find(|p| p.id == part.id)
-                    .and_then(|p| p.staves.iter().find(|s| s.id == staff.id))
-                {
-                    if restored.instrument_node.as_ref().is_some_and(|id| {
-                        !previous.graph.nodes.iter().any(|n| &n.id == id)
-                            && next.graph.nodes.iter().any(|n| &n.id == id)
-                    }) {
-                        staff.instrument_node = restored.instrument_node.clone();
-                    }
-                }
-            }
-            if part.instrument_node.as_ref().is_some_and(|id| {
-                previous.graph.nodes.iter().any(|n| &n.id == id)
-                    && !next.graph.nodes.iter().any(|n| &n.id == id)
-            }) {
-                part.instrument_node = None;
-            }
-            if let Some(restored) = next.parts.iter().find(|p| p.id == part.id) {
-                if restored.instrument_node.as_ref().is_some_and(|id| {
-                    !previous.graph.nodes.iter().any(|n| &n.id == id)
-                        && next.graph.nodes.iter().any(|n| &n.id == id)
-                }) {
-                    part.instrument_node = restored.instrument_node.clone();
-                }
-            }
-        }
-        if serde_json::to_value(graph_edit).unwrap() != serde_json::to_value(next).unwrap() {
-            return Err(
-                "Structured score and project settings changes require deactivation".into(),
-            );
-        }
-    }
+
     Ok(())
 }
 
@@ -530,6 +486,9 @@ async fn update_project(
     let _guard = app.setup.lock().await;
     if p.id != id {
         return Err(bad("Project ID mismatch"));
+    }
+    if app.performance.lock().unwrap().as_deref() == Some(&id) {
+        return Err(bad("Exit performance mode before editing"));
     }
     let previous = load(&app, &id)?;
     sample_library::assign_roots(&app.db.lock().unwrap(), &previous, &mut p)?;
@@ -754,6 +713,65 @@ async fn clear_loop(
     Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]
+struct Audition {
+    part: String,
+    note: String,
+}
+async fn audition(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<Audition>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    can_edit(&role(&app, &id, &u)?)?;
+    let _guard = app.setup.lock().await;
+    if app.performance.lock().unwrap().as_deref() == Some(&id) {
+        return Err(bad("Note entry is disabled in performance mode"));
+    }
+    let p = load(&app, &id)?;
+    let part = p
+        .parts
+        .iter()
+        .find(|p| p.id == request.part)
+        .ok_or_else(|| bad("Part missing"))?;
+    let note = part
+        .notes
+        .iter()
+        .find(|n| n.id == request.note)
+        .ok_or_else(|| bad("Note missing"))?;
+    if app.graph.lock().unwrap().as_deref() == Some(&id)
+        && !note.rest
+        && !part.muted
+        && (!p.parts.iter().any(|p| p.solo) || part.solo)
+    {
+        let staff = note
+            .notation
+            .as_ref()
+            .and_then(|v| part.staves.iter().position(|s| s.id == v.staff))
+            .unwrap_or(0);
+        let config = part.staves.get(staff);
+        send(
+            &app,
+            audio::Command::Audition {
+                project: id,
+                part: part.id.clone(),
+                staff: (staff + 1) as u8,
+                node: config
+                    .and_then(|s| s.instrument_node.clone())
+                    .or_else(|| part.instrument_node.clone()),
+                channel: config
+                    .and_then(|s| s.midi_channel)
+                    .unwrap_or(part.midi_channel),
+                pitch: note.pitch,
+                velocity: note.velocity,
+            },
+        )?;
+    }
+    Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
 struct PianoNote {
     node: String,
     pitch: u8,
@@ -888,6 +906,23 @@ async fn transport(
         return Err(bad("Count-in must be 0–32 beats"));
     }
     let _guard = app.setup.lock().await;
+    if c.action == "performance" || c.action == "prepare" {
+        if c.action == "performance" {
+            *app.performance.lock().unwrap() = Some(id.clone());
+        } else if app.performance.lock().unwrap().as_deref() == Some(&id) {
+            *app.performance.lock().unwrap() = None;
+        }
+        let _ = app.events.send(engine_status(&app));
+        return Ok(Json(json!({"ok":true})));
+    }
+    if c.action == "play"
+        && app.graph.lock().unwrap().as_deref() == Some(&id)
+        && app.active.lock().unwrap().as_deref() != Some(&id)
+    {
+        send(&app, audio::Command::Show(true))?;
+        *app.active.lock().unwrap() = Some(id.clone());
+        let _ = app.events.send(engine_status(&app));
+    }
     if c.action == "activate" {
         if app
             .active
@@ -917,7 +952,7 @@ async fn transport(
         if (c.action != "tempo" && app.active.lock().unwrap().as_deref() != Some(&id))
             || app.graph.lock().unwrap().as_deref() != Some(&id)
         {
-            return Err(bad("Activate this show first"));
+            return Err(bad("Enable this project’s audio engine first"));
         }
         match c.action.as_str() {
             "play" | "pause" | "stop" => send(
@@ -1063,19 +1098,30 @@ async fn members(
     Ok(Json(json!(rows)))
 }
 async fn devices(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
-    user(&app, &headers)?;
-    {
+    let u = user(&app, &headers)?;
+    let mut inventory = {
         let _setup = app.setup.lock().await;
-        settings::discover().await?;
-    }
-    let (tx, rx) = oneshot::channel();
-    send(&app, audio::Command::Devices(tx))?;
-    Ok(Json(
-        tokio::time::timeout(Duration::from_secs(5), rx)
+        let admin = accounts::is_admin(&app.db.lock().unwrap(), &u);
+        let settings = if admin {
+            settings::discover().await?
+        } else {
+            settings::read()
+        };
+        tokio::task::spawn_blocking(move || audio::device_inventory(settings.sample_rate))
             .await
             .map_err(internal)?
-            .map_err(internal)?,
-    ))
+    };
+    let (tx, rx) = oneshot::channel();
+    send(&app, audio::Command::Devices(tx))?;
+    let runtime = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+    inventory
+        .as_object_mut()
+        .unwrap()
+        .extend(runtime.as_object().unwrap().clone());
+    Ok(Json(inventory))
 }
 #[derive(Deserialize)]
 struct DeviceAction {
@@ -1193,8 +1239,9 @@ async fn engine_enable(
         return Err(bad("Transport authority required"));
     }
     let _guard = app.setup.lock().await;
-    if app.active.lock().unwrap().is_some() {
-        return Err(bad("Deactivate the show before changing engine state"));
+    if app.active.lock().unwrap().as_deref() == Some(&id) && !c.enabled {
+        send(&app, audio::Command::Show(false))?;
+        *app.active.lock().unwrap() = None;
     }
     can_switch_graph(&app, &id, &u)?;
     if c.enabled {
@@ -1214,6 +1261,7 @@ async fn latency_test(
     Json(c): Json<DeviceAction>,
 ) -> Api<Json<Value>> {
     csrf(&headers)?;
+    accounts::admin(&app, &headers)?;
     let u = user(&app, &headers)?;
     if role(&app, &id, &u)? != "owner" {
         return Err(bad("Owner access required"));
@@ -1317,13 +1365,23 @@ async fn websocket(
     }
     let u = user(&app, &headers)?;
     role(&app, &id, &u)?;
-    Ok(ws.on_upgrade(move |socket| stream(socket, app, id, u)))
+    Ok(ws.on_upgrade(move |socket| stream(socket, app, id, u, headers)))
 }
 // Snapshot both ownership states; graph processing and show transport are independent.
 fn engine_status(app: &App) -> Value {
     let graph = app.graph.lock().unwrap();
     let active = app.active.lock().unwrap();
-    json!({"type":"engine_status","active_project":*active,"graph_project":*graph,"server_time":audio::monotonic_ms()})
+    json!({"type":"engine_status","performance_project":*app.performance.lock().unwrap(),"active_project":*active,"graph_project":*graph,"server_time":audio::monotonic_ms()})
+}
+
+async fn socket_text(socket: &mut WebSocket, value: String) -> Result<(), ()> {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        socket.send(Message::Text(value.into())),
+    )
+    .await
+    .map_err(|_| ())?
+    .map_err(|_| ())
 }
 
 async fn send_project_snapshot(socket: &mut WebSocket, app: &App, id: &str, u: &str) -> bool {
@@ -1333,53 +1391,51 @@ async fn send_project_snapshot(socket: &mut WebSocket, app: &App, id: &str, u: &
     let Ok(project) = load(app, id) else {
         return false;
     };
-    if socket
-        .send(Message::Text(
-            json!({"type":"project","project_id":id,"project":project})
-                .to_string()
-                .into(),
-        ))
-        .await
-        .is_err()
+    if socket_text(
+        socket,
+        json!({"type":"project","project_id":id,"project":project}).to_string(),
+    )
+    .await
+    .is_err()
     {
         return false;
     }
     let saved = revisions::status(&app.db.lock().unwrap(), id).ok();
     if let Some(saved) = saved {
-        if socket
-            .send(Message::Text(
-                json!({"type":"project_save","project_id":id,"save":saved})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .is_err()
+        if socket_text(
+            socket,
+            json!({"type":"project_save","project_id":id,"save":saved}).to_string(),
+        )
+        .await
+        .is_err()
         {
             return false;
         }
     }
     let status = engine_status(&app);
-    socket
-        .send(Message::Text(status.to_string().into()))
-        .await
-        .is_ok()
+    socket_text(socket, status.to_string()).await.is_ok()
 }
 
-async fn stream(mut socket: WebSocket, app: App, id: String, u: String) {
+async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers: HeaderMap) {
+    let _presence = presence::Lease::join(&app, &id).await;
     // Subscribe before reading SQLite so concurrent commits are either in this
     // snapshot or queued below. Clients discard older/equal revisions.
     let mut events = app.events.subscribe();
     if !send_project_snapshot(&mut socket, &app, &id, &u).await {
         return;
     }
-    let mut check = tokio::time::interval(Duration::from_secs(30));
+    let mut check = tokio::time::interval(Duration::from_secs(10));
+    let mut last_received = tokio::time::Instant::now();
     let visualization_session = Uuid::new_v4().to_string();
     let mut visualizers = false;
     loop {
         tokio::select! {
-            event=events.recv()=>match event{Ok(mut v)=>{if !visualizers{if let Some(o)=v.as_object_mut(){o.remove("visualizations");}}if (v["type"]=="hardware_levels" || v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || v.get("project_id").and_then(Value::as_str)==Some(&id))&&socket.send(Message::Text(v.to_string().into())).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
-            msg=socket.recv()=>match msg{Some(Ok(Message::Text(text)))=>{if let Ok(v)=serde_json::from_str::<Value>(&text){if v["type"]=="visualizers"{visualizers=v["enabled"]==true;let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:visualizers});}if v["type"]=="ping"{if visualizers{let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:true});}let _=socket.send(Message::Text(json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string().into())).await;}}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}},
-            _=check.tick()=>{if role(&app,&id,&u).is_err(){break;}}
+            event=events.recv()=>match event{Ok(mut v)=>{if v["type"]=="session_revoked" && v["user_id"]==u {let _=socket_text(&mut socket,v.to_string()).await;break;} if !visualizers{if let Some(o)=v.as_object_mut(){o.remove("visualizations");}}if (v["type"]=="hardware_levels" || v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || v.get("project_id").and_then(Value::as_str)==Some(&id))&&socket_text(&mut socket, v.to_string()).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
+            msg=socket.recv()=>match msg{Some(Ok(Message::Text(text)))=>{last_received=tokio::time::Instant::now();if let Ok(v)=serde_json::from_str::<Value>(&text){if v["type"]=="visualizers"{visualizers=v["enabled"]==true;let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:visualizers});}if v["type"]=="ping"{if visualizers{let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:true});}let _=socket_text(&mut socket, json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string()).await;}}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,Some(Ok(_))=>{last_received=tokio::time::Instant::now();}},
+            _=check.tick()=>{
+                if user(&app,&headers).is_err() || role(&app,&id,&u).is_err() || last_received.elapsed() >= Duration::from_secs(30) {break;}
+                if tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Ping(Vec::new().into()))).await.map_or(true, |r| r.is_err()) {break;}
+            }
         }
     }
     let _ = send(
@@ -1415,9 +1471,10 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    let desktop_mode = std::env::args().any(|arg| arg == "--desktop");
     let directory = std::env::var("PR0_DATA").unwrap_or("data".into());
     std::fs::create_dir_all(&directory).expect("Create data directory");
-    let db = Connection::open(format!("{directory}/pr0former.sqlite")).expect("Open database");
+    let mut db = Connection::open(format!("{directory}/pr0former.sqlite")).expect("Open database");
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
         CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT UNIQUE NOT NULL,password TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id),expires INTEGER NOT NULL);
@@ -1425,9 +1482,14 @@ async fn main() {
         CREATE TABLE IF NOT EXISTS members(project_id TEXT REFERENCES projects(id),user_id TEXT REFERENCES users(id),role TEXT NOT NULL,PRIMARY KEY(project_id,user_id));
         CREATE TABLE IF NOT EXISTS revisions(project_id TEXT REFERENCES projects(id),revision INTEGER,body TEXT NOT NULL,PRIMARY KEY(project_id,revision));
         CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),role TEXT,expires INTEGER,used INTEGER);").expect("Database migration");
+    accounts::migrate(&db).expect("Account migration");
     sample_library::migrate(&db).expect("Sample library migration");
     subgraphs::migrate(&db).expect("Subgraph library migration");
     revisions::migrate(&db).expect("Revision save migration");
+    let desktop_session = desktop_mode
+        .then(|| desktop::session(&mut db))
+        .transpose()
+        .expect("Prepare desktop owner");
     let (events, _) = broadcast::channel(128);
     let media = Arc::new(media::Media::new());
     let logs = Arc::new(settings::Logs::default());
@@ -1438,14 +1500,23 @@ async fn main() {
         logs.clone(),
         osc.clone(),
     );
-    let tls_config = tls::Config::load();
+    let tls_config = if desktop_mode {
+        tls::Config {
+            pair: None,
+            port: None,
+        }
+    } else {
+        tls::Config::load()
+    };
     let app = App {
+        presence: Arc::new(Mutex::new(presence::Presence::default())),
         resources: resources::start(),
         osc,
         db: Arc::new(Mutex::new(db)),
         events,
         engine,
         active: Arc::new(Mutex::new(None)),
+        performance: Arc::new(Mutex::new(None)),
         graph: Arc::new(Mutex::new(None)),
         setup: Arc::new(tokio::sync::Mutex::new(())),
         logs,
@@ -1454,6 +1525,8 @@ async fn main() {
     };
     app.osc.listen(&app);
     start_autosave(app.clone());
+    let desktop_app = app.clone();
+    let assets = std::env::var("PR0_WEB_ROOT").unwrap_or("web/dist".into());
     let router = Router::new()
         .route("/api/system/osc", get(osc::get))
         .route("/api/projects/{id}/system/osc", put(osc::put))
@@ -1472,6 +1545,7 @@ async fn main() {
         .route("/api/projects/{id}/preview", get(preview))
         .route("/api/projects/{id}/control", put(control_input))
         .route("/api/projects/{id}/piano", put(piano_note))
+        .route("/api/projects/{id}/audition", post(audition))
         .route("/api/projects/{id}/loops/clear", put(clear_loop))
         .route("/api/subgraphs", get(subgraphs::list))
         .route(
@@ -1491,6 +1565,30 @@ async fn main() {
         .route("/api/me", get(me))
         .route("/api/catalog", get(|| async { Json(catalog()) }))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/{id}/opened", post(accounts::opened))
+        .route("/api/samples", get(sample_library::organize))
+        .route(
+            "/api/samples/{id}",
+            put(sample_library::organize_edit).delete(sample_library::delete),
+        )
+        .route(
+            "/api/samples/{id}/audio",
+            get(sample_library::organize_audio),
+        )
+        .route("/api/samples/{id}/impact", get(sample_library::impact))
+        .route(
+            "/api/admin/users",
+            get(accounts::list).post(accounts::create),
+        )
+        .route(
+            "/api/admin/users/{id}",
+            put(accounts::update).delete(accounts::delete),
+        )
+        .route(
+            "/api/admin/users/{id}/sessions",
+            axum::routing::delete(accounts::revoke),
+        )
+        .route("/api/audio/config", get(settings::public_config))
         .route("/api/join", post(join))
         .route("/api/devices", get(devices))
         .route("/api/projects/{id}", get(get_project).put(update_project))
@@ -1532,10 +1630,14 @@ async fn main() {
             get(sample_library::audio),
         )
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
-        .fallback_service(
-            ServeDir::new("web/dist").not_found_service(ServeFile::new("web/dist/index.html")),
-        )
+        .fallback_service(ServeDir::new(&assets).not_found_service(ServeFile::new(
+            std::path::Path::new(&assets).join("index.html"),
+        )))
         .with_state(app);
+    if let Some(session) = desktop_session {
+        desktop::serve(router, desktop_app, session).await;
+        return;
+    }
     let address = bind::address(
         &std::env::var("PR0_BIND").unwrap_or_else(|_| {
             if tls_config.pair.is_some() {
@@ -1613,14 +1715,14 @@ mod live_edit_tests {
         );
     }
     #[test]
-    fn structured_live_edits_allow_graphs_but_protect_score_and_mode() {
+    fn structured_live_edits_allow_graphs_and_score_but_protect_mode() {
         let previous = pr0_core::demo_project("x".into(), "x".into(), Mode::Structured);
         let mut next = previous.clone();
         next.graph.nodes[0].x += 10.;
         next.revision += 1;
         assert!(validate_live_update(&previous, &next).is_ok());
         next.parts[0].name = "Changed part".into();
-        assert!(validate_live_update(&previous, &next).is_err());
+        assert!(validate_live_update(&previous, &next).is_ok());
         let mut deleted = previous.clone();
         deleted.graph.nodes.retain(|n| n.id != "tone");
         deleted

@@ -99,7 +99,6 @@ test('piano plays notes, forwards polyphony, highlights received keys and select
   await page.getByRole('button',{name:'Stop',exact:true}).click()
   await expect.poll(()=>latest?.beat).toBe(0)
   expect(latest.values['Receive keys'].gate).toBe(1)
-  await page.getByRole('button',{name:'Deactivate show',exact:true}).click()
   await expect(page.getByRole('button',{name:'Disable audio engine',exact:true})).toBeEnabled()
   expect(latest.values['Receive keys'].gate).toBe(1)
   await note(60,0)

@@ -178,7 +178,7 @@ pub fn validate_routes(p: &pr0_core::Project, s: &Settings) -> Result<(), String
     Ok(())
 }
 pub async fn get(State(app): State<App>, headers: HeaderMap) -> Api<Json<Settings>> {
-    user(&app, &headers)?;
+    crate::accounts::admin(&app, &headers)?;
     let _guard = app.setup.lock().await;
     Ok(Json(discover().await?))
 }
@@ -190,9 +190,8 @@ pub async fn put(
 ) -> Api<Json<Settings>> {
     csrf(&headers)?;
     let u = user(&app, &headers)?;
-    if role(&app, &id, &u)? != "owner" {
-        return Err(bad("Owner access required for system settings"));
-    }
+    crate::accounts::admin(&app, &headers)?;
+    role(&app, &id, &u)?;
     let _guard = app.setup.lock().await;
     apply(&app, &id, s, None).await
 }
@@ -210,9 +209,8 @@ pub async fn device(
 ) -> Api<Json<Settings>> {
     csrf(&headers)?;
     let u = user(&app, &headers)?;
-    if role(&app, &id, &u)? != "owner" {
-        return Err(bad("Owner access required for system settings"));
-    }
+    crate::accounts::admin(&app, &headers)?;
+    role(&app, &id, &u)?;
     let _guard = app.setup.lock().await;
     let mut settings = discover().await?;
     match edit.direction.as_str() {
@@ -463,4 +461,13 @@ mod tests {
         assert_eq!(logs.snapshot("two").len(), 1);
         assert!(logs.snapshot("other").is_empty());
     }
+}
+
+/// Graph clients need the current audio contract, not permission to edit system settings.
+pub async fn public_config(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
+    user(&app, &headers)?;
+    let s = read();
+    Ok(Json(
+        serde_json::json!({"sample_rate":s.sample_rate,"block_size":s.block_size,"interfaces":s.interfaces.iter().map(|i|serde_json::json!({"id":i.id,"name":i.name,"enabled":i.enabled})).collect::<Vec<_>>(),"input_interfaces":s.input_interfaces.iter().map(|i|serde_json::json!({"id":i.id,"name":i.name,"enabled":i.enabled})).collect::<Vec<_>>()}),
+    ))
 }

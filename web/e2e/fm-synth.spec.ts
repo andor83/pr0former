@@ -52,5 +52,44 @@ test('polyphonic synth MIDI inputs, FM waveforms, driven frequencies and multich
   await expect.poll(()=>peak('Sine meter')).toBeLessThan(.001)
   await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
   await page.getByRole('button',{name:'Score & parts',exact:true}).click()
+  await page.getByRole('button',{name:/^Part settings ·/}).click()
   await expect(page.getByLabel('Instrument / input').locator('option',{hasText:'Polyphonic FM synth'})).toHaveCount(1)
+})
+
+test('Part MIDI and on-screen keyboard release notes independently on one FM synth',async({page})=>{
+  const headers={'X-Pr0former':'1'},status=await(await page.request.get('/api/status')).json()
+  await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
+  let p=await(await page.request.post('/api/projects',{headers,data:{name:'Shared MIDI synth',mode:'structured'}})).json()
+  p.parts=[{...p.parts[0],id:'score',instrument_node:null,loop_beats:32,notes:[
+    {id:'first',pitch:60,beat:0,duration:4,velocity:100,rest:false,tied:false},
+    {id:'second',pitch:67,beat:2,duration:4,velocity:100,rest:false,tied:false},
+  ]}]
+  const node=(id:string,kind:string,x:number,y:number,extra={})=>({id,kind,label:id,x,y,channels:1,parameters:{},...extra})
+  p.graph={nodes:[node('Part','part_midi',0,0,{part_id:'score'}),node('Keys','piano',0,310),node('FM','fm_synth',450,0,{parameters:{release:1}})],edges:[]}
+  for(const source of ['Part','Keys'])for(const port of ['pitch','velocity','gate','trigger','note_off'])p.graph.edges.push({id:`${source}-${port}`,source,source_port:port,target:'FM',target_port:port})
+  const saved=await page.request.put(`/api/projects/${p.id}`,{headers,data:p});expect(saved.ok()).toBe(true);p=await saved.json()
+  let latest:any
+  page.on('websocket',s=>s.on('framereceived',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='telemetry')latest=m}))
+  await page.goto('/')
+  await page.getByLabel('Count in',{exact:true}).selectOption('0')
+  await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
+  try {
+    const key=page.locator('.vue-flow__node[data-id="Keys"]').getByRole('button',{name:'E4 MIDI 64',exact:true})
+    await expect(key).toBeEnabled()
+    await page.getByRole('button',{name:'Play',exact:true}).click()
+    await expect.poll(()=>latest?.values?.Part?.pitch).toBe(60)
+    // Resolve the key after Play; graph fit/transport layout may still move it.
+    await key.hover();await page.mouse.down()
+    await expect(key).toHaveAttribute('aria-pressed','true')
+    await expect.poll(()=>latest?.values?.Keys?.gate).toBe(1)
+    await expect.poll(()=>latest?.values?.Part?.pitch).toBe(67)
+    await page.mouse.up()
+    await expect(key).toHaveAttribute('aria-pressed','false')
+    await expect.poll(()=>latest?.values?.Keys?.gate).toBe(0)
+    await expect.poll(()=>latest?.values?.Part?.gate).toBe(0)
+    await expect.poll(()=>latest?.values?.FM?._peak).toBe(0)
+  } finally {
+    await page.mouse.up()
+    await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
+  }
 })

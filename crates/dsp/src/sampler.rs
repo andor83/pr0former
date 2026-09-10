@@ -2,6 +2,8 @@ use pr0_core::MAX_CHANNELS;
 #[derive(Clone, Copy, Default)]
 struct Voice {
     pitch: u8,
+    root: f64,
+    increment: f64,
     velocity: f64,
     position: f64,
     level: f64,
@@ -49,6 +51,8 @@ impl Sampler {
                 });
             self.voices[index] = Voice {
                 pitch,
+                root: f64::NAN,
+                increment: 0.,
                 velocity: f64::from(velocity) / 127.,
                 position: 0.,
                 level: 1.,
@@ -103,7 +107,11 @@ impl Sampler {
                     + f64::from(sample[next][ch]) * fraction;
                 output[ch] += value * voice.velocity * voice.level * amplitude;
             }
-            voice.position += 2_f64.powf((f64::from(voice.pitch) - root) / 12.);
+            if voice.root != root {
+                voice.root = root;
+                voice.increment = 2_f64.powf((f64::from(voice.pitch) - root) / 12.);
+            }
+            voice.position += voice.increment;
             if voice.released {
                 voice.level = (voice.level - 1. / (release_ms.max(1.) * rate / 1000.)).max(0.);
             }
@@ -115,6 +123,22 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn held_voice_retunes_immediately_when_root_changes() {
+        let sample = vec![[1.; MAX_CHANNELS]; 1024];
+        let mut sampler = Sampler::default();
+        sampler.note(60, 100);
+        for (root, position) in [
+            (60., 1.),
+            (60., 2.),
+            (48., 4.),
+            (72., 4.5),
+            (60.5, 4.5 + 2_f64.powf(-0.5 / 12.)),
+        ] {
+            sampler.render(&sample, root, 1., true, 10., 48000., true);
+            assert!((sampler.voices[0].position - position).abs() < 1e-12);
+        }
+    }
     #[test]
     fn overlapping_pitches_velocity_release_and_pitch_ratio() {
         let sample = vec![[1.; MAX_CHANNELS]; 1024];

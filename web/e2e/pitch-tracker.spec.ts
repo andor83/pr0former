@@ -19,6 +19,8 @@ test('pitch tracker detects audio, displays ranked slots, connects MIDI numbers 
   await expect(page.getByLabel('FFT size',{exact:true})).toHaveValue('8192')
   await page.getByRole('button',{name:'Close parameters',exact:true}).click()
   await expect(tracker.locator('.tracker-slot')).toHaveCount(4)
+  await expect(tracker.locator('.vue-flow__handle.source.vue-flow__handle-right')).toHaveCount(4)
+  await expect(tracker.locator('.vue-flow__handle-bottom')).toHaveCount(0)
   await expect(tracker.getByLabel('Pitch 4 MIDI note',{exact:true})).toHaveText('—')
   const boxes=await tracker.locator('.tracker-slot').evaluateAll(els=>els.map(el=>el.getBoundingClientRect().x))
   expect(boxes.every((x,i)=>i===0||x>boxes[i-1]!)).toBe(true)

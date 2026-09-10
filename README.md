@@ -216,6 +216,28 @@ WebRTC uses ICE-lite on this LAN server and advertises numeric host addresses. B
 
 ### Pitch tracker
 
-Add **Pitch tracker** from Analysis and connect audio. It automatically averages the incoming 1–8 channels to mono. Choose **Pitch slots** (1–4, default 1) in settings. Detected notes appear left to right from strongest to weakest, with individual **Pitch 1–4** outputs carrying integer MIDI note numbers. Empty slots show “—” and output **−1**. Reducing the slot count disconnects removed outputs in the same undoable edit.
+Add **Pitch tracker** from Analysis and connect audio. It automatically averages the incoming 1–8 channels to mono. Choose **Pitch slots** (1–4, default 1) in settings. Detected notes appear left to right from strongest to weakest, with individual **Pitch 1–4** outputs on the right edge carrying integer MIDI note numbers. Empty slots show “—” and output **−1**. Reducing the slot count disconnects removed outputs in the same undoable edit.
 
 **FFT size** offers 2048, 4096 or 8192 samples; **Detection threshold** controls the minimum peak level. The default 8192-sample window takes about 171 ms at 48 kHz and updates every 43 ms. Outputs hold the latest analysis until the next update; these are pitch values, not MIDI note-on/off or gate events. Harmonic grouping is approximate: octave doubles, missing fundamentals, noise, transients and closely spaced low notes can be misidentified. Opposite-phase channels can cancel during mono mixing. Real-instrument accuracy and physical-device latency remain unverified.
+
+
+### Convolution and granular audio
+
+- **Convolution:** connect two same-width audio signals to A and B. Short, overlapping grains of A are continuously convolved with the latest B window as a changing impulse response. Choose a 128–2048-sample Window size; Normalize response defaults on, and Wet/dry blends against a delayed dry signal. Channels process independently. This is continuous granular convolution; it does not capture a fixed long reverb response.
+- **Granular synth:** assign or drag in a sample, then connect the five MIDI controls from Piano, MIDI input or Part MIDI. Position selects the sample region; Spray scatters starts, Grain duration and Density shape the cloud, and Root MIDI note, Amplitude and Release control tuning and level. It supports 16 MIDI voices and 128 simultaneous grains with bounded stealing. Samples wrap at their boundaries, and their metadata supplies the initial root pitch. Use Part MIDI to play score parts through this instrument.
+- **Granular pitch shift:** connect live audio and set Pitch shift (−24 to +24 semitones), Grain duration (10–200 ms) and Wet/dry. Two overlapping read heads shift the incoming stream without loading a sample. Short grains respond faster but can sound rougher. At the default 20 ms grain duration, the zero-shift/dry delay is about 60 ms at 48 kHz; shifted read-head delay varies during each grain. Pitch changes take effect at grain boundaries.
+
+All settings are in node modals and nonstructural controls accept graph connections. These are basic granular effects: transients, high ratios, small windows and dense clouds can produce modulation or aliasing artifacts. Real-device listening, multi-node load and end-to-end latency remain unverified.
+
+## Desktop app
+
+Run `./build.sh` to build the Tauri desktop version for macOS or Linux. It bundles
+the server, Vue interface and FFmpeg, opens a private local server, and signs in
+as the local `admin` project owner. The standalone `init.sh` workflow remains
+available. Build requirements, output paths, data storage and verification limits
+are in [docs/DESKTOP.md](docs/DESKTOP.md).
+
+The server automatically stops a project’s performance and disables its audio
+engine five seconds after its last project connection leaves. Refreshing or
+reconnecting within that interval keeps it running; other connected users/tabs
+also keep it running. Lost connections are detected by server heartbeats.

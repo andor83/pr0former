@@ -21,6 +21,34 @@ pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
     if !exists {
         db.execute("ALTER TABLE sample_library ADD COLUMN root_note INTEGER CHECK(root_note BETWEEN 0 AND 127)", [])?;
     }
+    let deleted: bool = db
+        .prepare("PRAGMA table_info(sample_library)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|c| c == "deleted");
+    if !deleted {
+        db.execute(
+            "ALTER TABLE sample_library ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    let published: bool = db
+        .prepare("PRAGMA table_info(sample_library)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|c| c == "ever_global");
+    if !published {
+        db.execute(
+            "ALTER TABLE sample_library ADD COLUMN ever_global INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    db.execute(
+        "UPDATE sample_library SET ever_global=1 WHERE global=1 AND ever_global=0",
+        [],
+    )?;
     Ok(())
 }
 pub fn path(id: &str) -> PathBuf {
@@ -40,10 +68,16 @@ fn asset(project: &str) -> u32 {
     }
 }
 fn entry(db: &Connection, id: &str, project: &str, u: &str) -> Api<Value> {
-    let mut v: Value=db.query_row("SELECT s.id,s.owner,s.origin,s.name,s.description,s.tags,s.category,s.musical_key,s.bpm,s.global,s.channels,s.sample_rate,s.frames,s.revision,u.username,(SELECT asset FROM project_samples WHERE project=?2 AND sample=s.id),s.root_note FROM sample_library s JOIN users u ON u.id=s.owner WHERE s.id=?1",params![id,project],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner":r.get::<_,String>(1)?,"origin":r.get::<_,String>(2)?,"name":r.get::<_,String>(3)?,"description":r.get::<_,String>(4)?,"tags":r.get::<_,String>(5)?,"category":r.get::<_,String>(6)?,"musical_key":r.get::<_,String>(7)?,"bpm":r.get::<_,Option<f64>>(8)?,"global":r.get::<_,bool>(9)?,"channels":r.get::<_,u32>(10)?,"sample_rate":r.get::<_,u32>(11)?,"frames":r.get::<_,u64>(12)?,"revision":r.get::<_,u64>(13)?,"author":r.get::<_,String>(14)?,"asset":r.get::<_,Option<u32>>(15)?,"root_note":r.get::<_,Option<u8>>(16)?}))).map_err(|_|bad("Sample unavailable"))?;
+    let mut v: Value=db.query_row("SELECT s.id,s.owner,s.origin,s.name,s.description,s.tags,s.category,s.musical_key,s.bpm,s.global,s.channels,s.sample_rate,s.frames,s.revision,u.username,(SELECT asset FROM project_samples WHERE project=?2 AND sample=s.id),s.root_note,s.ever_global FROM sample_library s JOIN users u ON u.id=s.owner WHERE s.id=?1 AND s.deleted=0",params![id,project],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner":r.get::<_,String>(1)?,"origin":r.get::<_,String>(2)?,"name":r.get::<_,String>(3)?,"description":r.get::<_,String>(4)?,"tags":r.get::<_,String>(5)?,"category":r.get::<_,String>(6)?,"musical_key":r.get::<_,String>(7)?,"bpm":r.get::<_,Option<f64>>(8)?,"global":r.get::<_,bool>(9)?,"channels":r.get::<_,u32>(10)?,"sample_rate":r.get::<_,u32>(11)?,"frames":r.get::<_,u64>(12)?,"revision":r.get::<_,u64>(13)?,"author":r.get::<_,String>(14)?,"asset":r.get::<_,Option<u32>>(15)?,"root_note":r.get::<_,Option<u8>>(16)?,"requires_admin_delete":r.get::<_,bool>(17)?}))).map_err(|_|bad("Sample unavailable"))?;
     let owned = v["owner"] == u;
+    let admin = crate::accounts::is_admin(db, u);
+    v["can_delete"] = json!(if v["requires_admin_delete"] == true {
+        admin
+    } else {
+        owned || admin
+    });
     let project_edit:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM members WHERE project_id=?1 AND user_id=?2 AND role IN ('owner','conductor','editor'))",params![v["origin"].as_str().unwrap_or(""),u],|r|r.get(0)).map_err(internal)?;
-    v["can_edit"] = json!(owned || project_edit);
+    v["can_edit"] = json!(owned || project_edit || admin);
     v["can_publish"] = json!(owned);
     v["duration"] =
         json!(v["frames"].as_u64().unwrap_or(0) as f64 / v["sample_rate"].as_f64().unwrap_or(1.));
@@ -149,9 +183,9 @@ async fn listing(app: App, headers: HeaderMap, project: String, all: bool) -> Ap
     legacy(&app, &project, &u).await?;
     let db = app.db.lock().unwrap();
     let sql = if all {
-        "SELECT id FROM sample_library WHERE owner=?1 OR global=1 ORDER BY name COLLATE NOCASE"
+        "SELECT id FROM sample_library WHERE deleted=0 AND (owner=?1 OR global=1) ORDER BY name COLLATE NOCASE"
     } else {
-        "SELECT sample FROM project_samples WHERE project=?1 ORDER BY asset"
+        "SELECT p.sample FROM project_samples p JOIN sample_library s ON s.id=p.sample WHERE p.project=?1 AND s.deleted=0 ORDER BY p.asset"
     };
     let mut q = db.prepare(sql).map_err(internal)?;
     let ids = q
@@ -199,7 +233,9 @@ pub async fn edit(
 ) -> Api<Json<Value>> {
     csrf(&headers)?;
     let u = user(&app, &headers)?;
-    role(&app, &project, &u)?;
+    if !project.is_empty() {
+        role(&app, &project, &u)?;
+    }
     let _guard = app.setup.lock().await;
     if m.name.trim().is_empty()
         || m.name.len() > 256
@@ -227,7 +263,7 @@ pub async fn edit(
             "Only the sample owner can change global sharing".into(),
         ));
     }
-    let changed=db.execute("UPDATE sample_library SET name=?1,description=?2,tags=?3,category=?4,musical_key=?5,bpm=?6,global=?7,root_note=?10,revision=revision+1 WHERE id=?8 AND revision=?9",params![m.name.trim(),m.description,m.tags,m.category,m.musical_key,m.bpm,m.global,id,m.revision,m.root_note]).map_err(internal)?;
+    let changed=db.execute("UPDATE sample_library SET name=?1,description=?2,tags=?3,category=?4,musical_key=?5,bpm=?6,global=?7,ever_global=MAX(ever_global,?7),root_note=?10,revision=revision+1 WHERE id=?8 AND revision=?9",params![m.name.trim(),m.description,m.tags,m.category,m.musical_key,m.bpm,m.global,id,m.revision,m.root_note]).map_err(internal)?;
     if changed == 0 {
         return Err(crate::Failure(
             axum::http::StatusCode::CONFLICT,
@@ -284,7 +320,9 @@ pub async fn audio(
     Path((project, id)): Path<(String, String)>,
 ) -> Api<Response> {
     let u = user(&app, &headers)?;
-    role(&app, &project, &u)?;
+    if !project.is_empty() {
+        role(&app, &project, &u)?;
+    }
     let v = entry(&app.db.lock().unwrap(), &id, &project, &u)?;
     if !accessible(&v, &u) {
         return Err(bad("Sample unavailable"));
@@ -307,7 +345,7 @@ pub fn assign_roots(
     project: &mut pr0_core::Project,
 ) -> Api<()> {
     for node in &mut project.graph.nodes {
-        if node.kind != "poly_sampler"
+        if !matches!(node.kind.as_str(), "poly_sampler" | "granular_synth")
             || project
                 .graph
                 .edges
@@ -407,4 +445,162 @@ mod root_tests {
         assert!(assign_roots(&db, &previous, &mut project).is_ok());
         assert_eq!(project.graph.nodes[0].parameters["root_note"], 45.);
     }
+}
+
+fn context(db: &Connection, u: &str, id: &str) -> Api<String> {
+    db.query_row("SELECT ps.project FROM project_samples ps JOIN members m ON m.project_id=ps.project WHERE ps.sample=?1 AND m.user_id=?2 ORDER BY ps.project LIMIT 1",params![id,u],|r|r.get(0)).optional().map(|p|p.unwrap_or_default()).map_err(internal)
+}
+pub async fn organize(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
+    let u = user(&app, &headers)?;
+    let db = app.db.lock().unwrap();
+    let ids=db.prepare("SELECT id FROM sample_library s WHERE deleted=0 AND (owner=?1 OR global=1 OR EXISTS(SELECT 1 FROM project_samples p JOIN members m ON m.project_id=p.project WHERE p.sample=s.id AND m.user_id=?1)) ORDER BY name COLLATE NOCASE").map_err(internal)?.query_map([&u],|r|r.get::<_,String>(0)).map_err(internal)?.collect::<Result<Vec<_>,_>>().map_err(internal)?;
+    let values = ids
+        .iter()
+        .map(|id| entry(&db, id, &context(&db, &u, id)?, &u))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(json!(values)))
+}
+pub async fn organize_edit(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(m): Json<Metadata>,
+) -> Api<Json<Value>> {
+    let u = user(&app, &headers)?;
+    let project = context(&app.db.lock().unwrap(), &u, &id)?;
+    edit(State(app), headers, Path((project, id)), Json(m)).await
+}
+pub async fn organize_audio(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Api<Response> {
+    let u = user(&app, &headers)?;
+    let project = context(&app.db.lock().unwrap(), &u, &id)?;
+    audio(State(app), headers, Path((project, id))).await
+}
+fn delete_allowed(db: &Connection, v: &Value, u: &str) -> Api<()> {
+    let admin = crate::accounts::is_admin(db, u);
+    if (v["requires_admin_delete"] == true && !admin)
+        || (v["global"] != true && v["owner"] != u && !admin)
+    {
+        return Err(crate::Failure(
+            axum::http::StatusCode::FORBIDDEN,
+            "Only the owner may delete a private sample; global samples require an administrator"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+fn usage(db: &Connection, id: &str, u: &str) -> Api<Value> {
+    use std::hash::{Hash, Hasher};
+    let links = db
+        .prepare("SELECT project,asset FROM project_samples WHERE sample=?1 ORDER BY project,asset")
+        .map_err(internal)?
+        .query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    links.hash(&mut hash);
+    let visible=links.iter().filter_map(|(project,_)|db.query_row("SELECT p.body FROM projects p JOIN members m ON m.project_id=p.id WHERE p.id=?1 AND m.user_id=?2",params![project,u],|r|r.get::<_,String>(0)).ok()).filter_map(|s|serde_json::from_str::<Value>(&s).ok()).map(|p|json!({"id":p["id"],"name":p["name"]})).collect::<Vec<_>>();
+    Ok(
+        json!({"projects":visible,"project_count":links.len(),"usage_token":format!("{:x}",hash.finish())}),
+    )
+}
+pub async fn impact(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Api<Json<Value>> {
+    let u = user(&app, &headers)?;
+    let db = app.db.lock().unwrap();
+    let v = entry(&db, &id, &context(&db, &u, &id)?, &u)?;
+    delete_allowed(&db, &v, &u)?;
+    Ok(Json(usage(&db, &id, &u)?))
+}
+#[derive(Deserialize)]
+pub struct DeleteSample {
+    confirm: String,
+    acknowledge: bool,
+    revision: u64,
+    usage_token: String,
+}
+pub async fn delete(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<DeleteSample>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    let _guard = app.setup.lock().await;
+    let links = {
+        let mut db = app.db.lock().unwrap();
+        let tx = db.transaction().map_err(internal)?;
+        let v = entry(&tx, &id, &context(&tx, &u, &id)?, &u)?;
+        delete_allowed(&tx, &v, &u)?;
+        if !request.acknowledge || v["name"] != request.confirm {
+            return Err(bad(
+                "Acknowledge the project-breaking risk and enter the exact sample name",
+            ));
+        }
+        if v["revision"] != request.revision
+            || usage(&tx, &id, &u)?["usage_token"] != request.usage_token
+        {
+            return Err(crate::Failure(
+                axum::http::StatusCode::CONFLICT,
+                "Sample or usage changed; review deletion again".into(),
+            ));
+        }
+        let links = tx
+            .prepare("SELECT project,asset FROM project_samples WHERE sample=?1")
+            .map_err(internal)?
+            .query_map([&id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        let graph = app.graph.lock().unwrap();
+        if links.iter().any(|(p, _)| graph.as_deref() == Some(p)) {
+            return Err(bad(
+                "Disable the audio engine for affected projects before deleting this sample",
+            ));
+        }
+        drop(graph);
+        // Retain association tombstones so legacy discovery cannot re-import a deleted sample.
+        tx.execute(
+            "UPDATE sample_library SET deleted=1,revision=revision+1 WHERE id=?1",
+            [&id],
+        )
+        .map_err(internal)?;
+        tx.commit().map_err(internal)?;
+        links
+    };
+    let mut files = vec![path(&id)];
+    for (project, asset) in &links {
+        if let Ok(mut entries) = tokio::fs::read_dir(crate::samples::directory(project)).await {
+            while let Some(file) = entries.next_entry().await.map_err(bad)? {
+                let name = file.file_name().to_string_lossy().into_owned();
+                if name == format!("{asset}.wav")
+                    || (name.starts_with(&format!("{asset}-")) && name.ends_with(".wav"))
+                {
+                    files.push(file.path());
+                }
+            }
+        }
+    }
+    let mut cleanup_errors = 0;
+    for file in files {
+        if let Err(e) = tokio::fs::remove_file(file).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                cleanup_errors += 1;
+            }
+        }
+    }
+    for (project, _) in links {
+        let _ = app
+            .events
+            .send(json!({"type":"samples","project_id":project}));
+    }
+    Ok(Json(json!({"ok":true,"cleanup_errors":cleanup_errors})))
 }

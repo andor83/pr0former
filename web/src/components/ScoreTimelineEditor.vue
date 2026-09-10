@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import type { ScoreElement } from '../scoreElements'
 import type { Project, ScoreTimeline } from '../types'
 import { keyNames, keyLabel } from '../score'
-const props = defineProps<{ project: Project; editable: boolean }>()
+const props = defineProps<{
+  project: Project
+  editable: boolean
+  selection?: ScoreElement | null
+}>()
 const emit = defineEmits<{ update: [score: ScoreTimeline | null] }>()
+const repeatIndex = ref<number | null>(null)
 const keyMode = ref<'major' | 'minor'>('major')
 const beat = ref(4),
   beats = ref(3),
@@ -20,6 +26,34 @@ const jumpAt = ref(16),
   codaTo = ref<number | ''>('')
 const clone = () =>
   JSON.parse(JSON.stringify(props.project.score)) as ScoreTimeline
+watch(
+  () => props.selection,
+  (e) => {
+    if (!e) return
+    if (e.beat !== undefined) beat.value = e.beat
+    const m = props.project.score?.meters.find((m) => m.beat === e.beat),
+      k = props.project.score?.keys.find((k) => k.beat === e.beat)
+    if (m) {
+      beats.value = m.beats
+      unit.value = m.unit
+    }
+    if (k) {
+      key.value = k.key
+      keyMode.value = k.mode || 'major'
+    }
+    if (e.kind === 'repeat') {
+      const r = props.project.score?.repeats[e.index!]
+      if (r) {
+        repeatIndex.value = e.index!
+        start.value = r.start
+        end.value = r.end
+        times.value = r.times
+        ending.value = r.first_ending ?? ''
+      }
+    }
+  },
+  { immediate: true },
+)
 function enable() {
   emit('update', {
     version: 1,
@@ -50,7 +84,7 @@ function add(kind: 'meters' | 'keys' | 'repeats') {
     ].sort((a, b) => a.beat - b.beat)
   if (kind === 'repeats')
     s.repeats = [
-      ...s.repeats,
+      ...s.repeats.filter((_, i) => i !== repeatIndex.value),
       {
         start: start.value,
         end: end.value,
@@ -67,8 +101,7 @@ function remove(kind: 'meters' | 'keys' | 'repeats', index: number) {
 }
 </script>
 <template>
-  <details class="timeline-editor">
-    <summary>Shared score · meter, keys, repeats and navigation</summary>
+  <div class="timeline-editor">
     <template v-if="!project.score"
       ><p>
         Legacy playback loops each part independently. Converting aligns all
@@ -160,7 +193,7 @@ function remove(kind: 'meters' | 'keys' | 'repeats', index: number) {
             min="0"
             step="0.25" /></label
         ><button :disabled="!editable" @click="add('repeats')">
-          Add repeat
+          {{ repeatIndex === null ? 'Add repeat' : 'Update repeat' }}
         </button>
       </div>
       <div class="timeline-row">
@@ -229,13 +262,13 @@ function remove(kind: 'meters' | 'keys' | 'repeats', index: number) {
         Written repeats run before a D.C./D.S.; the jump is taken once.
       </p>
     </template>
-  </details>
+  </div>
 </template>
 <style scoped>
 .timeline-editor {
   padding: 10px;
   border-bottom: 1px solid var(--line);
-  max-height: 250px;
+  max-height: none;
   overflow: auto;
   flex-shrink: 0;
 }

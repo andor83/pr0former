@@ -13,7 +13,7 @@ test('private/public library permissions, immutable versions, forks and bundled 
   const pcm=Buffer.alloc(44+480*2);pcm.write('RIFF');pcm.writeUInt32LE(pcm.length-8,4);pcm.write('WAVEfmt ',8);pcm.writeUInt32LE(16,16);pcm.writeUInt16LE(1,20);pcm.writeUInt16LE(1,22);pcm.writeUInt32LE(48000,24);pcm.writeUInt32LE(96000,28);pcm.writeUInt16LE(2,32);pcm.writeUInt16LE(16,34);pcm.write('data',36);pcm.writeUInt32LE(960,40)
   const sample=await(await request.post(`/api/projects/${p.id}/samples`,{headers,multipart:{sample:{name:'sample.wav',mimeType:'audio/wav',buffer:pcm}}})).json()
   const n=(id:string,kind:string,parent:string|null,parameters={})=>({id,kind,parent,label:id,x:0,y:0,channels:1,parameters})
-  p.parts=[];p.graph={nodes:[n('Pack','subgraph',null),n('Value','value','Pack',{value:1}),n('Sample','sample','Pack',{asset:sample.asset})],edges:[]}
+  p.parts=[];p.graph={nodes:[n('Pack','subgraph',null),n('Value','value','Pack',{value:1}),n('Sample','sample','Pack',{asset:sample.asset}),n('Grains','granular_synth','Pack',{asset:sample.asset})],edges:[]}
   p=await(await request.put(`/api/projects/${p.id}`,{headers,data:p})).json()
   const save=(who:any,options={})=>who.post(`/api/projects/${p.id}/subgraphs`,{headers,data:{node:'Pack',revision:p.revision,name:'Shared patch',public:false,...options}})
   const first=await(await save(request)).json()
@@ -35,6 +35,7 @@ test('private/public library permissions, immutable versions, forks and bundled 
   expect(root.library.version).toBe(2);expect(root.x).toBe(150)
   const imported=dest.graph.nodes.find((n:any)=>n.kind==='sample')
   expect(imported.parameters.asset).not.toBe(sample.asset)
+  expect(dest.graph.nodes.find((n:any)=>n.kind==='granular_synth').parameters.asset).toBe(imported.parameters.asset)
   expect(await readFile(join(process.env.PR0_TEST_DATA!,'samples',dest.id,`${imported.parameters.asset}.wav`))).toEqual(await readFile(join(process.env.PR0_TEST_DATA!,'samples',p.id,`${sample.asset}.wav`)))
   p.graph.nodes.find((n:any)=>n.id==='Value').parameters.value=3
   p=await(await request.put(`/api/projects/${p.id}`,{headers,data:p})).json()
@@ -110,9 +111,12 @@ test('library panel save, version selection, drag placement and multiple-node se
   expect(after.graph.nodes.find((n:any)=>n.id===copy.id).x-before.graph.nodes.find((n:any)=>n.id===copy.id).x).toBeCloseTo(dx)
   // A drag on empty canvas selects a box; then Backspace removes all selected subtrees.
   await page.locator('.vue-flow__controls-fitview').click()
+  // Leave room around the nodes so the marquee starts clear of floating canvas controls.
+  await page.locator('.vue-flow__controls-zoomout').click()
   const boxes=await page.locator('.vue-flow__node').evaluateAll(nodes=>nodes.map(n=>{const r=n.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom}}))
   const left=Math.min(...boxes.map(r=>r.x))-10,top=Math.min(...boxes.map(r=>r.y))-10,right=Math.max(...boxes.map(r=>r.right))+10,bottom=Math.max(...boxes.map(r=>r.bottom))+10
-  await page.mouse.move(left,top);await page.mouse.down();await page.mouse.move(right,bottom,{steps:10});await page.mouse.up()
+  await expect.poll(()=>page.evaluate(({left,bottom})=>document.elementFromPoint(left,bottom)?.classList.contains('vue-flow__pane'),{left,bottom})).toBe(true)
+  await page.mouse.move(left,bottom);await page.mouse.down();await page.mouse.move(right,top,{steps:10});await page.mouse.up()
   await expect(page.locator('.vue-flow__node.selected')).toHaveCount(3)
   await a.locator('.patch-node').focus()
   await page.keyboard.press('Backspace')

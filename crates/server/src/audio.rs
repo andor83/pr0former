@@ -17,6 +17,7 @@ pub fn monotonic_ms() -> f64 {
     START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.
 }
 pub enum Command {
+    Shutdown(oneshot::Sender<Result<(), String>>),
     Osc {
         project: String,
         message: rosc::OscMessage,
@@ -70,6 +71,15 @@ pub enum Command {
         revision: u64,
     },
     Bang(String),
+    Audition {
+        project: String,
+        part: String,
+        staff: u8,
+        node: Option<String>,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
     Piano {
         project: String,
         node: String,
@@ -112,6 +122,7 @@ fn run(
     let mut midi_inputs = crate::node_io::Inputs::default();
     let mut node_routes: Vec<(String, crate::node_io::Route, bool)> = Vec::new();
     let mut sequencer: Option<crate::performance::Sequencer> = None;
+    let mut audition: Option<AuditionState> = None;
     let mut engine: Option<Engine> = None;
     let mut loop_store = crate::loops::Store::new();
     let mut record_store = crate::recordings::Store::new();
@@ -126,6 +137,7 @@ fn run(
     let mut test_sample = 0_u64;
     let mut media_rates: std::collections::BTreeMap<String, crate::samples::RateAdapter> =
         Default::default();
+    let mut media_packets = crate::monitor_packets::Packets::default();
     let mut input_rates: std::collections::BTreeMap<String, crate::samples::RateAdapter> =
         Default::default();
     let mut logged_underruns = 0;
@@ -147,7 +159,8 @@ fn run(
     let mut visualization_subscribers: std::collections::BTreeMap<String, (String, Instant)> =
         Default::default();
     loop {
-        while let Ok(command) = rx.try_recv() {
+        for _ in 0..16 {
+            let Ok(command) = rx.try_recv() else { break };
             let context = match &command {
                 Command::Load(p, _) => p.id.as_str(),
                 _ => project
@@ -174,6 +187,27 @@ fn run(
             }
 
             match command {
+                Command::Shutdown(reply) => {
+                    outputs.clear();
+                    inputs.clear();
+                    midi_inputs = crate::node_io::Inputs::default();
+                    node_outputs.reset(vec![]);
+                    let result = if let (Some(p), Some(e)) = (&project, &mut engine) {
+                        if let Some(seq) = &mut sequencer {
+                            seq.reset(e, &io);
+                        }
+                        e.finish_loops();
+                        e.finish_recordings();
+                        let recorded = record_store.flush(&p.id, e);
+                        loop_store.flush(&p.id, e).and(recorded)
+                    } else {
+                        Ok(())
+                    };
+                    drop(midi_inputs);
+                    let _ = reply.send(result);
+                    return;
+                }
+
                 Command::Visualizers {
                     session,
                     project,
@@ -220,6 +254,7 @@ fn run(
                     inputs.clear();
                     settings = new_settings;
                     media_rates.clear();
+                    media_packets = crate::monitor_packets::Packets::default();
                     input_rates.clear();
 
                     let saved = if !value {
@@ -311,6 +346,11 @@ fn run(
                     project: p,
                     engine: prepared,
                 } => {
+                    if let (Some(e), Some((part, staff, node, channel, pitch, _))) =
+                        (engine.as_mut(), audition.take())
+                    {
+                        audition_note(e, &part, staff, node.as_deref(), channel, pitch, 0);
+                    }
                     // Retire changed/deleted external routes before installing their replacements.
                     let next_routes = prepare_node_routes(&p);
                     let retired: Vec<_> = node_routes
@@ -382,7 +422,11 @@ fn run(
                         out.meter.clear();
                     }
                     sequencer = Some(crate::performance::Sequencer::new(&p));
-                    e.clock.bpm = p.bpm;
+                    e.clock.bpm = p
+                        .score
+                        .as_ref()
+                        .and_then(|s| s.tempo_at(0.))
+                        .unwrap_or(p.bpm);
                     engine = Some(*e);
                     project = Some(p);
                     epoch = uuid::Uuid::new_v4().to_string();
@@ -406,6 +450,7 @@ fn run(
                     }
                 }
                 Command::Unload => {
+                    audition = None;
                     if let (Some(p), Some(e)) = (&project, &mut engine) {
                         e.finish_loops();
                         e.finish_recordings();
@@ -432,6 +477,7 @@ fn run(
                     project = None;
                     browser.clear();
                     media_rates.clear();
+                    media_packets = crate::monitor_packets::Packets::default();
                     input_rates.clear();
                     testing = false;
                 }
@@ -533,6 +579,40 @@ fn run(
                         }
                     }
                 }
+                Command::Audition {
+                    project: id,
+                    part,
+                    staff,
+                    node,
+                    channel,
+                    pitch,
+                    velocity,
+                } => {
+                    if project.as_ref().is_some_and(|p| p.id == id) {
+                        if let Some(e) = engine.as_mut() {
+                            if let Some((part, staff, node, channel, pitch, _)) = audition.take() {
+                                audition_note(e, &part, staff, node.as_deref(), channel, pitch, 0);
+                            }
+                            audition_note(
+                                e,
+                                &part,
+                                staff,
+                                node.as_deref(),
+                                channel,
+                                pitch,
+                                velocity,
+                            );
+                            audition = Some((
+                                part,
+                                staff,
+                                node,
+                                channel,
+                                pitch,
+                                (settings.sample_rate as usize / 3).max(1),
+                            ));
+                        }
+                    }
+                }
                 Command::Piano {
                     project: id,
                     node,
@@ -577,35 +657,7 @@ fn run(
                     }
                 }
                 Command::Devices(reply) => {
-                    let devices = output_devices();
-                    let midi_out = midir::MidiOutput::new("pr0former device list");
-                    let midi_in = midir::MidiInput::new("pr0former device list");
-                    let midi_error = midi_out
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .or_else(|| midi_in.as_ref().err().map(ToString::to_string));
-                    let midi = midi_out
-                        .ok()
-                        .map(|m| {
-                            m.ports()
-                                .iter()
-                                .filter_map(|p| m.port_name(p).ok())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    let midi_inputs = midi_in
-                        .ok()
-                        .map(|m| {
-                            m.ports()
-                                .iter()
-                                .filter_map(|p| m.port_name(p).ok())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    let _=reply.send(json!({
-"input_interfaces":device_details(settings.sample_rate, true),"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":device_details(settings.sample_rate, false),"midi_outputs":midi,"midi_inputs":midi_inputs,"midi_error":midi_error,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}
-));
+                    let _=reply.send(json!({"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}));
                 }
                 Command::Hardware(value) => {
                     outputs.clear();
@@ -672,12 +724,16 @@ fn run(
                 Default::default()
             };
 
+            if let Some(p) = &project {
+                midi_inputs.drain(&p.graph, e);
+            }
+            if media.receiver_count() == 0 {
+                media_rates.clear();
+                media_packets = crate::monitor_packets::Packets::default();
+            }
             // Split rendering at the exact tempo boundary;
             // No browser timer drives DSP.
             for frame in output.iter_mut() {
-                if let Some(p) = &project {
-                    midi_inputs.drain(&p.graph, e);
-                }
                 for (node, q) in &mut browser {
                     let sample = q.pop_front().unwrap_or([0.; 2]);
                     let mut audio = [0.; MAX_CHANNELS];
@@ -708,6 +764,7 @@ fn run(
                         e.device_input(&node.id, sample);
                     }
                 }
+                advance_audition(e, &mut audition);
                 e.render(&[], std::slice::from_mut(frame));
                 for (node, route, cc) in &node_routes {
                     while let Some(message) = e.take_midi_message(node) {
@@ -772,7 +829,6 @@ fn run(
                 loop_store.poll(&p.id, e);
                 record_store.poll(&p.id, e);
             }
-            e.analyze_visualizers();
             previews.retain_mut(|preview| {
                 if preview.reply.as_ref().is_none_or(|r|r.is_closed()){return false;}
                 if preview.frames.len()<256{return true;}
@@ -781,6 +837,9 @@ fn run(
             });
             if media.receiver_count() > 0 {
                 if let Some(p) = &project {
+                    if media_packets.configure(&p.id, settings.sample_rate, &monitors) {
+                        media_rates.clear();
+                    }
                     let raw: Vec<f32> = output.iter().flat_map(|f| [f[0], f[1]]).collect();
                     let pcm = media_rates
                         .entry(String::new())
@@ -796,13 +855,8 @@ fn run(
                             })
                             .process(pcm);
                     }
-                    let _ = media.send(crate::media::AudioBlock {
-                        project: p.id.clone(),
-                        pcm: Arc::new(pcm),
-                        monitors: monitors
-                            .into_iter()
-                            .map(|(id, pcm)| (id, Arc::new(pcm)))
-                            .collect(),
+                    media_packets.push(&pcm, &monitors, |packet| {
+                        let _ = media.send(packet);
                     });
                 }
             }
@@ -813,6 +867,12 @@ fn run(
                 visualization_subscribers
                     .retain(|_, (_, seen)| seen.elapsed() < Duration::from_secs(10));
                 if let Some(p) = &project {
+                    let visualize = visualization_subscribers
+                        .values()
+                        .any(|(id, seen)| id == &p.id && seen.elapsed() < Duration::from_secs(10));
+                    if visualize {
+                        e.analyze_visualizers();
+                    }
                     let count = underruns.load(Ordering::Relaxed);
                     if count > logged_underruns {
                         logs.push(
@@ -830,7 +890,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":record_store.error().or_else(|| loop_store.error()).unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"route_targets":e.route_targets(),"visualizations":if visualization_subscribers.values().any(|(id,seen)|id==&p.id && seen.elapsed()<Duration::from_secs(10)){e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":record_store.error().or_else(|| loop_store.error()).unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"route_targets":e.route_targets(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
 ));
                 }
             }
@@ -902,6 +962,40 @@ fn run(
             deadline = now;
         }
     }
+}
+
+// Potentially slow OS enumeration. Call from spawn_blocking, never the audio worker.
+pub fn device_inventory(sample_rate: u32) -> Value {
+    if native_disabled() {
+        return json!({"input_interfaces":[],"outputs":[],"interfaces":[],"midi_outputs":[],"midi_inputs":[],"midi_error":null});
+    }
+    let devices = output_devices();
+    let midi_out = midir::MidiOutput::new("pr0former device list");
+    let midi_in = midir::MidiInput::new("pr0former device list");
+    let midi_error = midi_out
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .or_else(|| midi_in.as_ref().err().map(ToString::to_string));
+    let midi = midi_out
+        .ok()
+        .map(|m| {
+            m.ports()
+                .iter()
+                .filter_map(|p| m.port_name(p).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let midi_inputs = midi_in
+        .ok()
+        .map(|m| {
+            m.ports()
+                .iter()
+                .filter_map(|p| m.port_name(p).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({"input_interfaces":device_details(sample_rate,true),"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":device_details(sample_rate,false),"midi_outputs":midi,"midi_inputs":midi_inputs,"midi_error":midi_error})
 }
 
 // Discovery and stream startup use the same widest supported f32 configuration.
@@ -1339,4 +1433,75 @@ fn note_input_wiring(project: &Project, node: &str) -> Vec<(String, String, Stri
         .collect();
     inputs.sort();
     inputs
+}
+
+// Called on the orchestration worker; note-off timing counts rendered samples.
+fn audition_note(
+    e: &mut Engine,
+    part: &str,
+    staff: u8,
+    node: Option<&str>,
+    channel: u8,
+    pitch: u8,
+    velocity: u8,
+) {
+    if let Some(node) = node {
+        e.note_scoped(node, u64::MAX, 0, pitch, velocity);
+    }
+    e.part_staff_note(part, staff, pitch, velocity);
+    e.part_staff_message(
+        part,
+        staff,
+        pr0_core::midi::Message {
+            status: (if velocity == 0 { 0x80 } else { 0x90 }) | (channel - 1),
+            data1: pitch,
+            data2: velocity,
+        },
+    );
+}
+
+type AuditionState = (String, u8, Option<String>, u8, u8, usize);
+fn advance_audition(e: &mut Engine, audition: &mut Option<AuditionState>) {
+    if let Some((part, staff, node, channel, pitch, remaining)) = audition {
+        if *remaining == 0 {
+            audition_note(e, part, *staff, node.as_deref(), *channel, *pitch, 0);
+            *audition = None;
+        } else {
+            *remaining -= 1;
+        }
+    }
+}
+#[cfg(test)]
+mod audition_tests {
+    use super::*;
+    #[test]
+    fn preview_releases_on_rendered_samples_with_transport_stopped() {
+        let mut p = pr0_core::demo_project(
+            "preview".into(),
+            "preview".into(),
+            pr0_core::Mode::Structured,
+        );
+        let mut n = p.graph.nodes[0].clone();
+        n.id = "preview-midi".into();
+        n.kind = "part_midi".into();
+        n.parameters.clear();
+        n.part_id = Some(p.parts[0].id.clone());
+        p.graph.nodes.push(n);
+        let mut e = Engine::prepare(p.graph, 48000.).unwrap();
+        let part = &p.parts[0].id;
+        audition_note(&mut e, part, 1, None, 1, 64, 90);
+        let mut preview = Some((part.clone(), 1, None, 1, 64, 16));
+        for _ in 0..16 {
+            advance_audition(&mut e, &mut preview);
+            e.render(&[], &mut [[0.; MAX_CHANNELS]]);
+        }
+        assert!(!e.clock.running);
+        assert_eq!(e.telemetry()["preview-midi"]["gate"], 1.);
+        advance_audition(&mut e, &mut preview);
+        assert!(preview.is_none());
+        for _ in 0..4 {
+            e.render(&[], &mut [[0.; MAX_CHANNELS]]);
+        }
+        assert_eq!(e.telemetry()["preview-midi"]["gate"], 0.);
+    }
 }

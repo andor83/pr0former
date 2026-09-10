@@ -19,6 +19,8 @@ test('record archives input channels and separate named takes privately, finaliz
   await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
   await page.getByRole('button',{name:'Edit Archive',exact:true}).click()
   await page.getByLabel('Node name',{exact:true}).fill('Night performance')
+  await page.waitForTimeout(250) // several telemetry frames must not overwrite an unfinished name
+  await expect(page.getByLabel('Node name',{exact:true})).toHaveValue('Night performance')
   await page.getByLabel('Node name',{exact:true}).press('Tab')
   await expect(page.getByRole('heading',{name:'Night performance',exact:true})).toBeVisible()
   await param('Start',1)

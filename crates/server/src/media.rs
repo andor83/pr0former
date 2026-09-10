@@ -86,6 +86,66 @@ pub struct Media {
     admissions: Admissions,
 }
 impl Media {
+    pub async fn close_project(&self, project: &str) {
+        let prefix = format!("{project}/");
+        {
+            let slots = self.admissions.lock().unwrap();
+            for (key, cancelled) in slots.iter() {
+                if key.starts_with(&prefix) {
+                    cancelled.store(true, Ordering::Release);
+                }
+            }
+        }
+        let removed = {
+            let mut peers = self.peers.lock().await;
+            let keys: Vec<_> = peers
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| peers.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        let mut closing = tokio::task::JoinSet::new();
+        for peer in removed {
+            closing.spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(5), peer.close()).await;
+            });
+        }
+        while closing.join_next().await.is_some() {}
+    }
+
+    pub async fn close_user(&self, user: &str) {
+        let suffix = format!("/{user}");
+        {
+            let slots = self.admissions.lock().unwrap();
+            for (key, cancelled) in slots.iter() {
+                if key.ends_with(&suffix) {
+                    cancelled.store(true, Ordering::Release);
+                }
+            }
+        }
+        let removed = {
+            let mut peers = self.peers.lock().await;
+            let keys: Vec<_> = peers
+                .keys()
+                .filter(|key| key.ends_with(&suffix))
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| peers.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        let mut closing = tokio::task::JoinSet::new();
+        for peer in removed {
+            closing.spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(5), peer.close()).await;
+            });
+        }
+        while closing.join_next().await.is_some() {}
+    }
+
     fn reserve(&self, key: String) -> Api<SessionLease> {
         let mut slots = self.admissions.lock().unwrap();
         if slots.contains_key(&key) {
@@ -108,7 +168,7 @@ impl Media {
         })
     }
     pub fn new() -> Self {
-        let (audio, _) = broadcast::channel(8);
+        let (audio, _) = broadcast::channel(crate::monitor_packets::QUEUED_PACKETS);
         Self {
             audio,
             peers: Arc::new(Mutex::new(BTreeMap::new())),
@@ -366,6 +426,17 @@ pub async fn disconnect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn closing_project_cancels_only_its_pending_media() {
+        let media = Media::new();
+        let local = media.reserve("a/user".into()).ok().unwrap();
+        let other = media.reserve("ab/user".into()).ok().unwrap();
+        media.close_project("a").await;
+        assert!(local.cancelled.load(Ordering::Acquire));
+        assert!(!other.cancelled.load(Ordering::Acquire));
+        drop(local);
+        assert!(media.reserve("a/user".into()).is_ok());
+    }
     #[test]
     fn pending_sessions_count_toward_capacity_and_release_on_error() {
         let media = Media::new();

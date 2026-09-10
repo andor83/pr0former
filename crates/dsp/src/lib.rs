@@ -1,9 +1,11 @@
 //! Prepared DSP graph. `render` performs no allocation or locking.
 mod channels;
 mod clock_ratio;
+mod convolution;
 pub mod count_in;
 mod effects;
 mod envelope;
+mod granular;
 mod looper;
 mod midi_controls;
 mod midi_events;
@@ -116,6 +118,7 @@ struct Binding {
     source: usize,
     edge: usize,
     merge: Option<usize>,
+    midi_lane: Option<usize>,
     source_port: usize,
     destination: usize,
     parameter: bool,
@@ -128,10 +131,19 @@ struct ControlMerge {
     winner: usize,
     event: bool,
 }
+// A complete MIDI bundle is decoded before scalar arbitration so unrelated
+// sources cannot replace its pitch or hide its release pulse. Prepared off-render.
+struct MidiLane {
+    source: usize,
+    decoder: note_inputs::NoteInputs,
+    values: [f64; 5],
+}
 const GRAPH_VOICE_OWNER: u64 = u64::MAX;
 #[derive(Clone, Copy, Default)]
 struct Voice {
     owner: u64,
+    graph_lane: usize,
+    pitch_ratio: f64,
     note_id: u32,
     order: u64,
     mod_phase: f64,
@@ -174,8 +186,12 @@ struct RuntimeNode {
     part_id: Option<String>,
     io: Option<pr0_core::IoConfig>,
     note_inputs: note_inputs::NoteInputs,
+    midi_lanes: Vec<MidiLane>,
     outgoing_notes: [Option<note_inputs::NoteEvent>; 2],
     sampler: Option<Box<sampler::Sampler>>,
+    granular: Option<Box<granular::Granular>>,
+    pitch_shift: Option<Box<granular::PitchShift>>,
+    convolution: Option<Box<convolution::Convolution>>,
     pitch_tracker: Option<Box<pitch_tracker::PitchTracker>>,
     looper: Option<Box<looper::Looper>>,
     recorder: Option<Box<recorder::Recorder>>,
@@ -232,6 +248,8 @@ impl RuntimeNode {
         self.voice_order = self.voice_order.wrapping_add(1);
         self.voices[index] = Voice {
             owner,
+            graph_lane: 0,
+            pitch_ratio: 2_f64.powf((pitch as f64 - 69.) / 12.),
             note_id,
             order: self.voice_order,
             pitch,
@@ -241,12 +259,41 @@ impl RuntimeNode {
             releasing: false,
         };
     }
+    fn graph_synth_event(&mut self, event: note_inputs::NoteEvent, lane: usize) {
+        if event.velocity == 0 {
+            if let Some(voice) = self
+                .voices
+                .iter_mut()
+                .filter(|v| {
+                    v.owner == GRAPH_VOICE_OWNER
+                        && v.graph_lane == lane
+                        && v.pitch == event.pitch
+                        && v.level > 0.
+                        && !v.releasing
+                })
+                .min_by_key(|v| v.order)
+            {
+                voice.releasing = true;
+            }
+        } else {
+            self.synth_note(
+                GRAPH_VOICE_OWNER,
+                self.voice_order.wrapping_add(1) as u32,
+                event.pitch,
+                event.velocity,
+            );
+            let order = self.voice_order;
+            if let Some(voice) = self.voices.iter_mut().find(|v| v.order == order) {
+                voice.graph_lane = lane;
+            }
+        }
+    }
     fn graph_synth_notes(&mut self) {
         let values = std::array::from_fn(|i| self.input[i][0]);
         let connected = std::array::from_fn(|i| {
             self.bindings
                 .iter()
-                .any(|b| !b.parameter && b.destination == i)
+                .any(|b| !b.parameter && b.destination == i && b.midi_lane.is_none())
         });
         for event in self
             .note_inputs
@@ -254,27 +301,13 @@ impl RuntimeNode {
             .into_iter()
             .flatten()
         {
-            if event.velocity == 0 {
-                if let Some(voice) = self
-                    .voices
-                    .iter_mut()
-                    .filter(|v| {
-                        v.owner == GRAPH_VOICE_OWNER
-                            && v.pitch == event.pitch
-                            && v.level > 0.
-                            && !v.releasing
-                    })
-                    .min_by_key(|v| v.order)
-                {
-                    voice.releasing = true;
-                }
-            } else {
-                self.synth_note(
-                    GRAPH_VOICE_OWNER,
-                    self.voice_order.wrapping_add(1) as u32,
-                    event.pitch,
-                    event.velocity,
-                );
+            self.graph_synth_event(event, 0);
+        }
+        for index in 0..self.midi_lanes.len() {
+            let lane = &mut self.midi_lanes[index];
+            let notes = lane.decoder.tick(lane.values, [true; 5]);
+            for event in notes.into_iter().flatten() {
+                self.graph_synth_event(event, index + 1);
             }
         }
     }
@@ -409,7 +442,7 @@ impl RuntimeNode {
                 self.control[6] = self.control[1];
                 scalar = self.control[0];
             }
-            "midi_output" | "midi_to_osc" | "poly_sampler" => {
+            "midi_output" | "midi_to_osc" | "poly_sampler" | "granular_synth" => {
                 let mut values = std::array::from_fn(|i| self.input[i][0]);
                 let mut connected = std::array::from_fn(|i| {
                     self.bindings
@@ -431,7 +464,31 @@ impl RuntimeNode {
                     }
                 }
                 let notes = self.note_inputs.tick(values, connected);
-                if self.kind == "poly_sampler" {
+                if self.kind == "granular_synth" {
+                    for note in notes.into_iter().flatten() {
+                        if clock.running || note.velocity == 0 {
+                            self.granular
+                                .as_mut()
+                                .unwrap()
+                                .note(note.pitch, note.velocity);
+                        }
+                    }
+                    let settings = granular::Settings {
+                        root: self.p("root_note"),
+                        position: self.p("position"),
+                        spray_ms: self.p("spray"),
+                        grain_ms: self.p("grain_ms"),
+                        density: self.p("density"),
+                        amplitude: self.p("amplitude"),
+                        release_ms: self.p("release"),
+                    };
+                    self.output = self.granular.as_mut().unwrap().render(
+                        &self.sample,
+                        self.channels,
+                        sr,
+                        settings,
+                    );
+                } else if self.kind == "poly_sampler" {
                     for note in notes.into_iter().flatten() {
                         if clock.running || note.velocity == 0 {
                             self.sampler
@@ -537,6 +594,24 @@ impl RuntimeNode {
             "send_audio" => self.output = input,
             "receive_audio" => self.output = self.route.as_ref().unwrap().audio,
             "send_spectral" | "receive_spectral" => {}
+            "convolution" => {
+                let mix = self.p("mix");
+                let normalize = self.p("normalize") > 0.;
+                self.output =
+                    self.convolution
+                        .as_mut()
+                        .unwrap()
+                        .tick(input, self.input[1], mix, normalize);
+            }
+            "granular_pitch_shift" => {
+                let shift = self.p("semitones");
+                let mix = self.p("mix");
+                self.output =
+                    self.pitch_shift
+                        .as_mut()
+                        .unwrap()
+                        .tick(input, self.channels, shift, mix);
+            }
             "pitch_tracker" => {
                 let slots = self.p("slots") as usize;
                 let threshold = self.p("threshold");
@@ -656,7 +731,7 @@ impl RuntimeNode {
                         v.level = 0.;
                         continue;
                     }
-                    let ratio = 2_f64.powf((v.pitch as f64 - 69.) / 12.);
+                    let ratio = v.pitch_ratio;
                     let mod_step = (modulator * ratio / sr).min(0.49);
                     v.mod_phase = (v.mod_phase + mod_step).fract();
                     self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -1123,6 +1198,7 @@ impl Engine {
                 part_id: n.part_id.clone(),
                 io: n.io.clone(),
                 note_inputs: note_inputs::NoteInputs::default(),
+                midi_lanes: Vec::new(),
                 midi_pending: Box::new(midi_events::Buffer::new()),
                 midi_frame: Box::new(midi_events::Buffer::new()),
                 outgoing_notes: [None; 2],
@@ -1161,6 +1237,20 @@ impl Engine {
                 pitch_tracker: (n.kind == "pitch_tracker").then(|| {
                     Box::new(pitch_tracker::PitchTracker::new(
                         n.parameters.get("fft_size").copied().unwrap_or(8192.) as usize,
+                    ))
+                }),
+                granular: (n.kind == "granular_synth")
+                    .then(|| Box::new(granular::Granular::default())),
+                pitch_shift: (n.kind == "granular_pitch_shift").then(|| {
+                    Box::new(granular::PitchShift::new(
+                        sample_rate,
+                        n.parameters.get("grain_ms").copied().unwrap_or(20.),
+                    ))
+                }),
+                convolution: (n.kind == "convolution").then(|| {
+                    Box::new(convolution::Convolution::new(
+                        n.parameters.get("window").copied().unwrap_or(256.) as usize,
+                        n.channels,
                     ))
                 }),
                 sampler: (n.kind == "poly_sampler").then(|| Box::new(sampler::Sampler::default())),
@@ -1273,11 +1363,52 @@ impl Engine {
                 source: s,
                 edge: edge_index,
                 merge: None,
+                midi_lane: None,
                 source_port,
                 destination,
                 parameter: parameter.is_some(),
                 signal: sd.outputs[source_port].signal,
             });
+        }
+        // Only complete, directly wired standard MIDI sources form independent
+        // note lanes. Arbitrary control patches retain their scalar merge rules.
+        for target in 0..nodes.len() {
+            if !matches!(nodes[target].kind.as_str(), "synth" | "fm_synth") {
+                continue;
+            }
+            let mut sources: Vec<_> = (0..nodes.len()).collect();
+            sources.sort_by(|a, b| nodes[*a].id.cmp(&nodes[*b].id));
+            for source in sources {
+                if nodes[source].midi_controls.is_none() {
+                    continue;
+                }
+                let complete = (0..5).all(|port| {
+                    nodes[target].bindings.iter().any(|b| {
+                        b.source == source
+                            && !b.parameter
+                            && b.source_port == port
+                            && b.destination == port
+                    })
+                });
+                if !complete {
+                    continue;
+                }
+                let lane = nodes[target].midi_lanes.len();
+                for b in &mut nodes[target].bindings {
+                    if b.source == source
+                        && !b.parameter
+                        && b.source_port == b.destination
+                        && b.destination < 5
+                    {
+                        b.midi_lane = Some(lane);
+                    }
+                }
+                nodes[target].midi_lanes.push(MidiLane {
+                    source,
+                    decoder: note_inputs::NoteInputs::default(),
+                    values: [0.; 5],
+                });
+            }
         }
         let positions: Vec<_> = graph
             .nodes
@@ -1313,7 +1444,10 @@ impl Engine {
         for node in &mut nodes {
             for binding in 0..node.bindings.len() {
                 let b = &node.bindings[binding];
-                if b.signal != pr0_core::Signal::Control || b.merge.is_some() {
+                if b.signal != pr0_core::Signal::Control
+                    || b.merge.is_some()
+                    || b.midi_lane.is_some()
+                {
                     continue;
                 }
                 let members: Vec<_> = node
@@ -1321,7 +1455,8 @@ impl Engine {
                     .iter()
                     .enumerate()
                     .filter(|(_, other)| {
-                        other.signal == b.signal
+                        other.midi_lane.is_none()
+                            && other.signal == b.signal
                             && other.destination == b.destination
                             && other.parameter == b.parameter
                     })
@@ -1370,6 +1505,10 @@ impl Engine {
                     && nodes[idx].kind.starts_with("receive_")
                 {
                     1
+                } else if nodes[idx].kind == "convolution" {
+                    nodes[idx].p("window") as usize
+                } else if let Some(shifter) = &nodes[idx].pitch_shift {
+                    shifter.latency()
                 } else if matches!(nodes[idx].kind.as_str(), "fft" | "rfft") {
                     nodes[idx].p("size") as usize
                 } else {
@@ -1560,6 +1699,9 @@ impl Engine {
             let source = &mut previous.nodes[source_index];
             std::mem::swap(target, source);
             std::mem::swap(&mut target.bindings, &mut source.bindings);
+            for (old, new) in target.midi_lanes.iter_mut().zip(&mut source.midi_lanes) {
+                std::mem::swap(&mut old.source, &mut new.source);
+            }
             if target.kind == "piano" {
                 // Octave is display configuration; changing it must not release held notes.
                 std::mem::swap(&mut target.defaults, &mut source.defaults);
@@ -2041,6 +2183,11 @@ impl Engine {
                 self.nodes[idx].input_events = [false; 8];
                 self.nodes[idx].input_event_only = [false; 8];
                 self.nodes[idx].control_event = false;
+                for lane in 0..self.nodes[idx].midi_lanes.len() {
+                    let source = self.nodes[idx].midi_lanes[lane].source;
+                    let values = std::array::from_fn(|i| self.nodes[source].control[i]);
+                    self.nodes[idx].midi_lanes[lane].values = values;
+                }
                 for group in 0..self.nodes[idx].merges.len() {
                     let mut best = usize::MAX;
                     self.nodes[idx].merges[group].event = false;
@@ -2076,6 +2223,10 @@ impl Engine {
                             let event = self.nodes[b.source].midi_frame.events[index];
                             self.nodes[idx].midi_frame.push(event);
                         }
+                        continue;
+                    }
+
+                    if b.midi_lane.is_some() {
                         continue;
                     }
                     if b.merge
@@ -2239,7 +2390,7 @@ impl Engine {
         }
     }
     /// Called by the non-realtime orchestration worker between blocks.
-    /// Called once per configured DSP block, outside render/device callbacks.
+    /// Server calls at telemetry cadence only while visualizations are subscribed.
     pub fn analyze_visualizers(&mut self) {
         for node in &mut self.nodes {
             if let Some(analyzer) = &mut node.analyzer {
@@ -2327,6 +2478,9 @@ impl Engine {
                     .enumerate()
                     .filter(|(_, b)| b.signal == pr0_core::Signal::Control)
                 {
+                    if b.midi_lane.is_some() {
+                        continue;
+                    }
                     if b.merge.is_some_and(|group| n.merges[group].winner != index) {
                         continue;
                     }
@@ -3823,6 +3977,94 @@ mod poly_synth_tests {
             tick(&mut e);
             e.render(&[], &mut [[0.; 8]; 48000]);
             assert_eq!(e.audio_frame("tone", "out"), [0.; 8]);
+        }
+    }
+    #[test]
+    fn independent_midi_sources_release_their_own_fm_and_sine_voices() {
+        for kind in ["synth", "fm_synth"] {
+            for keyboard in ["piano", "midi_input"] {
+                let mut g = graph(kind, 1);
+                g.nodes[0].kind = keyboard.into();
+                let mut part = node("part", "part_midi", 1);
+                part.part_id = Some("score".into());
+                part.y = -100.; // The score wins ordinary simultaneous scalar merges.
+                g.nodes.push(part);
+                for port in ["pitch", "velocity", "gate", "trigger", "note_off"] {
+                    g.edges.push(pr0_core::Edge {
+                        id: format!("part-{port}"),
+                        source: "part".into(),
+                        source_port: port.into(),
+                        target: "tone".into(),
+                        target_port: port.into(),
+                    });
+                }
+                let mut e = Engine::prepare(g.clone(), 48000.).unwrap();
+                let held = |e: &Engine, pitch: u8, velocity: u8| {
+                    e.nodes
+                        .iter()
+                        .find(|n| n.id == "tone")
+                        .unwrap()
+                        .voices
+                        .iter()
+                        .filter(|v| {
+                            v.pitch == pitch
+                                && !v.releasing
+                                && (v.level - velocity as f64 / 127.).abs() < 1e-9
+                        })
+                        .count()
+                };
+                // Releasing a pitch unchanged at the keyboard must not use the
+                // score's more recently changed pitch (the reported stuck note).
+                e.part_note("score", 60, 110);
+                tick(&mut e);
+                e.node_midi_note("keys", 64, 90);
+                tick(&mut e);
+                e.part_note("score", 67, 110);
+                tick(&mut e);
+                e.node_midi_note("keys", 64, 0);
+                tick(&mut e);
+                assert_eq!(held(&e, 64, 90), 0);
+                assert_eq!(held(&e, 67, 110), 1);
+                e.part_notes_off("score");
+                e.render(&[], &mut vec![[0.; 8]; 48000]);
+                // Different source pitches, same-pitch repeated keyboard attacks,
+                // simultaneous attacks, and simultaneous release/attack all survive.
+                e.part_note("score", 60, 110);
+                e.node_midi_note("keys", 64, 90);
+                tick(&mut e);
+                assert_eq!(held(&e, 60, 110), 1);
+                assert_eq!(held(&e, 64, 90), 1);
+                e.node_midi_note("keys", 64, 0);
+                e.part_note("score", 67, 110);
+                tick(&mut e);
+                assert_eq!(held(&e, 64, 90), 0);
+                assert_eq!(held(&e, 67, 110), 1);
+                e.node_midi_note("keys", 60, 90);
+                tick(&mut e);
+                e.node_midi_note("keys", 60, 80);
+                tick(&mut e);
+                // Compatible graph edits remap source indices without losing
+                // decoder history or changing a held voice's source ownership.
+                g.nodes.reverse();
+                let mut next = Engine::prepare(g, 48000.).unwrap();
+                next.carry_node_state(&mut e);
+                e = next;
+                e.node_midi_note("keys", 60, 0);
+                tick(&mut e);
+                assert_eq!(held(&e, 60, 90), 0);
+                assert_eq!(held(&e, 60, 80), 1);
+                assert_eq!(held(&e, 60, 110), 1);
+                e.part_notes_off("score");
+                tick(&mut e);
+                assert_eq!(held(&e, 60, 110), 0);
+                assert_eq!(held(&e, 67, 110), 0);
+                assert_eq!(held(&e, 60, 80), 1);
+                e.node_midi_reset("keys");
+                tick(&mut e);
+                assert_eq!(held(&e, 60, 80), 0);
+                e.render(&[], &mut vec![[0.; 8]; 48000]);
+                assert_eq!(e.audio_frame("tone", "out"), [0.; 8]);
+            }
         }
     }
     #[test]

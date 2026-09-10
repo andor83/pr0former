@@ -138,7 +138,12 @@ pub async fn save(
     let assets: BTreeSet<u32> = graph
         .nodes
         .iter()
-        .filter(|n| matches!(n.kind.as_str(), "sample" | "phase_vocoder" | "poly_sampler"))
+        .filter(|n| {
+            matches!(
+                n.kind.as_str(),
+                "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth"
+            )
+        })
         .filter_map(|n| n.parameters.get("asset"))
         .map(|v| *v as u32)
         .filter(|v| *v != 0)
@@ -331,8 +336,10 @@ pub async fn insert(
             use tokio::io::AsyncWriteExt;
             file.write_all(&bytes).await.map_err(internal)?;
             for n in &mut graph.nodes {
-                if matches!(n.kind.as_str(), "sample" | "phase_vocoder" | "poly_sampler")
-                    && n.parameters.get("asset").copied() == Some(old as f64)
+                if matches!(
+                    n.kind.as_str(),
+                    "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth"
+                ) && n.parameters.get("asset").copied() == Some(old as f64)
                 {
                     n.parameters.insert("asset".into(), asset as f64);
                 }

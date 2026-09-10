@@ -6,7 +6,7 @@
 
 The orchestration worker groups rendering into configurable 32, 64, 128, 256, 512, or 1024-frame blocks at 44.1, 48, 88.2, or 96 kHz (defaults: 128 frames / 48 kHz). Internal event boundaries still split processing at individual samples. The block choice controls worker scheduling; CPAL uses the driver’s default callback buffer. Native output queues target at least two observed driver callbacks, two DSP blocks, and 10 ms of samples, capped below the 16,384-frame ring capacity. The driver callback size is observed through an atomic maximum; an initial 1,024-frame callback estimate primes the queue with silence before stream startup. This avoids repeatedly starving callbacks larger than the DSP block, at the cost of additional queued latency. It does not guarantee deadlines under arbitrary worker stalls or callback sizes beyond the bounded capacity. Without hardware output it follows a monotonic software schedule. With hardware output, a bounded SPSC ring is filled according to device consumption, targeting a small queue. CPAL input/output callbacks only move samples through bounded rings; they do not run codecs or access application locks. The DSP worker is **not yet a dedicated OS-priority realtime callback engine**. Allocation-free rendering alone does not establish deadline reliability; see STATUS.
 
-The engine owns two clocks: `clock` tracks the show timeline and `graph_clock` advances while the loaded graph renders. Enabling a project's engine prepares and loads its graph without activating the show. Graph clocks, oscillators, samples, piano/MIDI controls and audio routes run during development. Score scheduling alone follows show Play/Pause/Stop. The scheduler sends internal synth events before rendering the corresponding sample. External MIDI/OSC messages go through a bounded queue to a separate worker, so external delivery is best effort rather than sample-accurate at the receiving device. Tempo changes preserve beat position and can be queued for the next beat. Prepared live graph replacements are available through the UI and API in all modes. The server validates and prepares each revision off-thread, then the orchestration worker installs it between DSP blocks in command order, without waiting for a musical boundary. Following parameter commands therefore target the new graph. The setup mutex serializes graph preparation and parameter edits. Structured shows permit graph edits, including clearing routes to deleted instruments and restoring those routes on undo, while score/project-setting changes and all mode changes still require deactivation. The interface permits adding, moving, deleting, connecting, disconnecting, structural modal edits, and undo while active. Replacement preserves unchanged parts’ event cursors, launch origins, pending cues, and suspended notes. Compatible synth voices retain phase and release envelopes. Changed/deleted parts release their own external notes, while new or changed conducted/freeform parts start idle. Unchanged nodes transfer their prepared runtime storage, including delay/reverb history, filter state, spectral buffers, sample cursors, and control state. Compatibility requires matching node kind, channels, parameter defaults, incoming source/port contracts, and compensation lengths/latency. Compiled binding indices remain those of the new graph, including after node reordering. Changed configurations start with prepared state. Graph crossfades are not yet implemented.
+The engine owns two clocks: `clock` tracks the show timeline and `graph_clock` advances while the loaded graph renders. Enabling a project's engine prepares and loads its graph without activating the show. Graph clocks, oscillators, samples, piano/MIDI controls and audio routes run during development. Score scheduling alone follows show Play/Pause/Stop. The scheduler sends internal synth events before rendering the corresponding sample. External MIDI/OSC messages go through a bounded queue to a separate worker, so external delivery is best effort rather than sample-accurate at the receiving device. Tempo changes preserve beat position and can be queued for the next beat. Prepared live graph replacements are available through the UI and API in all modes. The server validates and prepares each revision off-thread, then the orchestration worker installs it between DSP blocks in command order, without waiting for a musical boundary. Following parameter commands therefore target the new graph. The setup mutex serializes graph preparation and parameter edits. Preparation permits score and graph edits during playback. A conductor-controlled runtime performance lock rejects project score/graph saves until preparation resumes; player stage views stay locally read-only. Active transport still prevents changing the scheduling mode. The legacy activate/deactivate API remains compatible, while Play can claim the enabled graph directly. Engine disablement stops transport and unloads the graph. The interface permits adding, moving, deleting, connecting, disconnecting, structural modal edits, and undo while active. Replacement preserves unchanged parts’ event cursors, launch origins, pending cues, and suspended notes. Compatible synth voices retain phase and release envelopes. Changed/deleted parts release their own external notes, while new or changed conducted/freeform parts start idle. Unchanged nodes transfer their prepared runtime storage, including delay/reverb history, filter state, spectral buffers, sample cursors, and control state. Compatibility requires matching node kind, channels, parameter defaults, incoming source/port contracts, and compensation lengths/latency. Compiled binding indices remain those of the new graph, including after node reordering. Changed configurations start with prepared state. Graph crossfades are not yet implemented.
 
 Count-in playback holds the performance clock at beat zero while a prepared DSP count-in advances once per engine sample. Each click interval is one denominator beat (4 / beat_unit quarter notes); tempo edits preserve the current count-in phase. The first performance sample starts the sequencer at beat zero after the final complete count-in interval. Click PCM goes to the master browser monitor and every dedicated monitor feed, added to the continuing graph audio; hardware graph routes remain audible but never receive count-in clicks. Listeners must connect their browser monitors before starting. Monitor/network buffering still adds listening latency. Pause, Stop, unload and engine reconfiguration cancel pending count-ins; duplicate Play does not restart one. Resume after the performance has advanced skips the count-in.
 
@@ -22,7 +22,7 @@ The WebRTC adapter encodes the selected master mix or dedicated monitor output a
 
 - Node IDs and edge IDs are unique. Unknown node kinds/ports/parameters are rejected.
 - Widths are 1–8 channels; audio edges require matching per-port widths. Ports normally inherit node width; catalog `fixed_channels` overrides it for mono split outputs and merge inputs. Split/merge ports beyond the active bundle width are silent/ignored.
-- One source may drive each input or parameter. Use a mixer/math node to combine values.
+- Control inputs and parameters accept multiple sources; audio and spectral inputs accept one source. See the control-routing and MIDI-source rules below.
 - Numeric parameters enforce finite values and declared limits. Structural parameters cannot be driven.
 - The current scheduler accepts acyclic graphs. The delay node has internal feedback; graph-level feedback scheduling remains pending.
 - Graph limit: 256 nodes and 2,048 connections. Part limit: 32, with at most 10,000 notes per part.
@@ -78,11 +78,13 @@ Manual `--start` launches record their PID, owner, and process start time under 
 
 `pr0-core::score` owns the optional version-1 score timeline, staff configuration, written note metadata, dynamics, and MIDI lanes. Existing schema-1 projects remain readable: absent timeline means legacy independent part loops; absent staff/notation data receives a presentation default without rewriting stored notes. Converting to a shared score is explicit. Authored note metadata records rational onset/duration (denominator bounded to 1,000,000,000), diatonic spelling, accidental, staff, voice, base value, dots and tuplet ratio alongside compatible numeric playback fields. The server checks agreement, reference integrity, staff routing, MIDI ranges and rhythmic overlaps. Four voices and eight staves are supported per part; different onsets that overlap need separate voices. Equal-onset chords are allowed. Legacy unnotated overlap is retained.
 
-`ScoreWorkspace` renders selected parts in one continuous horizontal viewport, with a collapsible part list. `ScoreStaff` uses local VexFlow SVG glyphs, measures, automatic display rests, chords, ties, tuplets, grace notes, articulations and octave lines. Beat anchors are shared across parts, signatures, automation and playheads; minimum spacing and signature reservations expand dense sections without changing musical time. Horizontal overscan and vertical visibility reduce engraving work. This is scrolling notation, without pagination or a full collision-optimized engraving engine. The piano roll remains an alternate display. Browser following is presentation only.
+`ScoreWorkspace` renders selected parts in one continuous horizontal viewport, with a collapsible part list. `ScoreStaff` uses local VexFlow SVG glyphs, measures, automatic display rests, chords, ties, tuplets, grace notes, articulations and octave lines. Beat anchors are shared across parts, signatures, automation and playheads; minimum spacing and signature reservations expand dense sections without changing musical time. Horizontal overscan and vertical visibility reduce engraving work. This is scrolling notation, without pagination or a full collision-optimized engraving engine. The piano roll uses a uniform beat grid with drag-to-draw, move and resize gestures; overlapping entries choose available notation voices. A floating palette, modal settings and collapsible MIDI inspectors keep the viewer dominant. Semantic SVG targets distinguish marks from note hit boxes. Staff hidden-rest ranges are bounded and server-validated display metadata, ignored by playback; editing a generated rest materializes a native note. Browser following is presentation only.
 
 Write and Select modes distinguish entry from selection; keyboard edits, Ctrl/Cmd toggle selection, marquee, drag, copy/paste, deletion and local undo/redo persist through revision-checked project saves. Rapid keyboard edits queue behind saves. A failed validation reports the server error; stale/network failures retain a draft for explicit reapplication or discard. Undo restores score fields against the latest project, preserving graph edits. Remote score changes clear local history. Editing controls are unavailable while the show is active. Performance view defaults to only the current user's assigned parts; Show all is reset on entry and places assigned parts first without changing stored order, scheduling, or permissions.
 
-Timeline meter/key changes preserve quarter-beat note positions. Meter numerators are 1–16 and denominators 1/2/4/8/16/32. Staff clefs are treble/bass/alto/tenor, with timed changes, static key overrides, major/minor labels, sounding transposition and optional instrument/MIDI route overrides. Initial meter overrides also govern count-in. Staff routing validates local instrument references, channels 1–16 and bounded port names. Part OSC routes retain their existing numeric-address/path contracts.
+The frontend `scoreBars` module applies a time splice to every part for bar insertion/deletion, updating rational note times, clipped/split automation, staff changes, hidden rests and shared navigation in one server-validated project revision. Appending completes a partial final bar before adding whole blank bars. The dedicated structure dialog also exposes beat-positioned meter and clef edits.
+
+The timeline also carries an optional tempo map (`tempos`: written beat → quarter-note BPM, ordered, 1–400) and each staff an optional list of text marks (`marks`: id, beat, kind ∈ text/rehearsal/cue/expression/tempo/lyric, ≤256 bytes). The sequencer applies tempo entries edge-triggered as the shared written position crosses them, re-applies the tempo in force on start, resume or rewind, and leaves manual tempo commands in force until the next entry; loading a project uses a beat-0 entry, else `Project.bpm`, for the clock and count-in. Marks are display metadata for players and never reach playback. Timeline meter/key changes preserve quarter-beat note positions. Meter numerators are 1–16 and denominators 1/2/4/8/16/32. Staff clefs are treble/bass/alto/tenor, with timed changes, static key overrides, major/minor labels, sounding transposition and optional instrument/MIDI route overrides. Initial meter overrides also govern count-in. Staff routing validates local instrument references, channels 1–16 and bounded port names. Part OSC routes retain their existing numeric-address/path contracts.
 
 `Sequencer::new` prepares bounded traversal spans, ties, grace timing, articulation gates and velocities outside rendering. Ordered disjoint repeats support 2–32 passes and a first ending skipped on the final pass. One D.C./D.S. jump may finish at Fine or use one coda pair; repeats are not replayed after that jump. Nested repeats are rejected. Structured scores traverse together and stop at their end unless whole-score looping is selected; Play after the end restarts. Conducted/freeform parts retain independent launch origins and looping, using score spans clipped to their own loop length. Telemetry exposes written position and its current span endpoint so browser extrapolation cannot run past a repeat boundary. Notes outside a shortened independent loop remain stored.
 
@@ -111,7 +113,7 @@ The oscillator defaults to sine and also supports triangle, sawtooth, square, an
 
 `control_visualizer`, `audio_visualizer`, and `spectral_visualizer` have distinct typed input/output contracts and introduce no signal delay. A graph may contain at most 16 visualizers. The control visualizer forwards numeric values or UTF-8 strings (up to 256 bytes) unchanged. Its optional `control_value` is a configured fallback literal used only while disconnected and edited in the modal. Runtime text uses fixed-capacity copied storage; no String allocation or destruction occurs in render. Graph validation infers the type through visualizer chains and rejects text into numeric-only processors or parameters. Connected fallback values are read-only. This does not implement general text message operators or external text input routing.
 
-The audio visualizer captures a prepared rolling analysis window in render and computes a Hann-window FFT after every configured DSP block on the orchestration worker. The spectral visualizer forwards Cartesian/polar bins and generation unchanged, including phase, without adding FFT latency. Its analysis reads the latest incoming frame after each DSP block; frame generation remains distinct from display analysis sequence. Each channel retains 128 block columns of 32 linear frequency bands, with 8-bit intensity over −100 to 0 dB for the compact spectrogram. The transmitted history is hex-encoded; the spectral bin/phase plots carry every positive-frequency bin, without modifying the original frames. Graph/modal viewers explicitly subscribe to visualization payloads; stage clients do not receive them. The worker permits 32 diagnostic subscriptions, renewed by socket pings and expired after ten seconds without renewal. Analysis continues per block, but large diagnostic snapshots are only constructed while a viewer is subscribed. Browser redraws use 20 Hz telemetry, so the visible refresh rate is lower than the analysis rate; at the smallest blocks, the retained history can be shorter than a display interval. Graph nodes and modals render all 1–8 channels, with stale-state marking. No visualization history is persisted or recorded in undo.
+The audio visualizer captures a prepared rolling analysis window in render and computes a Hann-window FFT at the 20 Hz telemetry cadence only while viewers are subscribed. The spectral visualizer forwards Cartesian/polar bins and generation unchanged, including phase, without adding FFT latency. Its display analysis reads the latest incoming frame at telemetry cadence; frame generation remains distinct from display analysis sequence. Each channel retains 128 displayed columns of 32 linear frequency bands, with 8-bit intensity over −100 to 0 dB for the compact spectrogram. The transmitted history is hex-encoded; spectral bin/phase plots carry every positive-frequency bin without modifying the original frames. Graph/modal viewers explicitly subscribe; stage clients do not receive these payloads. The worker permits 32 diagnostic subscriptions, renewed by socket pings and expired after ten seconds. Analysis and snapshot construction stop without subscribers, while rolling capture and audio processing continue. The visible history represents up to 6.4 seconds of subscribed analysis, with hidden intervals omitted. Graph nodes and modals render all 1–8 channels with stale-state marking. No visualization history is persisted or recorded in undo.
 
 Analysis size (256–8192 samples) and spectral overlap (2 or 4) are structural modal settings. Diagnostic FFT sizes do not change the configured render block size. Visualizer analysis, serialization, and browser load have not passed the 32-player/endurance acceptance run; prior load baselines did not include visualizers.
 
@@ -308,3 +310,184 @@ Toggle separates its held checkbox state (`_checked` telemetry) from one-sample 
 Preparation allocates mono history, Hann window, complex FFT buffer, magnitudes and FFT scratch. Rendering averages channels and analyzes every quarter-window after a complete window is available. It retains at most 64 local spectral peaks above both the absolute threshold and a relative floor, refines peak frequency with log-magnitude parabolic interpolation, groups approximate integer harmonics under observed lower fundamentals, and selects up to four distinct rounded MIDI notes by amplitude-based harmonic score. These scores are not calibrated probabilities. Outputs hold the last frame's ranked notes; absent slots use −1. Frame analysis uses fixed storage without allocations, locks or I/O. Telemetry serialization and display labels remain outside rendering; compatible unchanged configurations retain tracker history.
 
 Window duration and hop are analysis timing, not verified end-to-end device latency. Spectral resolution limits closely spaced/low notes; octave doubling, absent fundamentals, transients and noise can confuse harmonic grouping. This does not create note-on/off events or guarantee general polyphonic transcription. Synthetic-tone tests do not establish real-instrument accuracy, callback deadlines or multi-tracker load capacity.
+
+
+## Continuous convolution and granular processors
+
+`convolution` performs per-channel, continuous short-frame convolution. Its two audio inputs must match the node's 1–8-channel width. Every half-window hop, it takes a Hann-windowed A frame and the latest unwindowed B frame, zero pads each to twice the 128–2048-sample window, multiplies their prepared FFTs and overlap-adds the linear-convolution result. Optional B normalization uses the frame's absolute sample sum. Both histories, FFT buffers/scratch and overlap ring are prepared before rendering. The dry path and graph latency metadata use one window of delay. Changing B changes the effective response continuously; this is not the convolution of two indefinitely accumulated streams or a captured long IR. Window changes rebuild the processor; compatible unchanged configurations preserve histories.
+
+`granular_synth` uses project sample preparation, caches, integer root defaults and subgraph sample bundling. It accepts the standard five graph MIDI controls, including repeated-pitch note-off handling, from Piano/MIDI/Part MIDI. Sixteen fixed voice records drive a fixed 128-grain pool; capacity steals bounded slots. Births latch sample position plus deterministic random spray, pitch ratio and duration. Hann grains read the wrapped sample with linear interpolation and share channel timing; density compensates average overlap gain. Released voices stop spawning and fade existing grains. All storage is prepared and rendering performs no allocations, locks or I/O. Direct score-instrument scheduling is not added; scores use Part MIDI routing.
+
+`granular_pitch_shift` writes live audio to a prepared ring and launches two half-overlapped Hann read heads. Grain duration is structural; pitch ratio is latched at each birth, preserving each active grain's trajectory. Mix is live. All channels share head positions and windows. The ring supports ratios 0.25–4; the dry delay is three grain lengths plus two samples, also used as nominal graph latency. This is exact alignment at zero shift; shifted instantaneous delay varies with grain age and ratio, so latency metadata is not a fixed shifted-path group-delay guarantee. There is no offline stretching, file access, render allocation or callback lock.
+
+These implementations have synthetic/reference and graph/browser validation, not hardware acceptance or comparative performance benchmarks. Grain boundaries can cause sidebands/modulation; interpolation and high ratios are not guaranteed alias-free. Dense clouds can steal grains. Convolution normalization bounds each response window but does not guarantee peak normalization of arbitrary changing responses. CPU deadlines, sustained multi-node load and physical listening remain manual/unverified.
+
+## Desktop distribution
+
+The independent `desktop/src-tauri` workspace packages the existing server as a
+sidecar and serves the same Vue build. Desktop startup binds `127.0.0.1:0`,
+ignores bind/TLS overrides, and creates a persistent local owner only in a fresh
+or previously initialized desktop database. A `desktop_owner` identity mapping
+is created only in desktop mode. It never upgrades an existing server user into
+an administrator. A random expiring session crosses the private stdout pipe and
+is installed as an HttpOnly cookie by the native shell; HTTP authorization remains
+unchanged. The frontend has no Tauri capabilities. Host checks restrict requests
+to the assigned loopback authority. Frontend and FFmpeg locations can be set with
+`PR0_WEB_ROOT` and `PR0_FFMPEG` while standalone defaults remain unchanged.
+
+The launcher owns a per-profile OS file lock and child stdin. Pipe EOF requests a
+new orchestration Shutdown command; outside render/device callbacks, it closes
+devices, releases notes, finalizes loops/recordings and waits for disk barriers.
+The launcher bounds its exit wait at 30 seconds. No DSP scheduling or device
+callback work moves into the webview. Profile data and recordings live outside
+the application bundle. `build.sh` builds the native host target, pins and builds
+FFmpeg without GPL/nonfree additions, stages local assets/licenses, and invokes
+Tauri packaging. See DESKTOP for packaging constraints and manual validation.
+
+## Project presence and idle shutdown
+
+Authenticated project event WebSockets define presence. Each connection has a
+separate lease, including multiple tabs for the same account and non-owner project
+members. Lease registration and final vacancy checks share the setup mutex with
+graph ownership changes. Dropping the last lease starts a five-second reconnect
+grace period; a new connection changes the generation and invalidates the older
+shutdown task. Late cleanup for one project cannot disable another project's graph.
+
+After the grace period, an empty project that still owns the graph receives ordered
+Show(false), Enable(false), and Unload commands. This stops transport/count-in,
+releases notes, closes devices, flushes loops/recordings, and frees graph state.
+Shutdown enqueueing waits for command capacity off runtime/render threads instead
+of dropping the request on a full queue. Ownership updates broadcast after the
+device-disable acknowledgement; pending and connected project WebRTC sessions are
+cancelled/closed. Returning users must explicitly enable the engine again. Project
+content and revisions are not changed by presence. HTTP-only/OSC workflows that
+have never opened a project event connection retain their existing behavior; HTTP
+requests alone do not count as persistent users.
+
+Server protocol Ping frames are sent every ten seconds. Thirty seconds without an
+inbound frame expires an unresponsive event connection; sends have five-second
+timeouts so a stalled writer cannot retain presence indefinitely. Browser protocol
+Pong responses work independently of the frontend's JavaScript timer. Network-loss
+cleanup follows heartbeat expiry plus the reconnect grace and engine/disk cleanup,
+not an instantaneous physical-disconnect guarantee. Presence lives entirely in
+server memory and is neither project data nor undo history.
+
+## Device discovery and playback continuity
+
+Audio/MIDI inventory enumeration runs in a blocking-pool task on the HTTP side,
+not on the audio orchestration worker. GET /api/devices combines that inventory
+with a small runtime-status reply from the worker, retaining the existing response
+contract. Discovery still serializes setup operations and preserves saved device
+preferences, but an inventory refresh no longer directly occupies the thread that
+refills native output and supplies browser monitor PCM. Native-disabled test mode
+also skips MIDI enumeration. The Monitor screen discovers inventory on opening;
+its two-second timer fetches only process statistics. Explicit settings/device
+refreshes continue to rediscover hardware.
+
+The orchestration loop processes at most 16 queued commands before checking output
+pacing/rendering again, preserving FIFO order without allowing a continuous
+command producer to monopolize the loop. This is not a dedicated realtime render
+thread: preparation/install work, telemetry and other existing between-block work
+can still cause stalls. The discovery change does not modify fixed native latency
+compensation, WebRTC jitter buffering, output queue targets, DSP sample clocks or
+score event timing. Physical playback validation remains required.
+
+The presentation clock keeps a nondecreasing displayed beat during normal playback.
+Late snapshots or a clock-offset correction can hold the display until the engine
+estimate catches up; stale telemetry freezes the last displayed position instead
+of snapping back to the older snapshot. Paused/stopped snapshots, a lower
+authoritative beat, changed project/epoch and deactivation still reset/reanchor
+the display. The existing 500 ms extrapolation cap remains. This affects only
+browser presentation and does not correct, resample or drive audio timing.
+
+## Independent MIDI sources and monitor sizing (2026-09-08)
+
+Complete direct `pitch`, `velocity`, `gate`, `trigger`, and `note_off` connections
+from Part MIDI, Piano, MIDI input, or OSC-to-MIDI to sine/FM synths are prepared
+as independent note decoders. Each source keeps its pitch/velocity and pulse
+history together, and graph voices carry a source-local lane identity. A release
+only releases that source's oldest held instance of the pitch. Simultaneous
+sources are both processed; these complete note bundles bypass ordinary scalar
+winner arbitration. Partial/custom control wiring retains the existing scalar
+rules. Compatible graph replacement remaps compiled source indices while
+preserving decoder history and held voices. Render uses prepared storage only.
+
+Monitor channel strips use fixed equal widths and fixed text rows, with the
+meter track taking the remaining panel height. Device groups scroll horizontally
+for additional channels, without vertical meter scrolling. Short windows place
+input/output banks side by side to preserve meter height. Changing dB text,
+clipping state, or missing-data labels does not change strip geometry.
+
+## Audio efficiency and browser buffering (2026-09-08)
+
+Monitor conversion prepares the repeating rational-rate windowed-sinc kernels once,
+retaining phase and filter history across blocks. Converted master/cue PCM is
+assembled into 480-frame stereo packets before entering a 64-slot broadcast queue.
+Its burst capacity is therefore 640 ms at all DSP block sizes; consumers send each
+packet as soon as available, without a new prebuffer delay. Partial PCM and filter
+history reset together on project, rate or feed-topology changes and when no monitor
+listeners remain. All feeds remain collected while any monitor is connected.
+
+Physical MIDI queues are polled once per DSP block, preserving queued order, overflow
+release and bounded batch draining; input arriving during rendering waits for the
+next block. Internal score events still use engine sample time. Sine/FM voice pitch
+ratios are computed at note-on; sampler increments are cached until root changes.
+
+See [AUDIO_ENGINE_AUDIT.md](AUDIO_ENGINE_AUDIT.md) for measurements, regression scope,
+and the remaining disk-retirement, independent-device-clock and shared-worker risks.
+
+
+## Project browsing, administration and quick insertion (2026-09-09)
+
+Project summaries include accessible project metadata (owner, role, mode, tempo,
+meter, revision, part/node counts). `project_recents` stores a per-user opening
+sequence in SQLite, updated only after authorized creation/opening; the header
+shows the latest five. The project browser searches these summaries without
+case sensitivity and offers table/icon views. Its sample organizer lists owned,
+global, and project-shared samples, preserving access for project collaborators.
+
+`user_profiles` extends existing accounts with an administrator role, activation,
+contact/name fields and an optimistic revision. Migration grants administration
+to the oldest account once; a database trigger makes the first new installation
+account an admin. This also covers the desktop bootstrap identity. Subsequent
+accounts are regular users. System audio/OSC configuration and user management
+require server-validated administration. Authenticated graph clients receive a
+minimal `/api/audio/config` read contract; project settings retain project roles.
+Admins can create/update accounts, reset passwords, revoke sessions, deactivate,
+and delete accounts without owned projects or live samples. Deletion retains a
+scrubbed identity tombstone for historical references. The last active admin and
+self-deletion are protected. Credential, role and activation changes revoke
+sessions and close affected WebSocket/WebRTC connections.
+
+Sample deletion requires the owner for private samples or an admin for samples
+that have ever been global. Owners can unshare global samples while preserving
+existing project access, but cannot bypass the admin deletion rule by unsharing.
+A review endpoint returns total affected project count and only authorized project
+names. Deletion requires exact-name confirmation, risk acknowledgement, current
+metadata revision and an unchanged association token. It is rejected while an
+affected project's engine is loaded. Catalog tombstones prevent legacy discovery
+from restoring deleted entries. Original WAVs, linked project WAVs and conversion
+caches are removed; filesystem cleanup failures are reported. Graph references
+and saved revisions deliberately remain, so deletion can break projects. Copies
+already embedded in separately published subgraph versions are independent assets.
+
+In an editable graph, N opens the quick node browser. It searches node descriptors,
+latest saved node-group versions and accessible samples, with type icons. Arrow
+and Page keys navigate, Ctrl+Home/End select endpoints, Enter inserts into the
+current graph, Escape closes, and Tab cycles the search/close controls. A compact
+fade respects reduced-motion settings. Pointer dragging uses graph screen-to-flow
+placement for mouse/touch, including nested graph scope; samples are attached to
+the current project before inserting a polyphonic sampler. Text entry, modal and
+non-graph contexts suppress the shortcut. All insertions use existing server
+validation and revision/undo paths.
+
+
+Send/Receive target modal fields maintain a local draft until commit, so telemetry
+rerenders do not overwrite text in progress. A native datalist deduplicates target
+names across all project nodes of the same signal type, including nested groups.
+Connected nodes contribute only fresh engine target telemetry to suggestions;
+stored fallback names are not presented as active dynamic routes. Driven fields
+retain the live target/source display and expose per-source disconnect controls.
+Names remain case-sensitive and normal server graph validation applies on commit.
+
+Score entry audition is an authorized request naming an already saved part/note. The worker sends scoped instrument notes plus staff-filtered Part MIDI events, then releases them after a bounded count of rendered samples. Replacement retires the current preview; unload clears it. This path does not use browser note-off timers or directly address legacy part MIDI/OSC device routes. Persisted part mute and exclusive-solo choices remove the affected prepared note and automation streams; replacement releases existing held notes. Special barline styles are validated layout metadata and do not change traversal.
