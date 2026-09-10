@@ -262,6 +262,16 @@ export function editBars(
       staff.marks = (staff.marks || [])
         .filter((m) => inserting || m.beat < at || m.beat >= end)
         .map((m) => ({ ...m, beat: position(m.beat) }))
+      const noteIds = new Set(part.notes.map((n) => n.id))
+      staff.curves = (staff.curves || [])
+        .filter((c) => inserting || !(c.start_beat >= at && c.end_beat <= end))
+        .map((c) => ({
+          ...c,
+          start_beat: position(c.start_beat),
+          end_beat: Math.max(position(c.start_beat), position(c.end_beat, false)),
+          start_note: c.start_note && noteIds.has(c.start_note) ? c.start_note : null,
+          end_note: c.end_note && noteIds.has(c.end_note) ? c.end_note : null,
+        }))
       staff.hidden_rests = (staff.hidden_rests || []).flatMap((r) =>
         pieces(r.beat, r.duration).map((x) => ({
           beat: x.beat,
@@ -539,6 +549,12 @@ export function clearRange(
   for (const s of part.staves)
     if (!staffId || s.id === staffId)
       s.hidden_rests = (s.hidden_rests || []).filter((r) => !inside(r.beat))
+  for (const s of part.staves)
+    s.curves = (s.curves || []).map((c) => ({
+      ...c,
+      start_note: c.start_note && removed.has(c.start_note) ? null : c.start_note,
+      end_note: c.end_note && removed.has(c.end_note) ? null : c.end_note,
+    }))
   return p
 }
 

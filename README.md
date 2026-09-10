@@ -4,7 +4,7 @@ A self-hosted electroacoustic performance workspace: Vue scores and patches, a R
 
 **Status: development alpha.** This is a working implementation foundation, not the completed performance-ready release described in the design. See [implementation status](docs/STATUS.md) for the exact remaining work and validation limits.
 
-![Signal graph](docs/workspace.png)
+![Signal Graph](docs/workspace.png)
 
 ## Initial setup
 
@@ -68,11 +68,11 @@ Open **http://127.0.0.1:4000**. The first visitor can create the initial account
 
 For frontend hot reload, run `npm run dev` in `web/` alongside the Rust server. Vite proxies `/api` and WebSockets to port 4000.
 
-Use **Project settings** during preparation to rename a project, choose structured/conducted/freeform playback, and set its initial tempo. Deactivate the show before changing these settings.
+The top bar holds the project selector in the centre (name, mode and a folder button for recent projects), with the project browser, a save-revision icon whose tooltip shows the revision state, and settings on the right. Use **Project settings** during preparation to rename a project, choose structured/conducted/freeform playback, and set its initial tempo. Deactivate the show before changing these settings.
 
-Use **Performance mode** in the project header for the stage view: select a part, follow its read-only score, watch the shared clock and queued launch/stop status, and open monitor controls as needed. The monitor connection stays alive when switching views. Fullscreen is available inside the stage view; Exit performance mode returns to the workspace. A timing-loss warning holds the displayed score until engine updates resume.
+Use **Performance mode** in the transport bar (next to the audio engine button; both collapse to icons on narrow screens) for the stage view: select a part, follow its read-only score, watch the shared clock and queued launch/stop status, and open monitor controls as needed. The monitor connection stays alive when switching views. Fullscreen is available inside the stage view; Exit performance mode returns to the workspace. A timing-loss warning holds the displayed score until engine updates resume.
 
-Create a project and enable its audio engine to develop the graph and score. Graph clocks, audio, MIDI, piano keys and browser monitors run while the show timeline stays stopped. Activate the show and press Play for performance; Pause/Stop affects score playback while the graph keeps running. Disable the audio engine to silence and unload the graph. In conducted/freeform projects, open Score & parts and launch a part; structured projects start their parts together. The starter score drives a polyphonic synth through gain and output nodes. Graph audio is audible when the engine is enabled. Open Monitor to connect a browser feed (master or a dedicated Monitor output), or Audio setup to enable the server's default output. Selected native inputs start with the audio engine. Add a Browser input node, assign it to a part/performer, and select it in Monitor to route a browser microphone into the patch.
+Create a project and enable its audio engine to develop the graph and score. Graph clocks, audio, MIDI, piano keys and browser monitors run while the show timeline stays stopped. Activate the show and press Play for performance; Pause/Stop affects score playback while the graph keeps running. Disable the audio engine to silence and unload the graph. In conducted/freeform projects, open Score & Parts and launch a part; structured projects start their parts together. The starter score drives a polyphonic synth through gain and output nodes. Graph audio is audible when the engine is enabled. Open Monitor to connect a browser feed (master or a dedicated Monitor output), or Audio setup to enable the server's default output. Selected native inputs start with the audio engine. Add a Browser input node, assign it to a part/performer, and select it in Monitor to route a browser microphone into the patch.
 
 ## LAN and HTTPS
 

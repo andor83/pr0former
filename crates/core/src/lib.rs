@@ -2319,6 +2319,11 @@ impl Project {
             if let Some(d) = &p.dynamics {
                 score::validate_automation(&[d.lane(p.midi_channel)])?;
             }
+            for s in &p.staves {
+                if let Some(d) = &s.dynamics {
+                    score::validate_automation(&[d.lane(s.midi_channel.unwrap_or(p.midi_channel))])?;
+                }
+            }
             if p.name.trim().is_empty() || p.name.len() > 120 {
                 return Err("Part name must contain 1–120 bytes".into());
             }

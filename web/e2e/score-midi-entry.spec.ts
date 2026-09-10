@@ -45,7 +45,7 @@ test('Web MIDI step entry: play to enter with chords, and hold + number', async 
   const midi = (bytes: number[]) =>
     page.evaluate((b) => (window as any).__midi(b), bytes)
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   await page.getByLabel('MIDI entry', { exact: true }).selectOption('play')
   await expect(page.getByText('Fake Keys', { exact: true })).toBeVisible()
   const staff = page
@@ -96,7 +96,7 @@ test('Web MIDI step entry: play to enter with chords, and hold + number', async 
   await expect.poll(async () => (await notes()).length).toBe(9)
   await expect(page.getByRole('alert')).toHaveCount(0)
   await page.reload()
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   await expect(page.getByLabel('MIDI entry', { exact: true })).toHaveValue('hold')
   await page.getByLabel('MIDI entry', { exact: true }).selectOption('off')
 })

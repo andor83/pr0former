@@ -180,6 +180,12 @@ export function pasteRegion(
         if (n.notation[field] && removed.has(n.notation[field]!))
           n.notation[field] = null
   for (const s of part.staves)
+    s.curves = (s.curves || []).map((c) => ({
+      ...c,
+      start_note: c.start_note && removed.has(c.start_note) ? null : c.start_note,
+      end_note: c.end_note && removed.has(c.end_note) ? null : c.end_note,
+    }))
+  for (const s of part.staves)
     if (s.id === target.staff)
       s.hidden_rests = (s.hidden_rests || []).filter(
         (h) => !(h.beat >= start - eps && h.beat < end - eps && clip.voices.includes(h.voice)),

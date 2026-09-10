@@ -19,6 +19,12 @@ pub struct Staff {
     /// Staff-attached text: cues, rehearsal letters, expressions, tempo words, lyrics.
     #[serde(default)]
     pub marks: Vec<StaffMark>,
+    /// Per-staff dynamics; when absent the part-level dynamics (legacy) apply.
+    #[serde(default)]
+    pub dynamics: Option<Dynamics>,
+    /// Phrasing curves and brackets: display marks with optional note anchors and a shape.
+    #[serde(default)]
+    pub curves: Vec<StaffCurve>,
     pub id: String,
     pub name: String,
     pub clef: String,
@@ -28,6 +34,24 @@ pub struct Staff {
     pub transpose: i8,
 }
 pub const MARK_KINDS: [&str; 6] = ["text", "rehearsal", "cue", "expression", "tempo", "lyric"];
+pub const CURVE_KINDS: [&str; 2] = ["slur", "bracket"];
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StaffCurve {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub start_note: Option<String>,
+    pub start_beat: f64,
+    #[serde(default)]
+    pub end_note: Option<String>,
+    pub end_beat: f64,
+    /// Curvature (slur) or hook depth (bracket) in staff pixels; negative arcs upward.
+    #[serde(default)]
+    pub height: f64,
+    /// Vertical offset from the default placement in staff pixels.
+    #[serde(default)]
+    pub lift: f64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StaffMark {
     pub id: String,
@@ -128,6 +152,34 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
         }
         if s.marks.len() > 1024 {
             return Err("Too many staff marks".into());
+        }
+        if s.curves.len() > 2048 {
+            return Err("Too many phrasing curves".into());
+        }
+        let mut curve_ids = BTreeSet::new();
+        for c in &s.curves {
+            let note_ok = |id: &Option<String>| {
+                id.as_ref()
+                    .is_none_or(|id| part.notes.iter().any(|n| &n.id == id))
+            };
+            if c.id.is_empty()
+                || c.id.len() > 120
+                || !curve_ids.insert(&c.id)
+                || !CURVE_KINDS.contains(&c.kind.as_str())
+                || !c.start_beat.is_finite()
+                || !c.end_beat.is_finite()
+                || c.start_beat < 0.
+                || c.end_beat > 4096.
+                || c.end_beat < c.start_beat
+                || !c.height.is_finite()
+                || c.height.abs() > 200.
+                || !c.lift.is_finite()
+                || c.lift.abs() > 200.
+                || !note_ok(&c.start_note)
+                || !note_ok(&c.end_note)
+            {
+                return Err("Invalid phrasing curve".into());
+            }
         }
         let mut mark_ids = BTreeSet::new();
         for m in &s.marks {
@@ -320,6 +372,34 @@ mod tests {
             StaffMark { id: "a".into(), beat: 1., kind: "text".into(), text: "y".into() },
         ];
         assert!(p.validate().is_err());
+        p.parts[0].staves[0].marks.clear();
+        let note = p.parts[0].notes[0].id.clone();
+        let curve = |start_note: Option<String>, end_beat: f64, kind: &str| StaffCurve {
+            id: "c1".into(),
+            kind: kind.into(),
+            start_note,
+            start_beat: 0.,
+            end_note: None,
+            end_beat,
+            height: -20.,
+            lift: 0.,
+        };
+        p.parts[0].staves[0].curves = vec![curve(Some(note.clone()), 4., "slur")];
+        assert!(p.validate().is_ok(), "{:?}", p.validate());
+        p.parts[0].staves[0].curves = vec![curve(None, 4., "bracket")];
+        assert!(p.validate().is_ok());
+        for bad in [
+            curve(Some("missing".into()), 4., "slur"),
+            curve(None, -1., "slur"),
+            curve(None, 4., "wiggle"),
+        ] {
+            p.parts[0].staves[0].curves = vec![bad];
+            assert!(p.validate().is_err());
+        }
+        let mut deep = curve(None, 4., "slur");
+        deep.height = 500.;
+        p.parts[0].staves[0].curves = vec![deep];
+        assert!(p.validate().is_err());
     }
     #[test]
     fn hidden_rest_ranges_are_bounded_and_legacy_staff_defaults_are_empty() {
@@ -362,6 +442,8 @@ mod tests {
             midi_channel: None,
             midi_port: None,
             marks: vec![],
+            dynamics: None,
+            curves: vec![],
             id: "s".into(),
             name: "Upper".into(),
             clef: "treble".into(),

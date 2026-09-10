@@ -29,7 +29,7 @@ test('bar selection mass edit: transpose, copy/cut/paste, durations and voices',
     )
   const at = async (beat: number) => (await notes()).filter((n) => n.beat === beat)
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   const staff = page.locator('[data-score-part="part-1"] [data-staff-id]').first()
   const region = page.locator('[data-bar-region]')
   // Select bar 1 and transpose with the arrow keys.

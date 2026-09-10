@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import {
+  computed,
+  nextTick,
+  ref,
+  watch,
+  onMounted,
+  onBeforeUnmount,
+  TransitionGroup,
+} from 'vue'
 import type {
   MarkKind,
   Note,
@@ -135,8 +143,19 @@ const dialog = ref<
   | 'measure'
   | 'tempo'
   | 'mark'
+  | 'delete-part'
   | null
 >(null)
+const deleteTarget = ref<Part | null>(null)
+/** Live order while a part row is being dragged, so the list previews the drop. */
+const dragOrder = ref<string[] | null>(null)
+const displayParts = computed(() =>
+  dragOrder.value
+    ? dragOrder.value
+        .map((id) => doc.value.parts.find((p) => p.id === id))
+        .filter((p): p is Part => !!p)
+    : doc.value.parts,
+)
 /** Drafts for the tempo-mark and text-mark dialogs. */
 const tempoDraft = ref<{ beat: number; bpm: number } | null>(null)
 const markDraft = ref<{
@@ -237,9 +256,144 @@ const region = ref<{
   end: number
 } | null>(null)
 const menu = ref<{ x: number; y: number; items: MenuItem[] } | null>(null)
+/** Slur/tie/bracket tool drag: from a note (or beat) to another note or a free beat. */
+const phraseDrag = ref<{
+  kind: CurveKind | 'tie'
+  part: string
+  staff: string
+  note: string | null
+  beat: number
+  x: number
+  y: number
+  toX: number
+  toY: number
+} | null>(null)
+let curveDrag: {
+  part: string
+  staff: string
+  id: string
+  handle: 'start' | 'end' | 'shape'
+  startX: number
+  startY: number
+  original: StaffCurve
+  frame: number
+  latest?: PointerEvent
+} | null = null
+/** Inline text entry for the Text tool: a small input placed where the staff was clicked. */
+const inlineText = ref<{
+  part: string
+  staff: string
+  beat: number
+  left: number
+  top: number
+  value: string
+} | null>(null)
+const inlineInput = ref<HTMLInputElement>()
+function commitInlineText() {
+  const t = inlineText.value
+  inlineText.value = null
+  if (!t || !t.value.trim() || !canEdit.value) return
+  try {
+    void commit(addMark(doc.value, t.part, t.staff, { beat: t.beat, kind: 'text', text: t.value }))
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+function phrasePreviewPath() {
+  const d = phraseDrag.value
+  if (!d) return ''
+  return d.kind === 'bracket'
+    ? bracketPath(d.x, d.toX, Math.min(d.y, d.toY) - 10, 12)
+    : slurPath(d.x, d.y, d.toX, d.toY, -26)
+}
+function finishPhrase(event: PointerEvent) {
+  const d = phraseDrag.value
+  phraseDrag.value = null
+  if (!d || !canEdit.value) return
+  const el = document.elementFromPoint(event.clientX, event.clientY)
+  const endNode = el?.closest<HTMLElement>('[data-note-id]')
+  const endNoteId =
+    endNode && endNode.dataset.partId === d.part ? endNode.dataset.noteId! : null
+  const p = doc.value.parts.find((p) => p.id === d.part)
+  if (!p) return
+  const endBeat = endNoteId
+    ? p.notes.find((n) => n.id === endNoteId)?.beat ?? beatAt(point(event).x)
+    : Math.max(0, Math.round(beatAt(point(event).x) / onsetSnap.value) * onsetSnap.value)
+  try {
+    if (d.kind === 'tie') {
+      const from = p.notes.find((n) => n.id === d.note)
+      if (!from) throw new Error('Start a tie on a note.')
+      const targets = tieTargets(p, from)
+      const target = endNoteId ? targets.find((n) => n.id === endNoteId) : targets[0]
+      if (!target)
+        throw new Error('A tie joins the next note of the same pitch in the same voice.')
+      const next = clone(p)
+      next.staves = staves(next)
+      next.notes = next.notes.map((n) =>
+        n.id === from.id ? withNotation(n, { ...metadata(n, next), tie_to: target.id }, next) : n,
+      )
+      updatePart(next)
+      return
+    }
+    if (Math.abs(endBeat - d.beat) < 1e-9 && endNoteId === d.note) return
+    updatePart(
+      addCurve(p, d.staff, d.kind, { note: d.note, beat: d.beat }, { note: endNoteId, beat: endBeat }),
+    )
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+function applyCurveDrag(event: PointerEvent, record: boolean) {
+  const c = curveDrag
+  if (!c) return
+  const p = doc.value.parts.find((p) => p.id === c.part)
+  if (!p) return
+  const dx = (event.clientX - c.startX) / zoom.value,
+    dy = (event.clientY - c.startY) / zoom.value
+  let patch: Partial<StaffCurve>
+  if (c.handle === 'shape') {
+    patch = { height: c.original.height + dy }
+  } else {
+    const el = document.elementFromPoint(event.clientX, event.clientY)
+    const node = el?.closest<HTMLElement>('[data-note-id]')
+    const noteId = node && node.dataset.partId === c.part ? node.dataset.noteId! : null
+    const beat = noteId
+      ? p.notes.find((n) => n.id === noteId)?.beat ?? 0
+      : Math.max(
+          0,
+          Math.round(
+            beatAt(xAt(c.handle === 'start' ? c.original.start_beat : c.original.end_beat) + dx) /
+              onsetSnap.value,
+          ) * onsetSnap.value,
+        )
+    patch =
+      c.handle === 'start'
+        ? { start_beat: beat, start_note: noteId, lift: c.original.lift + dy }
+        : { end_beat: beat, end_note: noteId, lift: c.original.lift + dy }
+  }
+  const next = clone(doc.value)
+  next.parts = next.parts.map((x) => (x.id === p.id ? updateCurve(x, c.staff, c.id, patch) : x))
+  void commit(next, record)
+}
 import { durationGlyphs } from '../notation'
-import MidiLanes from './MidiLanes.vue'
-import ScoreDynamics from './ScoreDynamics.vue'
+import ScoreRampEditor from './ScoreRampEditor.vue'
+import {
+  addCurve,
+  dropCurveAnchors,
+  slurPath,
+  bracketPath,
+  tieTargets,
+  updateCurve,
+} from '../scoreCurves'
+import type { CurveKind, StaffCurve } from '../types'
+import {
+  applyDynamicMark,
+  dynamicLevels,
+  nodesFromEvents,
+  staffDynamicsEvents,
+  velocityLine,
+  writeRamp,
+} from '../scoreRamps'
 import ScoreTimelineEditor from './ScoreTimelineEditor.vue'
 const props = defineProps<{
   project: Project
@@ -961,7 +1115,10 @@ function remove() {
         staff: metadata(n, p).staff,
         rest: n,
       })
-    p.notes = p.notes.filter((n) => !selected.value.has(noteKey(p.id, n.id)))
+    const removedIds = new Set(
+      p.notes.filter((n) => selected.value.has(noteKey(p.id, n.id))).map((n) => n.id),
+    )
+    p.notes = p.notes.filter((n) => !removedIds.has(n.id))
     for (const n of p.notes)
       if (n.notation)
         for (const kind of ['tie_to', 'slur_to', 'grace_to'] as const)
@@ -970,6 +1127,7 @@ function remove() {
             !p.notes.some((other) => other.id === n.notation![kind])
           )
             n.notation[kind] = null
+    Object.assign(p, dropCurveAnchors(p, removedIds))
   }
   void commit(next).then((ok) => {
     if (ok) selected.value = new Set()
@@ -1016,11 +1174,86 @@ function movePart(id: string, toIndex: number) {
   next.parts.splice(toIndex, 0, p!)
   void commit(next)
 }
-function dropPart(targetId: string) {
+function dragOverPart(targetId: string) {
   const from = dragPart.value
+  if (!from || from === targetId) return
+  const order = (dragOrder.value ?? doc.value.parts.map((p) => p.id)).filter(
+    (id) => id !== from,
+  )
+  order.splice(order.indexOf(targetId), 0, from)
+  if (JSON.stringify(order) !== JSON.stringify(dragOrder.value)) dragOrder.value = order
+}
+function dropPart() {
+  const from = dragPart.value,
+    order = dragOrder.value
   dragPart.value = null
-  if (!from || from === targetId || !canEdit.value) return
-  movePart(from, doc.value.parts.findIndex((p) => p.id === targetId))
+  dragOrder.value = null
+  if (!from || !order || !canEdit.value) return
+  const next = clone(doc.value)
+  next.parts = order
+    .map((id) => next.parts.find((p) => p.id === id))
+    .filter((p): p is Part => !!p)
+  if (next.parts.map((p) => p.id).join() !== doc.value.parts.map((p) => p.id).join())
+    void commit(next)
+}
+function partMenu(event: MouseEvent, p: Part, index: number) {
+  if (props.performance) return
+  event.preventDefault()
+  focus(p.id)
+  menu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    items: [
+      {
+        label: p.muted ? `Unmute ${p.name}` : `Mute ${p.name}`,
+        disabled: !canEdit.value,
+        action: () => mixPart(p.id, false),
+      },
+      {
+        label: p.solo ? `Unsolo ${p.name}` : `Solo ${p.name}`,
+        disabled: !canEdit.value,
+        action: () => mixPart(p.id, true),
+      },
+      {
+        label: visible.value.has(p.id) ? 'Hide in score' : 'Show in score',
+        action: () => toggleVisible(p.id),
+      },
+      { label: '', separator: true },
+      { label: 'Move up', disabled: !canEdit.value || index === 0, action: () => reorder(p.id, -1) },
+      {
+        label: 'Move down',
+        disabled: !canEdit.value || index === doc.value.parts.length - 1,
+        action: () => reorder(p.id, 1),
+      },
+      { label: 'Part settings…', action: () => (dialog.value = 'part') },
+      { label: '', separator: true },
+      {
+        label: `Delete ${p.name}…`,
+        danger: true,
+        disabled: !canEdit.value,
+        action: () => {
+          deleteTarget.value = p
+          dialog.value = 'delete-part'
+        },
+      },
+    ],
+  }
+}
+function deletePart() {
+  const target = deleteTarget.value
+  if (!target || !canEdit.value) return
+  const next = clone(doc.value)
+  next.parts = next.parts.filter((p) => p.id !== target.id)
+  for (const n of next.graph.nodes) if (n.part_id === target.id) n.part_id = null
+  void commit(next).then((ok) => {
+    if (!ok) return
+    dialog.value = null
+    deleteTarget.value = null
+    const set = new Set(visible.value)
+    set.delete(target.id)
+    visible.value = set
+    if (focused.value === target.id) focus(next.parts[0]?.id || '')
+  })
 }
 function addPart() {
   if (doc.value.parts.length >= 32) return
@@ -1358,6 +1591,7 @@ function deleteBeforeCaret() {
         for (const kind of ['tie_to', 'slur_to', 'grace_to'] as const)
           if (n.notation[kind] && ids.has(n.notation[kind]!))
             n.notation[kind] = null
+    Object.assign(target, dropCurveAnchors(target, ids))
     caret.value = { ...c, beat: Math.min(...victims.map((n) => n.beat)) }
     selected.value = new Set()
     void commit(next)
@@ -1416,6 +1650,21 @@ function tieAtCaret() {
     error.value = ''
     tieNext.value = tieNext.value === previous.id ? null : previous.id
   })
+}
+/** Barlines that join a multi-staff part's staves: system start/end, repeats, special barlines. */
+function systemLines(p: Part) {
+  const lines: { key: string; x: number; kind: string }[] = [
+    { key: 'start', x: 12, kind: 'start' },
+    { key: 'end', x: xAt(length.value) - 12, kind: 'end' },
+  ]
+  for (const [i, r] of (doc.value.score?.repeats || []).entries()) {
+    lines.push({ key: `rs${i}`, x: xAt(r.start) - 12, kind: 'repeat' })
+    lines.push({ key: `re${i}`, x: xAt(r.end) - 12, kind: 'repeat' })
+  }
+  for (const [i, b] of (doc.value.score?.barlines || []).entries())
+    lines.push({ key: `b${i}`, x: xAt(b.beat) - 12, kind: b.style })
+  void p
+  return lines
 }
 function barAt(beat: number) {
   return measures(doc.value).find(
@@ -1690,6 +1939,62 @@ async function inspectElement() {
 }
 function pointerDown(event: PointerEvent) {
   if (event.button !== 0 || !(event.target instanceof Element)) return
+  if (inlineText.value && !event.target.closest('.inline-text')) commitInlineText()
+  const handle = event.target.closest<HTMLElement>('[data-curve-handle]')
+  if (handle && canEdit.value) {
+    const p = doc.value.parts.find((p) => p.id === handle.dataset.curvePart),
+      original = p
+        ? staves(p)
+            .find((s) => s.id === handle.dataset.curveStaff)
+            ?.curves?.find((c) => c.id === handle.dataset.curveId)
+        : undefined
+    if (!p || !original) return
+    curveDrag = {
+      part: p.id,
+      staff: handle.dataset.curveStaff!,
+      id: original.id,
+      handle: handle.dataset.curveHandle as 'start' | 'end' | 'shape',
+      startX: event.clientX,
+      startY: event.clientY,
+      original: { ...original },
+      frame: 0,
+    }
+    viewport.value?.setPointerCapture(event.pointerId)
+    event.preventDefault()
+    return
+  }
+  if (placement.value?.kind === 'phrase' && canEdit.value) {
+    const row = event.target.closest<HTMLElement>('[data-staff-id]')
+    if (!row) return
+    const node = event.target.closest<HTMLElement>('[data-note-id]')
+    const pos = point(event)
+    const partId = row.dataset.partId!,
+      p = doc.value.parts.find((p) => p.id === partId),
+      note = node ? p?.notes.find((n) => n.id === node.dataset.noteId) : undefined
+    if (placement.value.value === 'tie' && !note) {
+      error.value = 'Start a tie on a note.'
+      return
+    }
+    const beat = note
+      ? note.beat
+      : Math.max(0, Math.round(beatAt(pos.x) / onsetSnap.value) * onsetSnap.value)
+    root.value?.focus({ preventScroll: true })
+    focus(partId)
+    phraseDrag.value = {
+      kind: placement.value.value as CurveKind | 'tie',
+      part: partId,
+      staff: node?.dataset.staffId || row.dataset.staffId!,
+      note: note?.id ?? null,
+      beat,
+      x: pos.x,
+      y: pos.y,
+      toX: pos.x,
+      toY: pos.y,
+    }
+    viewport.value?.setPointerCapture(event.pointerId)
+    event.preventDefault()
+    return
+  }
   if (placement.value && canEdit.value) {
     const row = event.target.closest<HTMLElement>('[data-staff-id]')
     if (!row) return
@@ -1715,6 +2020,42 @@ function pointerDown(event: PointerEvent) {
         patchNotation({ articulation: chosen.value })
       } else if (chosen.kind === 'tempo') {
         openTempoDialog(beat)
+      } else if (chosen.kind === 'dynamic') {
+        const target = doc.value.parts.find((p) => p.id === partId)
+        if (target) {
+          const next = clone(doc.value)
+          next.parts = next.parts.map((p) => {
+            if (p.id !== partId) return p
+            const s = staves(p).find((s) => s.id === staffId)
+            return s
+              ? writeRamp(
+                  p,
+                  velocityLine(s.id),
+                  applyDynamicMark(
+                    nodesFromEvents(staffDynamicsEvents(p, s)),
+                    beat,
+                    Number(chosen.value),
+                  ),
+                )
+              : p
+          })
+          void commit(next)
+        }
+      } else if (chosen.kind === 'mark' && chosen.value === 'text') {
+        const rowRect = row.getBoundingClientRect(),
+          surface = viewport.value!.querySelector('.ensemble-surface')!.getBoundingClientRect()
+        inlineText.value = {
+          part: partId,
+          staff: staffId,
+          beat,
+          left: xAt(beat) - 12,
+          top: (rowRect.top - surface.top) / zoom.value + 44,
+          value: '',
+        }
+        nextTick(() => inlineInput.value?.focus())
+        // The tool stays armed for the next snippet.
+        event.preventDefault()
+        return
       } else if (chosen.kind === 'mark') {
         openMarkDialog(partId, staffId, beat, chosen.value as MarkKind)
       } else {
@@ -1859,6 +2200,21 @@ function pointerDown(event: PointerEvent) {
   event.preventDefault()
 }
 function pointerMove(event: PointerEvent) {
+  if (phraseDrag.value) {
+    const pos = point(event)
+    phraseDrag.value = { ...phraseDrag.value, toX: pos.x, toY: pos.y }
+    return
+  }
+  if (curveDrag) {
+    curveDrag.latest = event
+    if (!curveDrag.frame)
+      curveDrag.frame = requestAnimationFrame(() => {
+        if (!curveDrag) return
+        curveDrag.frame = 0
+        if (curveDrag.latest) applyCurveDrag(curveDrag.latest, false)
+      })
+    return
+  }
   if (elementDrag) return
   const pos = point(event)
   if (!gesture.value) {
@@ -1888,6 +2244,20 @@ function pointerMove(event: PointerEvent) {
   }
 }
 function pointerUp(event: PointerEvent) {
+  if (phraseDrag.value) {
+    if (viewport.value?.hasPointerCapture(event.pointerId))
+      viewport.value.releasePointerCapture(event.pointerId)
+    finishPhrase(event)
+    return
+  }
+  if (curveDrag) {
+    if (curveDrag.frame) cancelAnimationFrame(curveDrag.frame)
+    applyCurveDrag(event, true)
+    curveDrag = null
+    if (viewport.value?.hasPointerCapture(event.pointerId))
+      viewport.value.releasePointerCapture(event.pointerId)
+    return
+  }
   if (inspectAfterPointer) {
     inspectAfterPointer = false
     gesture.value = null
@@ -2107,6 +2477,12 @@ function keydown(event: KeyboardEvent) {
     marquee.value = null
     tieNext.value = null
     menu.value = null
+    phraseDrag.value = null
+    inlineText.value = null
+    if (placement.value?.kind === 'phrase' || placement.value?.kind === 'mark') {
+      placement.value = null
+      return
+    }
     if (selected.value.size) selected.value = new Set()
     else if (region.value) region.value = null
     else caret.value = null
@@ -2411,9 +2787,15 @@ watch(
             </span>
           </template>
         </div>
-        <ul v-if="!collapsed" class="parts-list" aria-label="Parts">
+        <TransitionGroup
+          v-if="!collapsed"
+          tag="ul"
+          name="part-shift"
+          class="parts-list"
+          aria-label="Parts"
+        >
           <li
-            v-for="(p, index) in doc.parts"
+            v-for="(p, index) in displayParts"
             :key="p.id"
             class="part-row"
             :class="{
@@ -2423,9 +2805,15 @@ watch(
             }"
             :draggable="canEdit"
             @dragstart="dragPart = p.id"
-            @dragend="dragPart = null"
-            @dragover.prevent
-            @drop.prevent="dropPart(p.id)"
+            @dragend="
+              () => {
+                dragPart = null
+                dragOrder = null
+              }
+            "
+            @dragover.prevent="dragOverPart(p.id)"
+            @drop.prevent="dropPart"
+            @contextmenu="partMenu($event, p, index)"
           >
             <div class="part-order">
               <button
@@ -2496,7 +2884,7 @@ watch(
               </button>
             </div>
           </li>
-        </ul>
+        </TransitionGroup>
       </aside>
       <div class="score-main">
         <header
@@ -2604,7 +2992,7 @@ watch(
               >
                 <ScoreRestIcon :value="value" /></button
             ></ScoreToolMenu>
-            <ScoreToolMenu label="Accidentals and dots" symbol="♯">
+            <ScoreToolMenu label="Accidentals and dots" symbol="♯" class="glyphs">
               <button
                 :disabled="!canEdit"
                 title="Dots (.)"
@@ -2643,7 +3031,7 @@ watch(
                 A♮
               </button>
             </ScoreToolMenu>
-            <ScoreToolMenu label="Accents" symbol=">"
+            <ScoreToolMenu label="Accents" symbol=">" class="glyphs"
               ><button
                 v-for="(symbol, a) in {
                   staccato: '·',
@@ -2666,7 +3054,21 @@ watch(
                 {{ symbol }}
               </button></ScoreToolMenu
             >
-            <ScoreToolMenu label="Clefs" symbol="𝄞"
+            <ScoreToolMenu label="Dynamics" symbol="mf" class="glyphs dynamics"
+              ><template #icon
+                ><i class="dynamic-glyph" style="font-size: 15px">mf</i></template
+              ><button
+                v-for="[name, level] in dynamicLevels"
+                :key="name"
+                :title="`${name} (${level}) · click a staff at the beat`"
+                :aria-label="`${name} dynamic tool`"
+                :disabled="!canEdit"
+                @click="placeTool('dynamic', String(level))"
+              >
+                <i class="dynamic-glyph">{{ name }}</i>
+              </button></ScoreToolMenu
+            >
+            <ScoreToolMenu label="Clefs" symbol="𝄞" class="glyphs"
               ><button
                 v-for="(symbol, c) in {
                   treble: '𝄞',
@@ -2680,10 +3082,11 @@ watch(
                 :disabled="!canEdit"
                 @click="placeTool('clef', c)"
               >
-                {{ symbol }}<small>{{ c[0] }}</small>
+                <span class="clef-glyph" aria-hidden="true">{{ symbol }}</span
+                ><small>{{ c[0] }}</small>
               </button></ScoreToolMenu
             >
-            <ScoreToolMenu label="Time signatures" symbol="⁴₄"
+            <ScoreToolMenu label="Time signatures" symbol="⁴₄" class="glyphs"
               ><button
                 v-for="m in [
                   '2/4',
@@ -2701,7 +3104,9 @@ watch(
                 :disabled="!canEdit"
                 @click="placeTool('meter', m)"
               >
-                {{ m }}</button
+                <span class="meter-glyph" aria-hidden="true"
+                  ><b>{{ m.split('/')[0] }}</b><b>{{ m.split('/')[1] }}</b></span
+                ></button
               ><button
                 title="Custom time signature"
                 aria-label="Custom time signature"
@@ -2710,7 +3115,7 @@ watch(
                 …
               </button></ScoreToolMenu
             >
-            <ScoreToolMenu label="Bar tools and repeats" symbol="𝄆"
+            <ScoreToolMenu label="Bar tools and repeats" symbol="𝄆" class="glyphs"
               ><button
                 v-for="(symbol, style) in {
                   double: '𝄁',
@@ -2784,8 +3189,36 @@ watch(
                 }}</small>
               </button></ScoreToolMenu
             >
+            <ScoreToolMenu label="Phrasing" symbol="⌒" class="glyphs"
+              ><button
+                title="Slur · drag from a note to another note or into empty space"
+                aria-label="Slur tool"
+                :disabled="!canEdit"
+                @click="placeTool('phrase', 'slur')"
+              >
+                ⌒</button
+              ><button
+                title="Tie · drag from a note to the next note of the same pitch"
+                aria-label="Tie tool"
+                :disabled="!canEdit"
+                @click="placeTool('phrase', 'tie')"
+              >
+                ‿</button
+              ><button
+                title="Bracket · drag across a phrase"
+                aria-label="Bracket tool"
+                :disabled="!canEdit"
+                @click="placeTool('phrase', 'bracket')"
+              >
+                ⎴</button
+              ></ScoreToolMenu
+            >
             <small v-if="placement" role="status"
-              >Click to place {{ placement.value || placement.kind }}</small
+              >{{
+                placement.kind === 'phrase'
+                  ? `Drag to draw a ${placement.value} · Escape to finish`
+                  : `Click to place ${placement.value || placement.kind}`
+              }}</small
             >
           </template>
           <button
@@ -2926,7 +3359,45 @@ watch(
               </header>
               <template
                 v-if="performance ? p.view !== 'grid' : view === 'notation'"
-                ><div v-for="s in staves(p)" :key="s.id" class="ensemble-staff">
+                ><div class="ensemble-staves">
+                  <svg
+                    v-if="staves(p).length > 1"
+                    class="system-lines"
+                    :width="width"
+                    :height="staves(p).length * 190"
+                    aria-hidden="true"
+                  >
+                    <template v-for="line in systemLines(p)" :key="line.key">
+                      <line
+                        :x1="line.x"
+                        :x2="line.x"
+                        :y1="78"
+                        :y2="(staves(p).length - 1) * 190 + 118"
+                        :class="line.kind"
+                      />
+                      <line
+                        v-if="line.kind === 'final' || line.kind === 'end'"
+                        :x1="line.x + 4"
+                        :x2="line.x + 4"
+                        :y1="78"
+                        :y2="(staves(p).length - 1) * 190 + 118"
+                        class="thick"
+                      />
+                      <line
+                        v-if="line.kind === 'double'"
+                        :x1="line.x - 4"
+                        :x2="line.x - 4"
+                        :y1="78"
+                        :y2="(staves(p).length - 1) * 190 + 118"
+                        class="double"
+                      />
+                    </template>
+                    <path
+                      class="system-bracket"
+                      :d="`M8 78 L4 78 L4 ${(staves(p).length - 1) * 190 + 118} L8 ${(staves(p).length - 1) * 190 + 118}`"
+                    />
+                  </svg>
+                  <div v-for="(s, staffIndex) in staves(p)" :key="s.id" class="ensemble-staff">
                   <button
                     class="staff-name"
                     :aria-label="`Select staff ${s.name}`"
@@ -2955,6 +3426,7 @@ watch(
                       selectedElement ? elementKey(selectedElement) : null
                     "
                     :beat="beats[p.id] || 0"
+                    :first="staffIndex === 0"
                   />
                   <div
                     v-if="
@@ -2993,7 +3465,7 @@ watch(
                       :style="{ top: `${caretTop(s)}px` }"
                     /><small class="entry-caret-voice">v{{ caret.voice }}</small>
                   </div></div
-              ></template>
+              ></div></template>
               <ScorePianoRoll
                 v-else
                 :part="p"
@@ -3015,27 +3487,9 @@ watch(
                 @focus="focus"
                 @inspect="dialog = 'note'"
               />
-              <ScoreDynamics
-                :error="error"
+              <ScoreRampEditor
                 :part="p"
-                :scale="scale"
-                :anchors="
-                  (performance ? p.view === 'grid' : view === 'grid')
-                    ? []
-                    : anchors
-                "
-                :origin="
-                  (performance ? p.view === 'grid' : view === 'grid')
-                    ? 64
-                    : origin
-                "
-                :width="width"
-                :editable="canEdit"
-                :performance="performance"
-                @update="updatePart"
-              />
-              <MidiLanes
-                :part="p"
+                :beat="beats[p.id]"
                 :scale="scale"
                 :anchors="
                   (performance ? p.view === 'grid' : view === 'grid')
@@ -3062,6 +3516,29 @@ watch(
                 width: `${marquee.width}px`,
                 height: `${marquee.height}px`,
               }"
+            />
+            <svg
+              v-if="phraseDrag"
+              class="phrase-preview"
+              :width="width"
+              height="100%"
+              aria-hidden="true"
+            >
+              <path :d="phrasePreviewPath()" />
+            </svg>
+            <input
+              v-if="inlineText"
+              ref="inlineInput"
+              v-model="inlineText.value"
+              class="inline-text"
+              aria-label="Score text"
+              placeholder="Text…"
+              maxlength="256"
+              :style="{ left: `${inlineText.left}px`, top: `${inlineText.top}px` }"
+              @keydown.enter.prevent="commitInlineText"
+              @keydown.esc.prevent="inlineText = null"
+              @keydown.stop
+              @pointerdown.stop
             />
             <span
               v-if="ghost && !gesture"
@@ -3323,6 +3800,46 @@ watch(
           Marks are attached to this staff and appear on every player’s view of
           the part. Cues are shown bold with an arrow; lyrics sit below the staff.
         </p>
+      </div></ScoreDialog
+    >
+    <ScoreDialog
+      v-if="dialog === 'delete-part' && deleteTarget"
+      :title="`Delete ${deleteTarget.name}?`"
+      :error="error"
+      @close="
+        () => {
+          dialog = null
+          deleteTarget = null
+        }
+      "
+      ><div class="mark-dialog">
+        <p>
+          This removes the part, its {{ deleteTarget.notes.length }} note(s),
+          dynamics and MIDI lanes from the project for everyone. Graph nodes
+          routed from it lose their part assignment. Undo restores it while this
+          editor stays open.
+        </p>
+        <div class="mark-actions">
+          <button
+            type="button"
+            class="danger"
+            :disabled="!canEdit"
+            @click="deletePart"
+          >
+            Delete part
+          </button>
+          <button
+            type="button"
+            @click="
+              () => {
+                dialog = null
+                deleteTarget = null
+              }
+            "
+          >
+            Cancel
+          </button>
+        </div>
       </div></ScoreDialog
     >
     <ScoreContextMenu
@@ -3723,6 +4240,32 @@ watch(
   position: relative;
   background: #ffffff;
 }
+.ensemble-staves {
+  position: relative;
+}
+.system-lines {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.system-lines line {
+  stroke: #000;
+  stroke-width: 1;
+}
+.system-lines line.thick,
+.system-lines line.repeat {
+  stroke-width: 3;
+}
+.system-lines line.dashed {
+  stroke-dasharray: 4 4;
+}
+.system-lines .system-bracket {
+  fill: none;
+  stroke: #000;
+  stroke-width: 3;
+}
 .staff-name {
   padding: 0;
   border: 0;
@@ -3791,6 +4334,29 @@ watch(
 .mark-dialog p {
   color: #526267;
   margin: 0;
+}
+.phrase-preview {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+.phrase-preview path {
+  fill: none;
+  stroke: #087f8c;
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+}
+.inline-text {
+  position: absolute;
+  z-index: 6;
+  min-width: 140px;
+  padding: 2px 6px;
+  font: 12px sans-serif;
+  color: #111;
+  background: #fff;
+  border: 1px solid #087f8c;
+  border-radius: 3px;
 }
 .bar-region {
   position: absolute;
@@ -3985,6 +4551,35 @@ watch(
 }
 .notation-toolbar .score-tool-grid kbd {
   font-size: 10px;
+}
+/* Glyph menus: the symbol fills the cell instead of floating in whitespace. */
+.notation-toolbar .score-tool-menu.glyphs .score-tool-grid button {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 !important;
+}
+.notation-toolbar .score-tool-menu.glyphs .score-tool-grid button small {
+  font-size: 10px;
+  font-weight: 400;
+  align-self: flex-end;
+  margin-left: -4px;
+}
+.notation-toolbar .score-tool-grid .clef-glyph {
+  font-size: 44px;
+  line-height: 0.9;
+}
+.notation-toolbar .score-tool-menu.glyphs .score-tool-grid button {
+  overflow: visible;
+}
+.meter-glyph {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: serif;
+  font-size: 19px;
+  line-height: 0.85;
+  font-weight: 700;
 }
 .ensemble-scroll {
   padding-top: 46px;
@@ -4285,6 +4880,21 @@ watch(
 }
 .part-row.dragging {
   opacity: 0.5;
+}
+.part-shift-move {
+  transition: transform 0.18s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .part-shift-move {
+    transition: none;
+  }
+}
+.notation-toolbar .score-tool-menu.dynamics .score-tool-grid button {
+  font-size: 22px;
+}
+.dynamic-glyph {
+  font: italic 700 22px serif;
+  letter-spacing: -1px;
 }
 .part-order {
   display: flex;

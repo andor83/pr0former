@@ -40,11 +40,11 @@ test('visualizers preserve typed inputs and display multichannel block history, 
   await expect.poll(()=>latest?.sample).toBeGreaterThan(sample)
   expect(latest.visualizations['Audio display'].sequence-sequence).toBe(latest.sequence-telemetrySequence)
   // Hidden graphs must stop analysis, while the audio sample clock keeps moving.
-  await page.getByRole('button',{name:'Score & parts',exact:true}).click()
+  await page.getByRole('button',{name:'Score & Parts',exact:true}).click()
   await expect.poll(()=>latest?.visualizations).toBeUndefined()
   const hiddenSample=latest.sample
   await expect.poll(()=>latest?.sample).toBeGreaterThan(hiddenSample+48000/4)
-  await page.getByRole('button',{name:'Signal graph',exact:true}).click()
+  await page.getByRole('button',{name:'Signal Graph',exact:true}).click()
   await expect.poll(()=>latest?.visualizations?.['Audio display']?.sequence).toBeGreaterThan(sequence)
   expect(latest.visualizations['Audio display'].sequence-sequence).toBeLessThan(latest.sequence-telemetrySequence)
   await page.locator('.vue-flow__controls-fitview').click()

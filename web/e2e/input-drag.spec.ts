@@ -12,6 +12,8 @@ test('input drags move whole bundles, disconnect off-input, cancel, and preserve
   const point=async(id:string,port:string)=>{await expect(handle(id,port)).toHaveClass(/\bconnectable\b/);const box=(await handle(id,port).boundingBox())!;return {x:box.x+box.width/2,y:box.y+box.height/2}}
   const drag=async(from:{x:number;y:number},to:{x:number;y:number})=>{await page.mouse.move(from.x,from.y);await page.mouse.down();await page.mouse.move(to.x,to.y,{steps:12});await page.mouse.up()}
   await page.goto('/');await expect(handle('Old','in')).toBeVisible()
+  // Let the graph's fit-view settle so handle positions do not move mid-drag.
+  for(let previous=await handle('Old','in').boundingBox();;){await page.waitForTimeout(150);const next=await handle('Old','in').boundingBox();if(previous&&next&&previous.x===next.x&&previous.y===next.y)break;previous=next}
   await drag(await point('Old','in'),await point('New','in'))
   await expect.poll(async()=>(await load()).graph.edges.map((e:any)=>e.target)).toEqual(['New','New'])
   await page.getByRole('button',{name:'Undo',exact:true}).click()

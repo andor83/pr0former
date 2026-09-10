@@ -51,7 +51,7 @@ test('polyphonic synth MIDI inputs, FM waveforms, driven frequencies and multich
   await expect.poll(()=>peak('FM meter')).toBeLessThan(.001)
   await expect.poll(()=>peak('Sine meter')).toBeLessThan(.001)
   await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
-  await page.getByRole('button',{name:'Score & parts',exact:true}).click()
+  await page.getByRole('button',{name:'Score & Parts',exact:true}).click()
   await page.getByRole('button',{name:/^Part settings ·/}).click()
   await page.getByRole('button',{name:'Routing',exact:true}).click()
   await expect(page.getByLabel('Instrument / input').locator('option',{hasText:'Polyphonic FM synth'})).toHaveCount(1)

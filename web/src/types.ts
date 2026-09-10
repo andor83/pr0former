@@ -9,7 +9,9 @@ export interface GraphNode { io?: IoConfig | null; part_id?: string | null; libr
 export interface GraphEdge { id: string; source: string; source_port: string; target: string; target_port: string }
 export type MarkKind = 'text'|'rehearsal'|'cue'|'expression'|'tempo'|'lyric'
 export interface StaffMark {id:string;beat:number;kind:MarkKind;text:string}
-export interface Staff {marks?:StaffMark[]; hidden_rests?:{beat:number;duration:number;voice:number}[]; key_mode?:'major'|'minor'|null; clef_changes?:{beat:number;clef:string}[]; instrument_node?:string|null;midi_channel?:number|null;midi_port?:string|null; id:string; name:string; clef:string; key_signature?:string|null; transpose:number }
+export type CurveKind = 'slur'|'bracket'
+export interface StaffCurve {id:string;kind:CurveKind;start_note?:string|null;start_beat:number;end_note?:string|null;end_beat:number;height:number;lift:number}
+export interface Staff {curves?:StaffCurve[]; dynamics?:Dynamics|null; marks?:StaffMark[]; hidden_rests?:{beat:number;duration:number;voice:number}[]; key_mode?:'major'|'minor'|null; clef_changes?:{beat:number;clef:string}[]; instrument_node?:string|null;midi_channel?:number|null;midi_port?:string|null; id:string; name:string; clef:string; key_signature?:string|null; transpose:number }
 export interface RationalTime {numerator:number;denominator:number}
 export interface NoteNotation {onset?:RationalTime|null;written_duration?:RationalTime|null; tie_to?:string|null;slur_to?:string|null;grace_to?:string|null;articulation?:string|null;octave?:number; staff:string; step:number; alter:number; voice:number; base:number; dots:number; tuplet_actual:number; tuplet_normal:number }
 export interface Note { notation?: NoteNotation; id: string; pitch: number; beat: number; duration: number; velocity: number; rest: boolean; tied: boolean }

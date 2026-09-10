@@ -28,6 +28,7 @@ import {
 } from '../score'
 import { durationGlyphs } from '../notation'
 import { elementKey, type ScoreElement } from '../scoreElements'
+import { bracketPath, slurPath } from '../scoreCurves'
 const props = defineProps<{
   part: Part
   staff: Staff
@@ -44,6 +45,8 @@ const props = defineProps<{
   selectedElement?: string | null
   beat: number
   origin: number
+  /** First staff of its part: bar numbers, repeat counts and navigation text are drawn once per system. */
+  first?: boolean
 }>()
 const xAt = (beat: number) =>
   scoreX(beat, props.anchors, props.scale, props.origin)
@@ -94,6 +97,7 @@ const signature = computed(() => {
     props.beatUnit,
     props.viewStart,
     props.viewEnd,
+    props.first,
     anchors,
     props.anchors.at(-1),
     notes,
@@ -221,7 +225,7 @@ function render() {
           ctx.lineTo(x - 12, 118)
           ctx.stroke()
         }
-        ctx.fillText(String(measure.number), x - 8, 28)
+        if (props.first !== false) ctx.fillText(String(measure.number), x - 8, 28)
       })
     }
     props.timeline?.barlines?.forEach((b, index) => {
@@ -282,8 +286,8 @@ function render() {
         const bar = new Barline(Barline.type.REPEAT_BEGIN).setContext(ctx)
         bar.drawRepeatBar(stave, xAt(r.start) - 12, true)
         bar.drawRepeatBar(stave, xAt(r.end) - 12, false)
-        ctx.fillText(`×${r.times}`, xAt(r.end) - 28, 62)
-        if (r.first_ending != null) {
+        if (props.first !== false) ctx.fillText(`×${r.times}`, xAt(r.end) - 28, 62)
+        if (r.first_ending != null && props.first !== false) {
           const a = xAt(r.first_ending),
             b = xAt(r.end) - 12
           ctx.fillText('1.', a + 4, 54)
@@ -352,7 +356,7 @@ function render() {
       })
     }
     const nav = props.timeline?.navigation
-    if (nav) {
+    if (nav && props.first !== false) {
       grouped({ kind: 'navigation', beat: nav.at }, () => {
         ctx.fillText(nav.target === 0 ? 'D.C.' : 'D.S.', xAt(nav.at), 55)
         if (nav.target) ctx.fillText('Segno', xAt(nav.target), 55)
@@ -717,6 +721,103 @@ function render() {
         })
       }
     }
+    // Phrasing curves and brackets: note anchors follow the engraved heads,
+    // free ends sit at their beat above the staff. Selected ones get handles.
+    for (const curve of props.staff.curves || []) {
+      const startNote = curve.start_note ? previous.get(curve.start_note) : undefined,
+        endNote = curve.end_note ? previous.get(curve.end_note) : undefined
+      const startBeat = curve.start_note
+          ? props.part.notes.find((n) => n.id === curve.start_note)?.beat ?? curve.start_beat
+          : curve.start_beat,
+        endBeat = curve.end_note
+          ? props.part.notes.find((n) => n.id === curve.end_note)?.beat ?? curve.end_beat
+          : curve.end_beat
+      if (endBeat < lo || startBeat > hi) continue
+      const above = curve.kind === 'bracket' ? curve.height >= 0 : curve.height <= 0
+      const anchor = (
+        note: { note: StaveNote; index: number } | undefined,
+        beat: number,
+        end: boolean,
+      ) => {
+        if (note) {
+          const heads = note.note.getYs()
+          const x = end ? note.note.getNoteHeadEndX() : note.note.getNoteHeadBeginX()
+          const y = heads[note.index] ?? heads[0] ?? 98
+          return { x: (x + note.note.getNoteHeadBeginX()) / 2 + (end ? 4 : 4), y: above ? y - 9 : y + 9 }
+        }
+        return { x: xAt(beat), y: above ? 66 : 132 }
+      }
+      const a = anchor(startNote, startBeat, false),
+        b = anchor(endNote, endBeat, true)
+      a.y += curve.lift
+      b.y += curve.lift
+      const key = elementKey({ kind: 'curve', curve: curve.id, beat: startBeat, part: props.part.id, staff: props.staff.id })
+      const selectedCurve = props.selectedElement === key
+      grouped({ kind: 'curve', curve: curve.id, beat: startBeat }, () => {
+        ctx.save()
+        ctx.setLineWidth(curve.kind === 'slur' ? 1.8 : 1.4)
+        ctx.beginPath()
+        const d =
+          curve.kind === 'slur'
+            ? slurPath(a.x, a.y, b.x, b.y, curve.height)
+            : bracketPath(a.x, b.x, Math.min(a.y, b.y), curve.height)
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+        path.setAttribute('d', d)
+        path.setAttribute('fill', 'none')
+        path.setAttribute('stroke', '#000')
+        path.setAttribute('stroke-width', curve.kind === 'slur' ? '1.8' : '1.4')
+        ;(ctx as unknown as { parent: SVGElement }).parent.appendChild(path)
+        ctx.restore()
+      })
+      if (selectedCurve) {
+        const midX = (a.x + b.x) / 2,
+          midY = (a.y + b.y) / 2 + curve.height * (curve.kind === 'slur' ? 0.75 : 1)
+        const box = ctx.openGroup('curve-box')
+        ctx.save()
+        ctx.setStrokeStyle('#16803c')
+        ctx.setLineWidth(1)
+        ctx.beginPath()
+        const top = Math.min(a.y, b.y, midY) - 6,
+          bottom = Math.max(a.y, b.y, midY) + 6
+        ctx.rect(Math.min(a.x, b.x) - 6, top, Math.abs(b.x - a.x) + 12, bottom - top)
+        ctx.stroke()
+        ctx.restore()
+        ctx.closeGroup()
+        box?.setAttribute('pointer-events', 'none')
+        box?.setAttribute('stroke-dasharray', '3 3')
+        for (const [handle, x, y] of [
+          ['start', a.x, a.y],
+          ['end', b.x, b.y],
+          ['shape', midX, midY],
+        ] as const) {
+          const g = ctx.openGroup('curve-handle')
+          ctx.save()
+          ctx.setFillStyle('#fff')
+          ctx.setStrokeStyle('#16803c')
+          ctx.setLineWidth(1.5)
+          ctx.beginPath()
+          if (handle === 'shape') ctx.arc(x, y, 5, 0, Math.PI * 2, false)
+          else ctx.rect(x - 4.5, y - 4.5, 9, 9)
+          ctx.fill()
+          ctx.stroke()
+          ctx.restore()
+          ctx.closeGroup()
+          if (g) {
+            g.dataset.curveHandle = handle
+            g.dataset.curveId = curve.id
+            g.dataset.curvePart = props.part.id
+            g.dataset.curveStaff = props.staff.id
+            g.setAttribute('role', 'button')
+            g.setAttribute(
+              'aria-label',
+              `${handle === 'shape' ? 'Shape' : handle === 'start' ? 'Start' : 'End'} handle of ${curve.kind}`,
+            )
+            g.style.cursor = handle === 'shape' ? 'ns-resize' : 'ew-resize'
+            g.style.pointerEvents = 'all'
+          }
+        }
+      }
+    }
     for (const beam of beams)
       grouped(
         {
@@ -737,7 +838,7 @@ function render() {
       const owner = el.parentElement?.closest('[data-note-id]')
       if (owner) owner.appendChild(el)
       if (
-        ['repeat', 'navigation', 'rhythm', 'tie', 'slur', 'octave'].includes(
+        ['repeat', 'navigation', 'rhythm', 'tie', 'slur', 'octave', 'curve'].includes(
           JSON.parse(el.dataset.scoreElement!).kind,
         )
       ) {
@@ -774,7 +875,10 @@ watch(signature, scheduleRender)
 watch(() => props.selected, applySelection)
 watch(
   () => props.selectedElement,
-  () => {
+  (next, previous) => {
+    // Curves draw handles while selected, which needs a re-engrave.
+    if (next?.includes('"kind":"curve"') || previous?.includes('"kind":"curve"'))
+      scheduleRender()
     for (const el of host.value?.querySelectorAll<SVGElement>(
       '[data-score-element]',
     ) || []) {

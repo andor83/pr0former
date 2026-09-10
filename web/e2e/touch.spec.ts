@@ -136,7 +136,7 @@ test('touch library placement, scrolling and fullscreen swipe containment', asyn
     (window as any).__preventedSwipes = 0
     document.addEventListener('touchmove', event => { if (event.defaultPrevented) (window as any).__preventedSwipes++ })
   })
-  const heading = (await page.locator('.workspace-header').boundingBox())!
+  const heading = (await page.locator('.workspace-tabs').boundingBox())!
   const pull = { x: heading.x + heading.width / 2, y: heading.y + 20, id: 1 }
   await touch('touchStart', [pull])
   await touch('touchMove', [{ ...pull, y: pull.y + 100 }])

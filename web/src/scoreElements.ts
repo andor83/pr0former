@@ -12,6 +12,8 @@ export interface ScoreElement {
   rest?: Note
   /** Staff mark id for kind 'mark'. */
   mark?: string
+  /** Phrasing curve id for kind 'curve'. */
+  curve?: string
 }
 export const elementKey = (e: ScoreElement) => JSON.stringify(e)
 export function hideRest(project: Project, element: ScoreElement) {
@@ -49,6 +51,12 @@ export function deleteElement(
     p.staves = staves(p)
     const s = p.staves.find((s) => s.id === e.staff)
     if (s) s.marks = (s.marks || []).filter((m) => m.id !== e.mark)
+    return
+  }
+  if (e.kind === 'curve' && e.curve) {
+    p.staves = staves(p)
+    const s = p.staves.find((s) => s.id === e.staff)
+    if (s) s.curves = (s.curves || []).filter((c) => c.id !== e.curve)
     return
   }
   const n = p.notes.find((n) => n.id === e.note)
@@ -127,6 +135,20 @@ export function moveElement(
     if (m) {
       m.beat = Math.max(0, m.beat + delta)
       list!.sort((a, b) => a.beat - b.beat)
+    }
+    return
+  }
+  if (e.kind === 'curve' && e.curve) {
+    p.staves = staves(p)
+    const c = p.staves.find((s) => s.id === e.staff)?.curves?.find((c) => c.id === e.curve)
+    if (c) {
+      // Dragging the whole curve detaches it from its notes and shifts both ends.
+      const shift = Math.max(-c.start_beat, delta)
+      c.start_beat += shift
+      c.end_beat += shift
+      c.start_note = null
+      c.end_note = null
+      c.lift = Math.max(-200, Math.min(200, c.lift - step * 5))
     }
     return
   }

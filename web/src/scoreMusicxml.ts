@@ -102,11 +102,19 @@ export function exportScoreMusicXML(
             n.notation?.tie_to ? [n.notation.tie_to] : [],
           ),
         ),
-        slurTargets = new Map(
-          p.notes.flatMap((n) =>
+        curveSlurs = ss.flatMap((s) =>
+          (s.curves || []).filter((c) => c.kind === 'slur' && c.start_note && c.end_note),
+        ),
+        slurStarts = new Set([
+          ...p.notes.filter((n) => n.notation?.slur_to).map((n) => n.id),
+          ...curveSlurs.map((c) => c.start_note!),
+        ]),
+        slurTargets = new Map([
+          ...p.notes.flatMap((n) =>
             n.notation?.slur_to ? [[n.notation.slur_to, n.id] as const] : [],
           ),
-        )
+          ...curveSlurs.map((c) => [c.end_note!, c.start_note!] as const),
+        ])
       const bars = measures
         .map((m, i) => {
           let cursor = m.start,
@@ -124,7 +132,8 @@ export function exportScoreMusicXML(
           }
           const direction = (beat: number, body: string, sound = '') =>
             `<direction>${body}<offset>${Math.round((beat - m.start) * divisions)}</offset>${sound}</direction>`
-          for (const e of p.dynamics?.events || []) {
+          for (const [si, s] of ss.entries()) for (const e of (s.dynamics?.events ?? (si === 0 ? p.dynamics?.events : undefined)) || []) {
+            const staffTag = `<staff>${si + 1}</staff>`
             if (e.beat >= m.start && e.beat < m.end) {
               const label = (
                 {
@@ -141,12 +150,13 @@ export function exportScoreMusicXML(
               content += direction(
                 e.beat,
                 `<direction-type><dynamics>${label ? `<${label}/>` : `<other-dynamics>${e.start}</other-dynamics>`}</dynamics></direction-type>`,
-                `<sound dynamics="${(e.start / 127) * 100}"/>`,
+                `${staffTag}<sound dynamics="${(e.start / 127) * 100}"/>`,
               )
               if (e.duration > 0)
                 content += direction(
                   e.beat,
                   `<direction-type><wedge type="${e.end >= e.start ? 'crescendo' : 'diminuendo'}"/></direction-type>`,
+                  staffTag,
                 )
             }
             if (
@@ -158,7 +168,7 @@ export function exportScoreMusicXML(
               content += direction(
                 e.beat + e.duration,
                 '<direction-type><wedge type="stop"/></direction-type>',
-                `<sound dynamics="${(e.end / 127) * 100}"/>`,
+                `${staffTag}<sound dynamics="${(e.end / 127) * 100}"/>`,
               )
           }
           const nav = project.score?.navigation
@@ -256,7 +266,7 @@ export function exportScoreMusicXML(
                   : v.base,
               dots = exact?.length === 1 ? exact[0]!.dots : v.dots
             const ties = `${tieStop ? '<tie type="stop"/>' : ''}${tieStart ? '<tie type="start"/>' : ''}`
-            const notation = `${tieStop ? '<tied type="stop"/>' : ''}${tieStart ? '<tied type="start"/>' : ''}${v.slur_to ? '<slur type="start" number="1"/>' : ''}${slurTargets.has(n.id) ? '<slur type="stop" number="1"/>' : ''}${v.articulation ? `<articulations><${v.articulation === 'marcato' ? 'strong-accent' : v.articulation}/></articulations>` : ''}`
+            const notation = `${tieStop ? '<tied type="stop"/>' : ''}${tieStart ? '<tied type="start"/>' : ''}${slurStarts.has(n.id) ? '<slur type="start" number="1"/>' : ''}${slurTargets.has(n.id) ? '<slur type="stop" number="1"/>' : ''}${v.articulation ? `<articulations><${v.articulation === 'marcato' ? 'strong-accent' : v.articulation}/></articulations>` : ''}`
             content += `<note dynamics="${(n.velocity / 127) * 100}">${grace ? '<grace slash="yes"/>' : ''}${pitch}${grace ? '' : `<duration>${Math.round(duration * divisions)}</duration>`}${ties}<voice>${v.voice}</voice>${typeNames[base] ? `<type>${typeNames[base]}</type>` : ''}${'<dot/>'.repeat(dots)}${v.tuplet_actual !== v.tuplet_normal ? `<time-modification><actual-notes>${v.tuplet_actual}</actual-notes><normal-notes>${v.tuplet_normal}</normal-notes></time-modification>` : ''}<staff>${staff}</staff>${notation ? `<notations>${notation}</notations>` : ''}</note>`
             if (v.octave) content += octaveDirection('stop')
             cursor = start + (grace ? 0 : duration)
@@ -580,8 +590,9 @@ export function importScoreMusicXML(xml: string): {
             dynamic = sound?.hasAttribute('dynamics')
               ? Math.round((Number(sound.getAttribute('dynamics')) / 100) * 127)
               : values[label || ''] || 80
-            part.dynamics ??= { mode: 'velocity', controller: 11, events: [] }
-            part.dynamics.events.push({
+            const target = staff(num(item, 'staff', 1))
+            target.dynamics ??= { mode: 'velocity', controller: 11, events: [] }
+            target.dynamics.events.push({
               id: newId(),
               beat: at,
               duration: 0,
@@ -610,15 +621,16 @@ export function importScoreMusicXML(xml: string): {
             if (type === 'stop') {
               const from = wedges.get(id)
               if (from) {
-                part.dynamics ??= {
+                const target = staff(num(item, 'staff', 1))
+                target.dynamics ??= {
                   mode: 'velocity',
                   controller: 11,
                   events: [],
                 }
-                part.dynamics.events = part.dynamics.events.filter(
+                target.dynamics.events = target.dynamics.events.filter(
                   (e) => e.beat !== from.beat && e.beat !== at,
                 )
-                part.dynamics.events.push({
+                target.dynamics.events.push({
                   id: newId(),
                   beat: from.beat,
                   duration: at - from.beat,
@@ -724,7 +736,7 @@ export function importScoreMusicXML(xml: string): {
     part.loop_beats = measureStart || 4
     part.clef = staff(1).clef
     part.notes.sort((a, b) => a.beat - b.beat)
-    part.dynamics?.events.sort((a, b) => a.beat - b.beat)
+    for (const s of part.staves || []) s.dynamics?.events.sort((a, b) => a.beat - b.beat)
     if (part.notes.length > 10000)
       throw new Error('At most 10,000 notes per part')
     scoreLength = Math.max(scoreLength, part.loop_beats)
@@ -770,8 +782,20 @@ export function musicXMLExportWarnings(project: Project): string[] {
       'Raw MIDI lanes are omitted from MusicXML. Keep the native project to retain them.',
     )
   if (
+    project.parts.some((p) =>
+      (p.staves || []).some((s) =>
+        (s.curves || []).some((c) => c.kind === 'bracket' || !c.start_note || !c.end_note),
+      ),
+    )
+  )
+    warnings.push(
+      'Brackets and slurs with free ends are display marks without a MusicXML equivalent and are omitted.',
+    )
+  if (
     project.parts.some(
-      (p) => p.dynamics?.mode && p.dynamics.mode !== 'velocity',
+      (p) =>
+        (p.dynamics?.mode && p.dynamics.mode !== 'velocity') ||
+        (p.staves || []).some((s) => s.dynamics?.mode && s.dynamics.mode !== 'velocity'),
     )
   )
     warnings.push(

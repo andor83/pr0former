@@ -33,7 +33,7 @@ test('enabled graph runs audio and clocks while the editable show timeline stays
   const state=await(await page.request.get('/api/status')).json();expect(state.active_project).toBeNull();expect(state.graph_project).toBe(p.id)
   await page.getByRole('button',{name:'Monitor',exact:true}).click()
   await page.getByLabel('Monitor feed').selectOption('Cue')
-  await page.getByRole('button',{name:'Signal graph',exact:true}).click()
+  await page.getByRole('button',{name:'Signal Graph',exact:true}).click()
   await monitorToggle.click()
   await expect(monitorToggle).toHaveAttribute('aria-pressed','true')
   await expect(page.locator('.browser-monitor .mode-pill')).toHaveText('CONNECTED')

@@ -81,7 +81,7 @@ test('part note-on/off streams round-trip through OSC and play a polyphonic samp
   })).toBeGreaterThan(0)
   await page.getByRole('button', { name: 'Stop', exact: true }).click()
   await expect.poll(() => latest?.running).toBe(false)
-  await page.getByRole('button', { name: 'Signal graph', exact: true }).click()
+  await page.getByRole('button', { name: 'Signal Graph', exact: true }).click()
   await page.getByRole('button', { name: 'Edit Part notes', exact: true }).click()
   await page.getByLabel('Source part').selectOption('part-b')
   await expect.poll(async () => (await load()).graph.nodes.find((n: any) => n.id === 'Part notes').part_id).toBe('part-b')

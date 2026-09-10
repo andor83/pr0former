@@ -32,7 +32,7 @@ test('tempo map and staff marks: entry, editing, playback tempo and MusicXML rou
     }),
   )
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   const staff = page.locator('[data-score-part="part-1"] [data-staff-id]').first()
   // Tempo change at bar 2 via the measure menu.
   await staff.click({ position: { x: 700, y: 60 }, button: 'right' })

@@ -82,8 +82,21 @@ impl Sequencer {
                 part.notes.clear();
                 part.automation.clear();
                 part.dynamics = None;
+                for s in &mut part.staves {
+                    s.dynamics = None;
+                }
             }
             let original = part.notes.clone();
+            // Per-staff dynamics take precedence over the legacy part-level dynamics.
+            let staves = part.staves.clone();
+            let part_dynamics = part.dynamics.clone();
+            let dynamics_for = |n: &pr0_core::Note| -> Option<pr0_core::score::Dynamics> {
+                n.notation
+                    .as_ref()
+                    .and_then(|v| staves.iter().find(|s| s.id == v.staff))
+                    .and_then(|s| s.dynamics.clone())
+                    .or_else(|| part_dynamics.clone())
+            };
             let by_id: std::collections::BTreeMap<_, _> =
                 original.iter().map(|n| (n.id.as_str(), n)).collect();
             let mut grace_totals = std::collections::BTreeMap::<&str, f64>::new();
@@ -118,7 +131,7 @@ impl Sequencer {
                         note.duration += target.duration;
                         current = target;
                     }
-                    if let Some(d) = &part.dynamics {
+                    if let Some(d) = dynamics_for(n) {
                         note.velocity = d.velocity(note.beat, note.velocity);
                     }
                     if let Some(v) = &n.notation {
@@ -273,6 +286,17 @@ impl Sequencer {
                                         )
                                     }),
                             )
+                            .chain(p.staves.iter().filter_map(|s| {
+                                s.dynamics
+                                    .as_ref()
+                                    .filter(|d| d.mode != pr0_core::score::DynamicsMode::Velocity)
+                                    .map(|d| {
+                                        let mut lane =
+                                            d.lane(s.midi_channel.unwrap_or(p.midi_channel));
+                                        lane.id = format!("score-dynamics-{}", s.id);
+                                        crate::score_automation::Automation::generated(lane)
+                                    })
+                            }))
                             .collect(),
                         score_spans: part_spans.get(&p.id).cloned().unwrap_or_default(),
                         looping: !autoplay || timeline.is_none_or(|s| s.loop_score),
@@ -1423,6 +1447,90 @@ mod score_tests {
         assert!(!seq.lanes[0].playing);
         assert!(seq.lanes[0].looping);
         assert_eq!(seq.lanes[0].length, 8.);
+    }
+    #[test]
+    fn staff_dynamics_scale_only_that_staff_and_override_part_dynamics() {
+        let mut p = pr0_core::demo_project("dyn".into(), "dyn".into(), pr0_core::Mode::Structured);
+        let part = &mut p.parts[0];
+        part.notes.truncate(2);
+        part.notes[0].beat = 0.;
+        part.notes[1].beat = 0.;
+        part.notes[1].pitch = 67;
+        let staff = |id: &str| pr0_core::score::Staff {
+            hidden_rests: vec![],
+            key_mode: None,
+            clef_changes: vec![],
+            instrument_node: None,
+            midi_channel: None,
+            midi_port: None,
+            marks: vec![],
+            dynamics: None,
+            curves: vec![],
+            id: id.into(),
+            name: id.into(),
+            clef: "treble".into(),
+            key_signature: None,
+            transpose: 0,
+        };
+        let mut upper = staff("upper");
+        upper.dynamics = Some(Dynamics {
+            mode: DynamicsMode::Velocity,
+            controller: 11,
+            events: vec![AutomationEvent {
+                id: "loud".into(),
+                beat: 0.,
+                duration: 0.,
+                start: 127.,
+                end: 127.,
+                curve: Curve::Linear,
+            }],
+        });
+        part.staves = vec![upper, staff("lower")];
+        part.dynamics = Some(Dynamics {
+            mode: DynamicsMode::Velocity,
+            controller: 11,
+            events: vec![AutomationEvent {
+                id: "soft".into(),
+                beat: 0.,
+                duration: 0.,
+                start: 45.,
+                end: 45.,
+                curve: Curve::Linear,
+            }],
+        });
+        for (i, staff) in ["upper", "lower"].into_iter().enumerate() {
+            let n = &mut part.notes[i];
+            n.velocity = 90;
+            n.duration = 1.;
+            n.notation = Some(Notation {
+                onset: None,
+                written_duration: None,
+                tie_to: None,
+                slur_to: None,
+                grace_to: None,
+                articulation: None,
+                octave: 0,
+                staff: staff.into(),
+                step: 28 + i as i16 * 4,
+                alter: 0,
+                voice: 1,
+                base: 1.,
+                dots: 0,
+                tuplet_actual: 1,
+                tuplet_normal: 1,
+            });
+        }
+        assert!(p.validate().is_ok(), "{:?}", p.validate());
+        let seq = Sequencer::new(&p);
+        let attacks: Vec<u8> = seq.lanes[0]
+            .events
+            .iter()
+            .filter(|e| e.velocity > 0)
+            .map(|e| e.velocity)
+            .collect();
+        assert_eq!(attacks.len(), 2);
+        assert!(attacks.contains(&127), "upper staff follows its own dynamics: {attacks:?}");
+        assert!(attacks.contains(&45), "lower staff falls back to part dynamics: {attacks:?}");
     }
     #[test]
     fn dynamics_change_attacks_without_changing_authored_notes() {

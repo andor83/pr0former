@@ -36,7 +36,7 @@ test('caret keyboard entry, letters, ties, voices and Finale-style measure editi
       (a, b) => a.beat - b.beat || a.pitch - b.pitch,
     )
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   const staff = page
     .locator('[data-score-part="part-1"] [data-staff-id]')
     .first()

@@ -29,7 +29,7 @@ test('syncopation, point tools, mixing and preparation playback', async ({
   const url = `/api/projects/${project.id}`
   const read = async () => (await (await page.request.get(url)).json()).project
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   const staff = page
     .locator('[data-score-part="part-1"] [data-staff-id]')
     .first()

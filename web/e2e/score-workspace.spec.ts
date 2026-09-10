@@ -39,7 +39,7 @@ test('score toolbar, multi-staff persistence, selection and player filtering', a
     (await (await page.request.get(`/api/projects/${project.id}`)).json())
       .project
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   const score = page.getByRole('region', { name: 'Score workspace' })
   await expect(page.locator('[data-score-part]')).toHaveCount(3)
   await page.getByRole('button', { name: 'Write', exact: true }).click()
@@ -245,8 +245,11 @@ test('shared score meter/repeats and MIDI automation reach the graph and round-t
     }),
   )
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
-  await expect(page.getByText('Expression', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
+  await page.getByRole('button', { name: /^▸ Dynamics & ramps/ }).click()
+  await expect(
+    page.getByRole('checkbox', { name: 'Show Expression · CC11', exact: true }),
+  ).toBeVisible()
   await page.getByLabel('Count in', { exact: true }).selectOption('0')
   await page.getByRole('button', { name: 'Play', exact: true }).click()
   await expect
@@ -381,8 +384,11 @@ test('multi-staff MusicXML preserves voices, ties, grace, tuplets and spelling; 
   expect(saved.ok(), await saved.text()).toBe(true)
   project = await saved.json()
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   await expect(page.locator('[data-staff-id]')).toHaveCount(2)
+  // Multi-staff parts get a system bracket and barlines joining the staves.
+  await expect(page.locator('.system-lines .system-bracket')).toBeVisible()
+  expect(await page.locator('.system-lines line').count()).toBeGreaterThanOrEqual(2)
   await expect(page.getByRole('alert')).toHaveCount(0)
   const downloadPromise = page.waitForEvent('download')
   await page.getByRole('button', { name: 'MusicXML', exact: true }).click()
@@ -485,7 +491,7 @@ test('multiple-note commands, marquee deletion and visual MIDI curve editing per
   const read = async () =>
     (await (await page.request.get(`/api/projects/${p.id}`)).json()).project
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   const one = page.locator('[data-note-id="one"]'),
     two = page.locator('[data-note-id="two"]')
   await one.click()
@@ -530,37 +536,33 @@ test('multiple-note commands, marquee deletion and visual MIDI curve editing per
   await expect.poll(async () => (await read()).parts[0].notes.length).toBe(0)
   await page.getByRole('button', { name: 'Undo', exact: true }).click()
   await expect.poll(async () => (await read()).parts[0].notes.length).toBe(2)
-  await page
-    .getByRole('button', { name: 'MIDI lanes · 0', exact: false })
-    .click()
-  await page.getByRole('button', { name: '＋ MIDI lane', exact: true }).click()
+  // Continuous MIDI lanes are managed inside the Dynamics & ramps graph.
+  await page.getByRole('button', { name: /^▸ Dynamics & ramps/ }).click()
+  await page.getByRole('button', { name: 'Add MIDI lane', exact: true }).click()
+  await page.getByLabel('Lane name', { exact: true }).fill('Bend')
+  await page.getByLabel('Message', { exact: true }).selectOption('bend')
+  await page.getByRole('button', { name: 'Add lane', exact: true }).click()
   await expect
     .poll(async () => (await read()).parts[0].automation?.length)
     .toBe(1)
-  await page
-    .getByText('MIDI input · lane and event settings', { exact: true })
-    .click()
-  await page
-    .getByRole('combobox', { name: 'Message', exact: true })
-    .selectOption('bend')
-  await expect
-    .poll(async () => (await read()).parts[0].automation[0].message)
-    .toBe('bend')
-  await page
-    .getByLabel('MIDI drawing tool', { exact: true })
-    .selectOption('ramp')
-  await page
-    .getByLabel('New MIDI curve', { exact: true })
-    .selectOption('s_curve')
-  const lane = page.locator('svg[aria-label$="MIDI lane"]')
-  await lane.click({ position: { x: 230, y: 65 } })
+  expect((await read()).parts[0].automation[0].message).toBe('bend')
+  // The new lane becomes the active line; clicking the graph adds its first point.
+  const graph = page.getByRole('application', { name: 'Dynamics and ramp graph' })
+  const graphBox = (await graph.boundingBox())!
+  await graph.click({ position: { x: 230, y: graphBox.height * 0.3 } })
   await expect
     .poll(async () => (await read()).parts[0].automation?.[0]?.events.length)
     .toBe(1)
   const event = (await read()).parts[0].automation?.[0]?.events[0]
-  expect(event.curve).toBe('s_curve')
-  expect(event.duration).toBe(1)
-  await expect(lane.locator('[data-midi-event] path')).toBeVisible()
+  expect(event.duration).toBe(0)
+  expect(event.start).toBeGreaterThan(8000)
+  await expect(graph.getByRole('button', { name: /^Bend · Bend \d+ at beat/ })).toBeVisible()
+  // Lane settings can rename and delete the lane.
+  await page.getByRole('button', { name: 'Lane settings: Bend', exact: true }).click()
+  await page.getByRole('button', { name: 'Delete lane', exact: true }).click()
+  await expect
+    .poll(async () => (await read()).parts[0].automation?.length ?? 0)
+    .toBe(0)
   await expect(page.getByRole('alert')).toHaveCount(0)
   await page.screenshot({ path: '../test-results/score-midi-curves.png' })
 })
@@ -648,7 +650,7 @@ test('compact score dialogs, editable marks and drag-based piano roll', async ({
   const read = async () =>
     (await (await page.request.get(`/api/projects/${p.id}`)).json()).project
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   const viewer = page.locator('.score-main'),
     toolbar = page.getByRole('toolbar', { name: 'Notation tools' })
   await expect(viewer.locator('.notation-toolbar')).toBeVisible()
@@ -691,7 +693,7 @@ test('compact score dialogs, editable marks and drag-based piano roll', async ({
     .poll(async () => (await read()).parts[0].staves?.[0]?.hidden_rests?.length)
     .toBe(1)
   await page.reload()
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   expect((await read()).parts[0].staves?.[0]?.hidden_rests?.length).toBe(1)
   const authored = page.locator('[data-note-id="rest-note"]')
   await authored.click()
@@ -714,25 +716,31 @@ test('compact score dialogs, editable marks and drag-based piano roll', async ({
   await page.getByRole('button', { name: 'Update repeat', exact: true }).click()
   await expect.poll(async () => (await read()).score?.repeats?.[0]?.times).toBe(3)
   await page.keyboard.press('Escape')
-  const dynamic = page.getByRole('button', {
-    name: 'Dynamic mp at beat 2',
-    exact: true,
-  })
-  await dynamic.locator('text').first().dblclick()
-  await expect(
-    page.getByRole('dialog', { name: 'Dynamics', exact: true }),
-  ).toBeVisible()
-  await page.getByLabel('Duration', { exact: true }).fill('2')
-  await page.getByLabel('Duration', { exact: true }).press('Tab')
-  await expect
-    .poll(async () => (await read()).parts[0].dynamics?.events[0].duration)
-    .toBe(2)
-  await page.keyboard.press('Escape')
-  await dynamic.locator('text').first().click()
+  // Dynamics are a breakpoint graph below the staff: the fixture ramp 64→96 is two points.
+  await page.getByRole('button', { name: /^▸ Dynamics & ramps/ }).click()
+  const graph = page.getByRole('application', { name: 'Dynamics and ramp graph' })
+  await expect(graph).toBeVisible()
+  const point = graph.getByRole('button', { name: 'Velocity 96 f at beat 3', exact: true })
+  await expect(point).toBeVisible()
+  await point.click()
   await page.keyboard.press('Backspace')
+  // Editing writes the first staff's own dynamics and retires the legacy part-level copy.
   await expect
-    .poll(async () => (await read()).parts[0].dynamics?.events.length)
-    .toBe(0)
+    .poll(async () => (await read()).parts[0].staves[0].dynamics?.events)
+    .toEqual([{ id: 'dyn', beat: 1, duration: 0, start: 64, end: 64, curve: 'linear' }])
+  expect((await read()).parts[0].dynamics).toBeFalsy()
+  // Clicking the graph adds a point on the active (velocity) line.
+  const graphBox = (await graph.boundingBox())!
+  await graph.click({ position: { x: 700, y: graphBox.height / 2 } })
+  await expect.poll(async () => (await read()).parts[0].staves[0].dynamics?.events.length).toBe(2)
+  // A written dynamic from the toolbar adds a rapid ramp into its level.
+  await page.getByLabel('Dynamics', { exact: true }).click()
+  await page.getByRole('button', { name: 'ff dynamic tool', exact: true }).click()
+  await page.locator('[data-score-part] [data-staff-id]').first().click({ position: { x: 1000, y: 118 } })
+  await expect
+    .poll(async () => (await read()).parts[0].staves[0].dynamics?.events.some((e: any) => e.end === 112 && e.duration > 0 && e.duration <= 0.125))
+    .toBe(true)
+  await expect(graph.getByRole('button', { name: /^Velocity 112 ff at beat/ })).toBeVisible()
   await page.getByRole('button', { name: 'Piano roll', exact: true }).click()
   await expect(
     toolbar.getByRole('button', { name: 'Quarter note (5)', exact: true }),
@@ -896,7 +904,7 @@ test('centered paper toolbar, clean beaming and structural bar edits persist acr
   const read = async () =>
     (await (await page.request.get(`/api/projects/${p.id}`)).json()).project
   await page.goto('/')
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   await expect(page.locator('.score-actions')).toHaveCount(0)
   await expect(page.locator('.score-view-tools')).toHaveCount(0)
   const toolbar = page.getByRole('toolbar', { name: 'Notation tools' }),
@@ -991,7 +999,7 @@ test('centered paper toolbar, clean beaming and structural bar edits persist acr
     .poll(async () => (await read()).parts[0].staves?.[0]?.clef_changes || [])
     .toEqual([])
   await page.reload()
-  await page.getByRole('button', { name: 'Score & parts', exact: true }).click()
+  await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   expect((await read()).score.length).toBe(16)
   await expect(page.getByRole('alert')).toHaveCount(0)
 })
