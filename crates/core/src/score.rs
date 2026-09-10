@@ -34,7 +34,7 @@ pub struct Staff {
     pub transpose: i8,
 }
 pub const MARK_KINDS: [&str; 6] = ["text", "rehearsal", "cue", "expression", "tempo", "lyric"];
-pub const CURVE_KINDS: [&str; 2] = ["slur", "bracket"];
+pub const CURVE_KINDS: [&str; 4] = ["slur", "bracket", "crescendo", "decrescendo"];
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StaffCurve {
     pub id: String,
@@ -48,9 +48,22 @@ pub struct StaffCurve {
     /// Curvature (slur) or hook depth (bracket) in staff pixels; negative arcs upward.
     #[serde(default)]
     pub height: f64,
-    /// Vertical offset from the default placement in staff pixels.
+    /// Vertical offset of the start from its default placement in staff pixels.
     #[serde(default)]
     pub lift: f64,
+    /// Vertical offset of the end; ends may sit at different heights.
+    #[serde(default)]
+    pub end_lift: f64,
+    /// An authored instantaneous start mark temporarily represented by this hairpin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_dynamic: Option<DynamicMark>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DynamicMark {
+    pub id: String,
+    pub start: f64,
+    pub end: f64,
+    pub curve: Curve,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StaffMark {
@@ -158,6 +171,14 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
         }
         let mut curve_ids = BTreeSet::new();
         for c in &s.curves {
+            if let Some(mark) = &c.start_dynamic {
+                if !["crescendo", "decrescendo"].contains(&c.kind.as_str())
+                    || mark.id.is_empty() || mark.id.len() > 120
+                    || !mark.start.is_finite() || !(0. ..=127.).contains(&mark.start)
+                    || !mark.end.is_finite() || !(0. ..=127.).contains(&mark.end) {
+                    return Err("Invalid retained hairpin dynamic".into());
+                }
+            }
             let note_ok = |id: &Option<String>| {
                 id.as_ref()
                     .is_none_or(|id| part.notes.iter().any(|n| &n.id == id))
@@ -175,6 +196,8 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
                 || c.height.abs() > 200.
                 || !c.lift.is_finite()
                 || c.lift.abs() > 200.
+                || !c.end_lift.is_finite()
+                || c.end_lift.abs() > 200.
                 || !note_ok(&c.start_note)
                 || !note_ok(&c.end_note)
             {
@@ -383,6 +406,8 @@ mod tests {
             end_beat,
             height: -20.,
             lift: 0.,
+            end_lift: 0.,
+            start_dynamic: None,
         };
         p.parts[0].staves[0].curves = vec![curve(Some(note.clone()), 4., "slur")];
         assert!(p.validate().is_ok(), "{:?}", p.validate());
@@ -396,6 +421,13 @@ mod tests {
             p.parts[0].staves[0].curves = vec![bad];
             assert!(p.validate().is_err());
         }
+        let mut hairpin = curve(None, 4., "crescendo");
+        hairpin.start_dynamic = Some(DynamicMark { id: "p".into(), start: 48., end: 48., curve: Curve::Step });
+        p.parts[0].staves[0].curves = vec![hairpin.clone()];
+        assert!(p.validate().is_ok());
+        hairpin.start_dynamic.as_mut().unwrap().start = f64::NAN;
+        p.parts[0].staves[0].curves = vec![hairpin];
+        assert!(p.validate().is_err());
         let mut deep = curve(None, 4., "slur");
         deep.height = 500.;
         p.parts[0].staves[0].curves = vec![deep];

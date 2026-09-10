@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { Check, Trash2, X } from '@lucide/vue'
 import type { AutomationLane, Part } from '../types'
 import { scoreX, scoreBeat, staves, type ScoreAnchor } from '../score'
 import {
   addLane,
+  automationValue,
+  eventsFromNodes,
+  moveNode,
   dynamicName,
   laneLabel,
   laneMax,
@@ -41,6 +45,7 @@ interface Line {
   name: string
   color: string
   max: number
+  initial: number
   nodes: RampNode[]
 }
 const velocityColors = ['#087f8c', '#0f766e', '#1d4ed8', '#4338ca', '#0e7490', '#15803d', '#047857', '#1e40af']
@@ -52,6 +57,7 @@ const lines = computed<Line[]>(() => {
       name: list.length > 1 ? `Velocity · ${s.name}` : 'Velocity',
       color: velocityColors[i % velocityColors.length]!,
       max: 127,
+      initial: 90,
       nodes: nodesFromEvents(staffDynamicsEvents(props.part, s)),
     })),
     ...(props.part.automation || [])
@@ -61,15 +67,18 @@ const lines = computed<Line[]>(() => {
         name: laneLabel(l),
         color: palette[i % palette.length]!,
         max: laneMax(l),
+        initial: l.initial ?? (l.message === 'bend' ? 8192 : 0),
         nodes: nodesFromEvents(l.events),
       })),
   ]
 })
 const firstVelocity = computed(() => velocityLine(staves(props.part)[0]?.id ?? ''))
 const open = ref(false),
-  visible = ref(new Set<string>([velocityLine(staves(props.part)[0]?.id ?? '')])),
   active = ref(velocityLine(staves(props.part)[0]?.id ?? '')),
-  selected = ref<{ line: string; beat: number } | null>(null)
+  selected = ref<{ line: string; beat: number } | null>(null),
+  hovered = ref<{ line: string; beat: number } | null>(null)
+/** Only the active line is drawn; the chips pick which one. */
+const visible = computed(() => new Set([active.value]))
 /** Inline lane settings: `null` closed, `'new'` for a lane being added, else the lane id. */
 const laneForm = ref<'new' | string | null>(null)
 const laneDraft = ref<LaneSettings>({ name: 'Expression', channel: 1, message: 'cc', number: 11 })
@@ -91,7 +100,6 @@ function saveLane() {
     const next = addLane(props.part, settings)
     const created = next.automation!.at(-1)!.id
     emit('update', next)
-    visible.value = new Set([...visible.value, created])
     active.value = created
   } else emit('update', updateLane(props.part, id, settings))
   laneForm.value = null
@@ -100,9 +108,6 @@ function deleteLane() {
   const id = laneForm.value
   if (!id || id === 'new' || !props.editable) return
   emit('update', removeLane(props.part, id))
-  const set = new Set(visible.value)
-  set.delete(id)
-  visible.value = set
   if (active.value === id) active.value = firstVelocity.value
   laneForm.value = null
 }
@@ -110,32 +115,59 @@ const svg = ref<SVGSVGElement>()
 let drag: { line: Line; from: RampNode; node: RampNode; moved: boolean; pointer: number } | null =
   null
 const preview = ref<RampNode | null>(null)
+watch(lines, next => {
+  if (!next.some(line => line.id === active.value)) {
+    active.value = next[0]?.id ?? ''
+    selected.value = null
+    hovered.value = null
+    drag = null
+    preview.value = null
+  }
+})
 const yOf = (value: number, max: number) => pad + (1 - value / max) * (height - 2 * pad)
 const valueAt = (y: number, max: number) =>
   Math.max(0, Math.min(max, Math.round((1 - (y - pad) / (height - 2 * pad)) * max)))
-function toggleVisible(id: string) {
-  const set = new Set(visible.value)
-  if (set.has(id)) {
-    set.delete(id)
-    if (active.value === id) active.value = [...set][0] ?? firstVelocity.value
-  } else {
-    set.add(id)
-    active.value = id
+function showLine(id: string) {
+  active.value = id
+  if (selected.value && selected.value.line !== id) selected.value = null
+}
+/** Value badge for the point being dragged, else the hovered point. */
+const badge = computed(() => {
+  const d = drag
+  if (d && preview.value) {
+    const line = d.line
+    return { x: xAt(preview.value.beat), y: yOf(preview.value.value, line.max), text: badgeText(line, preview.value.value) }
   }
-  visible.value = set
+  const h = hovered.value
+  const line = lines.value.find((l) => l.id === h?.line)
+  const node = line?.nodes.find((n) => Math.abs(n.beat - h!.beat) < 1e-9)
+  if (!line || !node) return null
+  return { x: xAt(node.beat), y: yOf(node.value, line.max), text: badgeText(line, node.value) }
+})
+function badgeText(line: Line, value: number) {
+  const name = line.id.startsWith('velocity:') ? dynamicName(value) : undefined
+  return name ? `${value} · ${name}` : String(value)
 }
 function shownNodes(line: Line) {
   const d = drag
   if (d && d.line.id === line.id && preview.value)
-    return setNode(removeNode(line.nodes, d.from.beat), preview.value.beat, preview.value.value)
+    { try { return moveNode(line.nodes, d.from.beat, preview.value.beat, preview.value.value) } catch { return line.nodes } }
   return line.nodes
 }
 function path(line: Line) {
   const nodes = shownNodes(line)
   if (!nodes.length) return ''
-  const points = nodes.map((n) => `${xAt(n.beat)},${yOf(n.value, line.max)}`)
-  // Hold the last value to the end of the visible width.
-  return `M${xAt(0)},${yOf(nodes[0]!.value, line.max)} L${points.join(' L')} L${props.width},${yOf(nodes.at(-1)!.value, line.max)}`
+  const events = eventsFromNodes(nodes)
+  const points = [`${xAt(0)},${yOf(line.initial, line.max)}`]
+  for (const e of events) {
+    points.push(`${xAt(e.beat)},${yOf(automationValue(events, e.beat-1e-9, line.initial), line.max)}`)
+    const steps = e.duration > 0 ? 24 : 1
+    for (let i=0;i<=steps;i++) {
+      const beat = e.beat + e.duration*i/steps
+      points.push(`${xAt(beat)},${yOf(automationValue(events, beat, line.initial), line.max)}`)
+    }
+  }
+  return `M${points.join(' L')} L${props.width},${yOf(automationValue(events, Infinity, line.initial), line.max)}`
 }
 function localPoint(event: PointerEvent) {
   const rect = svg.value!.getBoundingClientRect()
@@ -182,8 +214,8 @@ function pointerUp(event: PointerEvent) {
   const target = preview.value
   preview.value = null
   if (!d.moved || !target) return
-  const others = removeNode(d.line.nodes, d.from.beat)
-  commit(d.line, setNode(others, target.beat, target.value))
+  if (d.line.nodes.some(n => n.beat === target.beat && n.beat !== d.from.beat)) return
+  commit(d.line, moveNode(d.line.nodes, d.from.beat, target.beat, target.value))
   selected.value = { line: d.line.id, beat: target.beat }
 }
 function nudge(delta: number) {
@@ -208,7 +240,15 @@ function keydown(event: KeyboardEvent) {
     selected.value = null
     event.preventDefault()
     event.stopPropagation()
-  } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End') {
+    const line = lines.value.find(l => l.id === s.line)
+    if (!line) return
+    const index = line.nodes.findIndex(n => Math.abs(n.beat-s.beat) < 1e-9)
+    const target = event.key === 'Home' ? 0 : event.key === 'End' ? line.nodes.length-1 : Math.max(0, Math.min(line.nodes.length-1, index + (event.key === 'ArrowRight' ? 1 : -1)))
+    const node = line.nodes[target]
+    if (node) { selected.value = { line: line.id, beat: node.beat }; void nextTick(() => svg.value?.querySelector<SVGElement>(`[data-node-line="${line.id}"][data-node-beat="${node.beat}"]`)?.focus()) }
+    event.preventDefault(); event.stopPropagation()
+  } else if (event.key === 'ArrowUp'  || event.key === 'ArrowDown') {
     nudge((event.key === 'ArrowUp' ? 1 : -1) * (event.shiftKey ? 10 : 1))
     event.preventDefault()
     event.stopPropagation()
@@ -242,17 +282,12 @@ const selectedValue = computed(() => {
             :key="line.id"
             type="button"
             class="ramp-chip"
-            :class="{ active: active === line.id && visible.has(line.id) }"
+            :class="{ active: active === line.id }"
             :style="{ '--line': line.color }"
-            role="checkbox"
-            :aria-checked="visible.has(line.id)"
-            :aria-label="`Show ${line.name}`"
-            :title="visible.has(line.id) ? `Hide ${line.name} (click again to edit)` : `Show ${line.name}`"
-            @click="
-              visible.has(line.id) && active !== line.id
-                ? (active = line.id)
-                : toggleVisible(line.id)
-            "
+            :aria-pressed="active === line.id"
+            :aria-label="line.name"
+            :title="`Show and edit ${line.name}`"
+            @click="showLine(line.id)"
           >
             <i aria-hidden="true"></i>{{ line.name }}
           </button>
@@ -306,16 +341,35 @@ const selectedValue = computed(() => {
               max="16"
               aria-label="Lane channel"
           /></label>
-          <button type="submit">{{ laneForm === 'new' ? 'Add lane' : 'Save lane' }}</button>
-          <button
-            v-if="laneForm !== 'new'"
-            type="button"
-            class="danger"
-            @click="deleteLane"
-          >
-            Delete lane
-          </button>
-          <button type="button" @click="laneForm = null">Cancel</button>
+          <span class="lane-form-actions">
+            <button
+              type="submit"
+              class="icon"
+              :aria-label="laneForm === 'new' ? 'Add lane' : 'Save lane'"
+              :title="laneForm === 'new' ? 'Add lane' : 'Save lane'"
+            >
+              <Check :size="13" />
+            </button>
+            <button
+              v-if="laneForm !== 'new'"
+              type="button"
+              class="icon danger"
+              aria-label="Delete lane"
+              title="Delete lane"
+              @click="deleteLane"
+            >
+              <Trash2 :size="13" />
+            </button>
+            <button
+              type="button"
+              class="icon"
+              aria-label="Cancel"
+              title="Cancel"
+              @click="laneForm = null"
+            >
+              <X :size="13" />
+            </button>
+          </span>
         </form>
         <small v-if="!laneForm" class="ramp-hint">{{
           selectedValue
@@ -338,7 +392,7 @@ const selectedValue = computed(() => {
       @pointerdown="pointerDown"
       @pointermove="pointerMove"
       @pointerup="pointerUp"
-      @pointercancel="pointerUp"
+      @pointercancel="drag = null; preview = null"
       @keydown="keydown"
     >
       <line
@@ -371,10 +425,16 @@ const selectedValue = computed(() => {
               selected: selected?.line === line.id && Math.abs(selected.beat - n.beat) < 1e-9,
             }"
             role="button"
+            :tabindex="editable ? 0 : -1"
+            @focus="selected = { line: line.id, beat: n.beat }"
+            @keydown.enter.prevent.stop="selected = { line: line.id, beat: n.beat }"
+            @keydown.space.prevent.stop="selected = { line: line.id, beat: n.beat }"
             :aria-label="`${line.name} ${n.value}${dynamicName(n.value) && line.id.startsWith('velocity:') ? ' ' + dynamicName(n.value) : ''} at beat ${n.beat + 1}`"
             :transform="`translate(${xAt(n.beat)} ${yOf(n.value, line.max)})`"
+            @pointerenter="hovered = { line: line.id, beat: n.beat }"
+            @pointerleave="hovered = null"
           >
-            <circle r="9" class="hit" />
+            <circle r="14" class="hit" />
             <circle r="4.5" :fill="line.color" />
             <text
               v-if="line.id.startsWith('velocity:') && dynamicName(n.value)"
@@ -395,12 +455,33 @@ const selectedValue = computed(() => {
         class="ramp-playhead"
       />
     </svg>
+    <output
+      v-if="open && badge"
+      class="ramp-badge"
+      aria-live="polite"
+      :style="{ left: `${badge.x}px`, top: `${badge.y - 8}px` }"
+      >{{ badge.text }}</output
+    >
   </div>
 </template>
 <style scoped>
 .score-ramps {
+  position: relative;
   background: #fff;
   border-top: 1px solid #edf0f0;
+}
+.ramp-badge {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #111;
+  color: #fff;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 5;
 }
 .ramp-header {
   position: sticky;
@@ -480,22 +561,34 @@ const selectedValue = computed(() => {
 }
 .lane-form input,
 .lane-form select {
-  min-height: 26px;
-  padding: 2px 6px;
-  font-size: 11px;
+  box-sizing: border-box;
+  height: 24px;
+  min-height: 24px !important;
+  padding: 0 6px !important;
+  font-size: 11px !important;
+  line-height: 22px;
   width: 110px;
+  border-radius: 3px;
 }
 .lane-form input[type='number'] {
-  width: 64px;
+  width: 60px;
 }
-.lane-form button {
-  min-height: 26px;
-  padding: 0 10px;
+.lane-form-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+.lane-form button.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
   border: 1px solid #cbd5d7;
-  border-radius: 4px;
+  border-radius: 3px;
   background: #fff;
   color: #111;
-  font-size: 11px;
   cursor: pointer;
 }
 .lane-form button.danger {

@@ -28,7 +28,8 @@ import {
 } from '../score'
 import { durationGlyphs } from '../notation'
 import { elementKey, type ScoreElement } from '../scoreElements'
-import { bracketPath, slurPath } from '../scoreCurves'
+import { bracketPath, hairpinPath, isHairpin, slurPath } from '../scoreCurves'
+import { dynamicName, nodesFromEvents, staffDynamicsEvents } from '../scoreRamps'
 const props = defineProps<{
   part: Part
   staff: Staff
@@ -368,7 +369,8 @@ function render() {
       })
     }
 
-    const automatic = new Set<Note>()
+    const automatic = new Set<Note>(),
+      wholeBar = new Map<Note, { start: number; end: number }>()
     const displayNotes = props.part.notes.filter(
       (n) =>
         n.beat + n.duration >= props.viewStart &&
@@ -415,6 +417,8 @@ function render() {
             },
           }
           automatic.add(n)
+          if (start <= m.start + 1e-8 && end >= m.end - 1e-8)
+            wholeBar.set(n, { start: m.start, end: m.end })
           displayNotes.push(n)
         }
         const coverage = [
@@ -442,7 +446,14 @@ function render() {
             glyph: string
             dots: number
             fragment: number
+            center?: { start: number; end: number }
           }[] = []
+        // A rest filling its bar is a centred whole rest whatever the meter.
+        const bar = wholeBar.get(n)
+        if (bar) {
+          result.push({ n, v, beat: n.beat, glyph: 'w', dots: 0, fragment: 0, center: bar })
+          return result
+        }
         let beat = n.beat,
           remaining = n.duration,
           fragment = 0
@@ -570,9 +581,14 @@ function render() {
         note.setStave(stave)
         note.getTickContext().setX(0)
         const offset = note.getNoteHeadBeginX()
+        const center = items[i]!.center
         note
           .getTickContext()
-          .setX(xAt(items[i]!.beat) - offset - (items[i]!.v.grace_to ? 24 : 0))
+          .setX(
+            center
+              ? (xAt(center.start) + xAt(center.end)) / 2 - offset - 7
+              : xAt(items[i]!.beat) - offset - (items[i]!.v.grace_to ? 24 : 0),
+          )
       })
       notes.forEach((note, i) => {
         for (const modifier of note.getModifiers()) {
@@ -721,6 +737,17 @@ function render() {
         })
       }
     }
+    // Written dynamics: velocity ramp points at a standard level show their name.
+    for (const node of nodesFromEvents(staffDynamicsEvents(props.part, props.staff))) {
+      const name = dynamicName(node.value)
+      if (!name || node.beat < lo || node.beat > hi) continue
+      grouped({ kind: 'dynamic', beat: node.beat }, () => {
+        ctx.save()
+        ctx.setFont('serif', 14, 'bold', 'italic')
+        ctx.fillText(name, xAt(node.beat) - 4, 172)
+        ctx.restore()
+      })
+    }
     // Phrasing curves and brackets: note anchors follow the engraved heads,
     // free ends sit at their beat above the staff. Selected ones get handles.
     for (const curve of props.staff.curves || []) {
@@ -733,7 +760,8 @@ function render() {
           ? props.part.notes.find((n) => n.id === curve.end_note)?.beat ?? curve.end_beat
           : curve.end_beat
       if (endBeat < lo || startBeat > hi) continue
-      const above = curve.kind === 'bracket' ? curve.height >= 0 : curve.height <= 0
+      const hairpin = isHairpin(curve.kind)
+      const above = hairpin ? false : curve.kind === 'bracket' ? curve.height >= 0 : curve.height <= 0
       const anchor = (
         note: { note: StaveNote; index: number } | undefined,
         beat: number,
@@ -745,20 +773,21 @@ function render() {
           const y = heads[note.index] ?? heads[0] ?? 98
           return { x: (x + note.note.getNoteHeadBeginX()) / 2 + (end ? 4 : 4), y: above ? y - 9 : y + 9 }
         }
-        return { x: xAt(beat), y: above ? 66 : 132 }
+        return { x: xAt(beat), y: hairpin ? 152 : above ? 66 : 132 }
       }
       const a = anchor(startNote, startBeat, false),
         b = anchor(endNote, endBeat, true)
       a.y += curve.lift
-      b.y += curve.lift
+      b.y += curve.end_lift ?? 0
       const key = elementKey({ kind: 'curve', curve: curve.id, beat: startBeat, part: props.part.id, staff: props.staff.id })
       const selectedCurve = props.selectedElement === key
       grouped({ kind: 'curve', curve: curve.id, beat: startBeat }, () => {
         ctx.save()
         ctx.setLineWidth(curve.kind === 'slur' ? 1.8 : 1.4)
         ctx.beginPath()
-        const d =
-          curve.kind === 'slur'
+        const d = hairpin
+          ? hairpinPath(a.x, b.x, (a.y + b.y) / 2, curve.height, curve.kind === 'crescendo')
+          : curve.kind === 'slur'
             ? slurPath(a.x, a.y, b.x, b.y, curve.height)
             : bracketPath(a.x, b.x, Math.min(a.y, b.y), curve.height)
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
@@ -771,7 +800,9 @@ function render() {
       })
       if (selectedCurve) {
         const midX = (a.x + b.x) / 2,
-          midY = (a.y + b.y) / 2 + curve.height * (curve.kind === 'slur' ? 0.75 : 1)
+          midY = hairpin
+            ? (a.y + b.y) / 2 - Math.max(2, curve.height) / 2 - 4
+            : (a.y + b.y) / 2 + curve.height * (curve.kind === 'slur' ? 0.75 : 1)
         const box = ctx.openGroup('curve-box')
         ctx.save()
         ctx.setStrokeStyle('#16803c')

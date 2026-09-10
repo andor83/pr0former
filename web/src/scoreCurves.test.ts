@@ -36,8 +36,9 @@ describe('phrasing curves', () => {
     const id = p.staves![0]!.curves![0]!.id
     p = updateCurve(p, 's', id, { height: -500, lift: 30 })
     expect(p.staves![0]!.curves![0]).toMatchObject({ height: -200, lift: 30 })
+    p = updateCurve(p, 's', id, { end_lift: 12 })
     p = updateCurve(p, 's', id, { end_beat: -1, end_note: null })
-    expect(p.staves![0]!.curves![0]).toMatchObject({ start_beat: -1, end_beat: 0, start_note: null, end_note: 'a' })
+    expect(p.staves![0]!.curves![0]).toMatchObject({ start_beat: -1, end_beat: 0, start_note: null, end_note: 'a', lift: 12, end_lift: 30 })
     const dropped = dropCurveAnchors(p, new Set(['a']))
     expect(dropped.staves![0]!.curves![0]!.end_note).toBeNull()
   })
@@ -47,4 +48,35 @@ describe('phrasing curves', () => {
     expect(tieTargets(p, p.notes[1]!)).toEqual([])
     expect(slurPath(0, 100, 40, 100, -20)).toBe('M0 100 C10 80 30 80 40 100')
   })
+})
+
+import { addHairpin, retimeHairpin } from './scoreCurves'
+import { moveElement, deleteElement } from './scoreElements'
+import type { Project } from './types'
+it('hairpin previews, whole moves and deletion carry only owned playback', () => {
+  const initial = {id:'p',clef:'treble',notes:[],staves:[{id:'s',name:'S',clef:'treble',transpose:0}]} as unknown as Part
+  const base = addHairpin(initial,'s','crescendo',1,4)
+  const curve = base.staves![0]!.curves![0]!
+  const intermediate = retimeHairpin(base,'s',curve,1,5)
+  const final = retimeHairpin(base,'s',curve,1,6)
+  expect(final.staves![0]!.dynamics!.events[0]!.duration).toBe(5)
+  expect(base.staves![0]!.dynamics!.events[0]!.duration).toBe(3)
+  expect(intermediate.staves![0]!.dynamics!.events[0]!.duration).toBe(4)
+  const project = {parts:[final]} as Project
+  const element = {kind:'curve',part:'p',staff:'s',curve:curve.id}
+  moveElement(project,element,2,0)
+  expect(project.parts[0]!.staves![0]!.dynamics!.events[0]).toMatchObject({beat:3,duration:5})
+  deleteElement(project,element)
+  expect(project.parts[0]!.staves![0]!.dynamics!.events).toEqual([])
+})
+it('deleting or moving a hairpin restores an authored starting dynamic', () => {
+  const mark = {id:'piano',beat:1,duration:0,start:48,end:48,curve:'step' as const}
+  const p = {id:'p',clef:'treble',notes:[],staves:[{id:'s',name:'S',clef:'treble',transpose:0,dynamics:{mode:'velocity',controller:11,events:[mark]}}]} as unknown as Part
+  const withHairpin=addHairpin(p,'s','crescendo',1,4)
+  const curve=withHairpin.staves![0]!.curves![0]!
+  const moved=retimeHairpin(withHairpin,'s',curve,5,8)
+  expect(moved.staves![0]!.dynamics!.events[0]).toEqual(mark)
+  const project={parts:[withHairpin]} as Project
+  deleteElement(project,{kind:'curve',part:'p',staff:'s',curve:curve.id})
+  expect(project.parts[0]!.staves![0]!.dynamics!.events).toEqual([mark])
 })

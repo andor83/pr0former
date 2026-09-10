@@ -8,11 +8,11 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        mpsc::{self, SyncSender, TrySendError},
+        mpsc::{self, SyncSender},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-type Chunk = (String, String, usize, u32, Vec<Event>);
+pub(crate) type Chunk = (String, String, usize, u32, Vec<Event>);
 enum Job {
     Data(String, Vec<Chunk>),
     Barrier(mpsc::Sender<()>),
@@ -139,7 +139,6 @@ impl Take {
 }
 pub struct Store {
     tx: SyncSender<Job>,
-    pending: Option<Job>,
     error: Arc<Mutex<Option<String>>>,
 }
 impl Store {
@@ -198,11 +197,18 @@ impl Store {
             }
             for (_, take) in takes { let _ = take.finish(false); }
         }).expect("Start recording file worker");
-        Self {
-            tx,
-            pending: None,
-            error,
-        }
+        Self { tx, error }
+    }
+    pub(crate) fn data(&self, project: String, chunks: Vec<Chunk>) -> Result<(), String> {
+        self.tx
+            .send(Job::Data(project, chunks))
+            .map_err(|e| e.to_string())
+    }
+    pub(crate) fn barrier(&self) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(Job::Barrier(tx)).map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?;
+        self.error().map_or(Ok(()), Err)
     }
     pub fn reset_error(&self) {
         *self.error.lock().unwrap() = None;
@@ -210,28 +216,7 @@ impl Store {
     pub fn error(&self) -> Option<String> {
         self.error.lock().unwrap().clone()
     }
-    pub fn poll(&mut self, project: &str, engine: &mut Engine) {
-        if self.error().is_some() {
-            engine.finish_recordings();
-        }
-        let job = self.pending.take().or_else(|| {
-            let chunks = engine.take_record_events();
-            (!chunks.is_empty()).then(|| Job::Data(project.into(), chunks))
-        });
-        if let Some(job) = job {
-            match self.tx.try_send(job) {
-                Ok(()) => {}
-                Err(TrySendError::Full(job)) => self.pending = Some(job),
-                Err(TrySendError::Disconnected(_)) => {
-                    *self.error.lock().unwrap() = Some("Recording worker unavailable".into())
-                }
-            }
-        }
-    }
     pub fn flush(&mut self, project: &str, engine: &mut Engine) -> Result<(), String> {
-        if let Some(job) = self.pending.take() {
-            self.tx.send(job).map_err(|e| e.to_string())?;
-        }
         let chunks = engine.take_record_events();
         if !chunks.is_empty() {
             self.tx

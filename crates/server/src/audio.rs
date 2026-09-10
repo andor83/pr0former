@@ -27,6 +27,12 @@ pub enum Command {
         project: String,
         enabled: bool,
     },
+    Monitor {
+        session: String,
+        project: String,
+        node: Option<String>,
+        enabled: bool,
+    },
     Preview {
         project: String,
         source: String,
@@ -126,8 +132,8 @@ fn run(
     let mut sequencer: Option<crate::performance::Sequencer> = None;
     let mut audition: Option<AuditionState> = None;
     let mut engine: Option<Engine> = None;
-    let mut loop_store = crate::loops::Store::new();
-    let mut record_store = crate::recordings::Store::new();
+    let mut persistence = crate::persistence::Persistence::new();
+    let mut shutting_down = false;
     let mut project: Option<Project> = None;
     let mut epoch = String::new();
     let mut log_project = String::new();
@@ -159,11 +165,25 @@ fn run(
     let mut browser: std::collections::BTreeMap<String, std::collections::VecDeque<[f32; 2]>> =
         std::collections::BTreeMap::new();
 
+    let mut monitor_subscriptions: std::collections::BTreeMap<
+        String,
+        (String, Option<String>, Instant),
+    > = Default::default();
+    let mut max_work_us = 0u64;
+    let mut max_block_gap_us = 0u64;
+    let mut previous_block = Instant::now();
     let mut previews: Vec<Preview> = Vec::new();
     let mut visualization_subscribers: std::collections::BTreeMap<String, (String, Instant)> =
         Default::default();
     loop {
+        let cycle_started = Instant::now();
+        if shutting_down && persistence.ready() {
+            return;
+        }
         for _ in 0..16 {
+            if shutting_down || !persistence.ready() {
+                break;
+            }
             let Ok(command) = rx.try_recv() else { break };
             let context = match &command {
                 Command::Load(p, _) => p.id.as_str(),
@@ -196,22 +216,28 @@ fn run(
                     inputs.clear();
                     midi_inputs = crate::node_io::Inputs::default();
                     node_outputs.reset(vec![]);
-                    let result = if let (Some(p), Some(e)) = (&project, &mut engine) {
+                    if let (Some(p), Some(mut e)) = (&project, engine.take()) {
                         if let Some(seq) = &mut sequencer {
-                            seq.reset(e, &io);
+                            seq.reset(&mut e, &io);
                         }
-                        e.finish_loops();
-                        e.finish_recordings();
-                        let recorded = record_store.flush(&p.id, e);
-                        loop_store.flush(&p.id, e).and(recorded)
-                    } else {
-                        Ok(())
-                    };
-                    drop(midi_inputs);
-                    let _ = reply.send(result);
-                    return;
+                        persistence.retire(p.id.clone(), e);
+                    }
+                    persistence.barrier(reply);
+                    shutting_down = true;
                 }
 
+                Command::Monitor {
+                    session,
+                    project,
+                    node,
+                    enabled,
+                } => {
+                    if enabled {
+                        monitor_subscriptions.insert(session, (project, node, Instant::now()));
+                    } else {
+                        monitor_subscriptions.remove(&session);
+                    }
+                }
                 Command::Visualizers {
                     session,
                     project,
@@ -261,18 +287,12 @@ fn run(
                     media_packets = crate::monitor_packets::Packets::default();
                     input_rates.clear();
 
-                    let saved = if !value {
-                        if let (Some(p), Some(e)) = (&project, &mut engine) {
-                            e.finish_loops();
-                            e.finish_recordings();
-                            let recorded = record_store.flush(&p.id, e);
-                            loop_store.flush(&p.id, e).and(recorded)
-                        } else {
-                            Ok(())
+                    if !value {
+                        if let (Some(p), Some(e)) = (&project, engine.take()) {
+                            persistence.retire(p.id.clone(), e);
                         }
-                    } else {
-                        Ok(())
-                    };
+                        sequencer = None;
+                    }
                     let result = if value {
                         open_outputs(&settings, underruns.clone()).and_then(|devices| {
                             let captured = open_inputs(&settings)?;
@@ -284,7 +304,7 @@ fn run(
                             Ok(())
                         })
                     } else {
-                        saved
+                        Ok(())
                     };
 
                     if let Err(err) = &result {
@@ -292,7 +312,11 @@ fn run(
                     }
 
                     let _=events.send(json!({"type":"audio_engine_status","enabled":enabled,"sample_rate":settings.sample_rate,"block_size":settings.block_size}));
-                    let _ = reply.send(result);
+                    if value || result.is_err() {
+                        let _ = reply.send(result);
+                    } else {
+                        persistence.barrier(reply);
+                    }
                 }
                 Command::ClearLoop {
                     project: id,
@@ -304,14 +328,16 @@ fn run(
                         engine
                             .as_mut()
                             .ok_or("Engine unavailable".to_string())
-                            .and_then(|e| {
-                                e.clear_loop(&node, track)?;
-                                loop_store.flush(&id, e)
-                            })
+                            .and_then(|e| e.clear_loop(&node, track))
                     } else {
                         Err("Project engine unavailable".into())
                     };
-                    let _ = reply.send(result);
+                    if let Err(e) = result {
+                        let _ = reply.send(Err(e));
+                    } else {
+                        persistence.clear(id, node, track);
+                        persistence.barrier(reply);
+                    }
                 }
                 Command::Test(value) => {
                     testing = value;
@@ -383,17 +409,6 @@ fn run(
                             None => crate::performance::Sequencer::new(&p),
                         });
                         prepared.carry_node_state(previous);
-                        // Only retired buffers remain in the old engine after state transfer.
-                        previous.finish_loops();
-                        previous.finish_recordings();
-                        if let Some(p) = &project {
-                            if let Err(e) = record_store.flush(&p.id, previous) {
-                                device_error = e;
-                            }
-                            if let Err(e) = loop_store.flush(&p.id, previous) {
-                                device_error = e;
-                            }
-                        }
                         if let Some(seq) = &sequencer {
                             seq.seed_part_nodes(previous, &mut prepared);
                         }
@@ -402,22 +417,21 @@ fn run(
                     for out in &mut outputs {
                         out.meter.clear();
                     }
+                    if let (Some(old), Some(previous)) = (&project, engine.take()) {
+                        persistence.retire(old.id.clone(), previous);
+                    }
                     project = Some(p);
                     engine = Some(*prepared);
                 }
 
                 Command::Load(p, mut e) => {
-                    if let (Some(old), Some(engine)) = (&project, &mut engine) {
-                        engine.finish_loops();
-                        engine.finish_recordings();
-                        if let Err(e) = record_store.flush(&old.id, engine) {
-                            device_error = e;
-                        }
-                        if let Err(e) = loop_store.flush(&old.id, engine) {
-                            device_error = e;
-                        }
+                    max_work_us = 0;
+                    max_block_gap_us = 0;
+                    previous_block = Instant::now();
+                    persistence.reset();
+                    if let (Some(old), Some(previous)) = (&project, engine.take()) {
+                        persistence.retire(old.id.clone(), previous);
                     }
-                    record_store.reset_error();
                     count_in = None;
                     node_outputs.reset(vec![]);
                     node_routes = prepare_node_routes(&p);
@@ -455,15 +469,8 @@ fn run(
                 }
                 Command::Unload => {
                     audition = None;
-                    if let (Some(p), Some(e)) = (&project, &mut engine) {
-                        e.finish_loops();
-                        e.finish_recordings();
-                        if let Err(err) = record_store.flush(&p.id, e) {
-                            device_error = err;
-                        }
-                        if let Err(err) = loop_store.flush(&p.id, e) {
-                            device_error = err;
-                        }
+                    if let (Some(p), Some(e)) = (&project, engine.take()) {
+                        persistence.retire(p.id.clone(), e);
                     }
                     show_active = false;
                     count_in = None;
@@ -662,7 +669,7 @@ fn run(
                     }
                 }
                 Command::Devices(reply) => {
-                    let _=reply.send(json!({"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}));
+                    let _=reply.send(json!({"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}));
                 }
                 Command::Hardware(value) => {
                     outputs.clear();
@@ -707,6 +714,9 @@ fn run(
         }
 
         if let Some(e) = engine.as_mut() {
+            max_block_gap_us = max_block_gap_us.max(previous_block.elapsed().as_micros() as u64);
+            previous_block = Instant::now();
+            monitor_subscriptions.retain(|_, (_, _, seen)| seen.elapsed() < Duration::from_secs(8));
             let mut storage = [[0.; MAX_CHANNELS]; 1024];
             let output = &mut storage[..settings.block_size];
 
@@ -720,7 +730,12 @@ fn run(
                         p.graph
                             .nodes
                             .iter()
-                            .filter(|n| n.kind == "monitor_output")
+                            .filter(|n| {
+                                n.kind == "monitor_output"
+                                    && monitor_subscriptions.values().any(|(id, node, _)| {
+                                        id == &p.id && node.as_ref() == Some(&n.id)
+                                    })
+                            })
                             .map(|n| (n.id.clone(), Vec::with_capacity(settings.block_size * 2)))
                             .collect()
                     })
@@ -752,22 +767,23 @@ fn run(
                     }
                 }
                 let count_click = advance_count_in(&mut count_in, e);
+                if let Some(seq) = &mut sequencer {
+                    seq.tick(e, &io);
+                }
                 let metro_click = if metronome {
-                    let (beats, unit) = project
+                    let (position, origin, beats, unit) = sequencer
                         .as_ref()
-                        .map(|p| (p.beats_per_bar as u8, p.beat_unit as u8))
-                        .unwrap_or((4, 4));
-                    metro.next(&e.clock, beats, unit)
+                        .map(|s| s.metronome_position(e.clock.beat))
+                        .unwrap_or((e.clock.beat, 0., 4, 4));
+                    metro.next_at(&e.clock, position, origin, beats, unit)
                 } else {
+                    metro = pr0_dsp::count_in::Metronome::new();
                     None
                 };
                 let click = match (count_click, metro_click) {
                     (None, None) => None,
                     (a, b) => Some(a.unwrap_or(0.) + b.unwrap_or(0.)),
                 };
-                if let Some(seq) = &mut sequencer {
-                    seq.tick(e, &io);
-                }
                 for input in &mut inputs {
                     input.sample();
                 }
@@ -844,8 +860,7 @@ fn run(
             }
 
             if let Some(p) = &project {
-                loop_store.poll(&p.id, e);
-                record_store.poll(&p.id, e);
+                persistence.poll(&p.id, e);
             }
             previews.retain_mut(|preview| {
                 if preview.reply.as_ref().is_none_or(|r|r.is_closed()){return false;}
@@ -879,6 +894,7 @@ fn run(
                 }
             }
 
+            max_work_us = max_work_us.max(cycle_started.elapsed().as_micros() as u64);
             if last.elapsed() >= Duration::from_millis(50) {
                 last = Instant::now();
                 seq += 1;
@@ -908,7 +924,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"metronome":metronome,"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":record_store.error().or_else(|| loop_store.error()).unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"route_targets":e.route_targets(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"metronome":metronome,"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":persistence.error().unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"route_targets":e.route_targets(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
 ));
                 }
             }

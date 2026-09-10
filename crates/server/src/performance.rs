@@ -59,6 +59,7 @@ pub struct Sequencer {
     /// Written-position tempo map (beat, bpm), applied edge-triggered so manual
     /// tempo edits between entries are respected.
     tempos: Vec<(f64, f64)>,
+    meters: Vec<(f64, u8, u8)>,
     last_written: Option<f64>,
 }
 pub enum External {
@@ -217,7 +218,17 @@ impl Sequencer {
             .as_ref()
             .map(|s| s.tempos.iter().map(|t| (t.beat, t.bpm)).collect())
             .unwrap_or_default();
+        let mut meters = vec![(0., p.beats_per_bar as u8, p.beat_unit as u8)];
+        if let Some(score) = &p.score {
+            for m in &score.meters {
+                if m.beat == 0. {
+                    meters.clear();
+                }
+                meters.push((m.beat, m.beats, m.unit));
+            }
+        }
         Self {
+            meters,
             autoplay,
             tempos,
             last_written: None,
@@ -441,6 +452,16 @@ impl Sequencer {
             .find(|s| elapsed < s.elapsed + s.end - s.start)
             .map(|s| s.start + elapsed - s.elapsed)
             .unwrap_or(elapsed)
+    }
+    /// Written position plus the active meter's bar origin, prepared off-render.
+    pub fn metronome_position(&self, beat: f64) -> (f64, f64, u8, u8) {
+        let written = self.written_position(beat);
+        let i = self
+            .meters
+            .partition_point(|m| m.0 <= written + 1e-9)
+            .saturating_sub(1);
+        let (origin, beats, unit) = self.meters[i];
+        (written, origin, beats, unit)
     }
     /// Edge-triggered tempo map: on start/resume/rewind apply the tempo in force,
     /// then apply each entry as the written position crosses it.
@@ -1406,7 +1427,7 @@ mod score_tests {
             }],
             navigation: None,
             tempos: vec![],
-            });
+        });
         let mut seq = Sequencer::new(&p);
         assert_eq!(seq.lanes[0].length, 12.);
         assert_eq!(seq.playback(4.5)[0].position, 0.5);
@@ -1442,7 +1463,7 @@ mod score_tests {
             }],
             navigation: None,
             tempos: vec![],
-            });
+        });
         let seq = Sequencer::new(&p);
         assert!(!seq.lanes[0].playing);
         assert!(seq.lanes[0].looping);
@@ -1529,8 +1550,14 @@ mod score_tests {
             .map(|e| e.velocity)
             .collect();
         assert_eq!(attacks.len(), 2);
-        assert!(attacks.contains(&127), "upper staff follows its own dynamics: {attacks:?}");
-        assert!(attacks.contains(&45), "lower staff falls back to part dynamics: {attacks:?}");
+        assert!(
+            attacks.contains(&127),
+            "upper staff follows its own dynamics: {attacks:?}"
+        );
+        assert!(
+            attacks.contains(&45),
+            "lower staff falls back to part dynamics: {attacks:?}"
+        );
     }
     #[test]
     fn dynamics_change_attacks_without_changing_authored_notes() {
@@ -1556,5 +1583,24 @@ mod score_tests {
             .collect();
         assert_eq!(&attacks[..5], &[20, 40, 60, 80, 100]);
         assert_eq!(p.parts[0].notes[0].velocity, 90);
+    }
+}
+
+#[cfg(test)]
+mod metronome_map_tests {
+    use super::*;
+    #[test]
+    fn written_meter_and_origin_follow_a_repeated_six_eight_bar() {
+        let mut project =
+            pr0_core::demo_project("meter".into(), "Meter".into(), pr0_core::Mode::Structured);
+        project.parts[0].loop_beats = 8.;
+        project.score = Some(serde_json::from_value(serde_json::json!({
+            "version":1,"length":8.,"loop_score":false,"meters":[{"beat":4.,"beats":6,"unit":8}],
+            "keys":[],"tempos":[],"repeats":[{"start":4.,"end":7.,"times":2,"first_ending":null}]
+        })).unwrap());
+        let sequencer = Sequencer::new(&project);
+        assert_eq!(sequencer.metronome_position(3.), (3., 0., 4, 4));
+        assert_eq!(sequencer.metronome_position(4.5), (4.5, 4., 6, 8));
+        assert_eq!(sequencer.metronome_position(7.), (4., 4., 6, 8));
     }
 }

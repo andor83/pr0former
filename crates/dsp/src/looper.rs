@@ -4,6 +4,7 @@ use crate::Clock;
 pub struct Track {
     pub length: usize,
     dirty: bool,
+    snapshot_offset: usize,
     cursor: usize,
     pub recording: bool,
     pub playing: bool,
@@ -56,6 +57,26 @@ impl Looper {
             track.end_beat = None;
         }
     }
+    /// Copy at most `limit` samples between blocks; assembly and file I/O run elsewhere.
+    pub fn snapshot_chunk(&mut self, limit: usize) -> Option<(u8, usize, usize, usize, Vec<f32>)> {
+        let index = self.tracks.iter().position(|t| t.dirty)?;
+        let track = &mut self.tracks[index];
+        let total = if track.recording {
+            0
+        } else {
+            track.length * self.channels
+        };
+        let offset = track.snapshot_offset.min(total);
+        let end = (offset + limit.max(1)).min(total);
+        let base = index * self.capacity * self.channels;
+        let audio = self.audio[base + offset..base + end].to_vec();
+        track.snapshot_offset = end;
+        if end == total {
+            track.dirty = false;
+            track.snapshot_offset = 0;
+        }
+        Some((index as u8 + 1, self.channels, offset, total, audio))
+    }
     // Called only by preparation/orchestration, never by render or device callbacks.
     pub fn snapshot(&mut self) -> Option<(u8, usize, Vec<f32>)> {
         let index = self.tracks.iter().position(|t| t.dirty)?;
@@ -68,6 +89,7 @@ impl Looper {
         };
         let audio = self.audio[base..base + length].to_vec();
         track.dirty = false;
+        track.snapshot_offset = 0;
         Some((index as u8 + 1, self.channels, audio))
     }
     pub fn restore(
@@ -170,6 +192,7 @@ impl Looper {
                     track.record_at = None;
                     track.dirty = true;
                     track.length = 0;
+                    track.snapshot_offset = 0;
                     track.cursor = 0;
                     track.recording = true;
                     track.playing = false;
@@ -375,5 +398,30 @@ mod tests {
         assert_eq!(l.tracks[1].length, 1);
         assert_eq!(tick(&mut l, &mut c, [0.; 8], [0., 0., 1., 0.], 0.)[0], 3.);
         assert!(!l.tracks[0].recording);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn bounded_chunks_reconstruct_audio_and_clear_discards_partial_snapshot() {
+        let mut looper = Looper::prepare(48000., 2, 1.).unwrap();
+        let audio: Vec<f32> = (0..12000).map(|n| n as f32 / 12000.).collect();
+        looper.restore(0, &audio, 2, 48000, 48000.).unwrap();
+        looper.tracks[0].dirty = true;
+        let mut collected = vec![];
+        while let Some((track, channels, offset, total, chunk)) = looper.snapshot_chunk(1024) {
+            assert_eq!((track, channels, total), (1, 2, audio.len()));
+            assert!(chunk.len() <= 1024);
+            assert_eq!(offset, collected.len());
+            collected.extend(chunk);
+        }
+        assert_eq!(collected, audio);
+        looper.tracks[0].dirty = true;
+        looper.snapshot_chunk(1024).unwrap();
+        looper.clear(0);
+        let (_, _, offset, total, chunk) = looper.snapshot_chunk(1024).unwrap();
+        assert_eq!((offset, total, chunk.len()), (0, 0, 0));
     }
 }

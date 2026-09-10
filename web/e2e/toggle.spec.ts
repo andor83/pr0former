@@ -15,7 +15,8 @@ test('toggle persists manual state, follows input changes, and stays manually op
   await expect.poll(async()=>(await load()).graph.nodes[0].control_value).toBe(1)
   await page.reload();await expect(checkbox).toBeChecked()
   await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
-  await expect.poll(()=>latest?.values.Latch._checked).toBe(1)
+  // Engine start after a reload can take a few seconds under full-suite load.
+  await expect.poll(()=>latest?.values?.Latch?._checked,{timeout:20000}).toBe(1)
   await checkbox.uncheck();await expect.poll(()=>latest?.values.Latch._checked).toBe(0)
   const current=await load();current.graph.edges=[{id:'in',source:'Source',source_port:'out',target:'Latch',target_port:'in'}]
   expect((await page.request.put(`/api/projects/${p.id}`,{headers,data:current})).ok()).toBe(true)

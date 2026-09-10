@@ -1,5 +1,7 @@
 # Audio engine audit — 2026-09-08
 
+Historical audit. The September 10 stabilization addresses retirement barriers, bounded loop extraction and subscribed-feed collection; see [current status](STATUS.md) and [architecture](ARCHITECTURE.md#stabilization-contracts-2026-09-10) for the current implementation. Risks below describe the audited checkpoint.
+
 The audit covered DSP rendering, native callbacks and queue pacing, browser monitor
 conversion/packet delivery, MIDI input polling, visualization analysis, and loop/archive
 retirement. Concrete efficiency and queue fixes are implemented. Physical playback on

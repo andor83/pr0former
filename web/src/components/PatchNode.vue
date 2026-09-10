@@ -32,7 +32,7 @@ function controlSelect(event: MouseEvent) {
 <template>
   <div v-if="['trigger','toggle'].includes(data.node.kind)" class="patch-node control trigger-node" :class="{selected}" tabindex="0" :aria-label="`${data.node.label} node`" @mousedown="controlSelect" @contextmenu.prevent.stop="!$event.ctrlKey && data.contextMenu(id,$event)" @keydown.enter.stop.prevent="data.open(id)" @dblclick.stop="data.open(id)">
     <Handle id="in" type="target" :position="Position.Left" class="control" aria-label="Trigger input" @click.stop="data.connectPort(id,'in','target')" />
-    <ToggleButton v-if="data.node.kind==='toggle'" :label="data.node.label" :checked="data.active&&!(telemetryStale??true)?values?._checked===1:data.node.control_value===1" :disabled="!data.editable||(data.active&&(telemetryStale??true))" @value="value=>data.setControl(id,value)" />
+    <ToggleButton v-if="data.node.kind==='toggle'" :label="data.node.label" :sequence="telemetry?.sequence" :checked="data.active&&!(telemetryStale??true)?values?._checked===1:data.node.control_value===1" :disabled="!data.editable||(data.active&&(telemetryStale??true))" @value="value=>data.setControl(id,value)" />
     <TriggerButton v-else :label="data.node.label" :values="values" :disabled="!data.active||!data.editable||(telemetryStale??true)" @trigger="data.bang(id)" />
     <Handle id="out" type="source" :position="Position.Right" class="control" aria-label="Trigger output" @click.stop="data.connectPort(id,'out','source')" />
   </div>

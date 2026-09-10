@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { previewCurveGesture } from '../scoreCurveGesture'
+import { useScoreMidiInput } from '../scoreMidiInput'
+import { createScoreDraft, type ScoreDraft } from '../scoreDraft'
 import {
   computed,
   nextTick,
@@ -19,6 +22,7 @@ import type {
 import { newId } from '../id'
 import { ApiError } from '../api'
 import {
+  durationSymbols,
   atBeat,
   scoreAnchors,
   scoreMeasures,
@@ -64,14 +68,7 @@ import {
   removeMark,
 } from '../scoreBars'
 import ScoreContextMenu, { type MenuItem } from './ScoreContextMenu.vue'
-import {
-  HeldNotes,
-  midiEntryStorageKey,
-  midiHead,
-  parseMidiMessage,
-  readMidiEntryMode,
-  type MidiEntryMode,
-} from '../midiEntry'
+import { midiHead } from '../midiEntry'
 import ScoreMeasureDialog from './ScoreMeasureDialog.vue'
 import ScorePartDialog from './ScorePartDialog.vue'
 import {
@@ -275,6 +272,7 @@ let curveDrag: {
   handle: 'start' | 'end' | 'shape'
   startX: number
   startY: number
+  base: Project
   original: StaffCurve
   frame: number
   latest?: PointerEvent
@@ -302,6 +300,7 @@ function commitInlineText() {
 function phrasePreviewPath() {
   const d = phraseDrag.value
   if (!d) return ''
+  if (isHairpin(d.kind)) return hairpinPath(d.x, d.toX, d.y, 10, d.kind === 'crescendo')
   return d.kind === 'bracket'
     ? bracketPath(d.x, d.toX, Math.min(d.y, d.toY) - 10, 12)
     : slurPath(d.x, d.y, d.toX, d.toY, -26)
@@ -335,6 +334,10 @@ function finishPhrase(event: PointerEvent) {
       updatePart(next)
       return
     }
+    if (isHairpin(d.kind)) {
+      updatePart(addHairpin(p, d.staff, d.kind as 'crescendo' | 'decrescendo', d.beat, endBeat))
+      return
+    }
     if (Math.abs(endBeat - d.beat) < 1e-9 && endNoteId === d.note) return
     updatePart(
       addCurve(p, d.staff, d.kind, { note: d.note, beat: d.beat }, { note: endNoteId, beat: endBeat }),
@@ -350,36 +353,23 @@ function applyCurveDrag(event: PointerEvent, record: boolean) {
   if (!p) return
   const dx = (event.clientX - c.startX) / zoom.value,
     dy = (event.clientY - c.startY) / zoom.value
-  let patch: Partial<StaffCurve>
-  if (c.handle === 'shape') {
-    patch = { height: c.original.height + dy }
-  } else {
-    const el = document.elementFromPoint(event.clientX, event.clientY)
-    const node = el?.closest<HTMLElement>('[data-note-id]')
-    const noteId = node && node.dataset.partId === c.part ? node.dataset.noteId! : null
-    const beat = noteId
-      ? p.notes.find((n) => n.id === noteId)?.beat ?? 0
-      : Math.max(
-          0,
-          Math.round(
-            beatAt(xAt(c.handle === 'start' ? c.original.start_beat : c.original.end_beat) + dx) /
-              onsetSnap.value,
-          ) * onsetSnap.value,
-        )
-    patch =
-      c.handle === 'start'
-        ? { start_beat: beat, start_note: noteId, lift: c.original.lift + dy }
-        : { end_beat: beat, end_note: noteId, lift: c.original.lift + dy }
-  }
-  const next = clone(doc.value)
-  next.parts = next.parts.map((x) => (x.id === p.id ? updateCurve(x, c.staff, c.id, patch) : x))
-  void commit(next, record)
+  const el = document.elementFromPoint(event.clientX, event.clientY)
+  const node = el?.closest<HTMLElement>('[data-note-id]')
+  const noteId = !isHairpin(c.original.kind) && node?.dataset.partId === c.part ? node!.dataset.noteId! : null
+  const beat = noteId ? p.notes.find(n => n.id === noteId)?.beat ?? 0 : Math.max(0,
+    Math.round(beatAt(xAt(c.handle === 'start' ? c.original.start_beat : c.original.end_beat) + dx) / onsetSnap.value) * onsetSnap.value)
+  const next = previewCurveGesture(c,beat,dy,noteId)
+  if (record) { curvePreview.value = null; void commit(next) }
+  else curvePreview.value = next
 }
 import { durationGlyphs } from '../notation'
 import ScoreRampEditor from './ScoreRampEditor.vue'
 import {
   addCurve,
+  addHairpin,
   dropCurveAnchors,
+  hairpinPath,
+  isHairpin,
   slurPath,
   bracketPath,
   tieTargets,
@@ -404,6 +394,7 @@ const props = defineProps<{
   beats: Record<string, number>
   members?: { id: string; username: string }[]
   save?: (project: Project) => Promise<void>
+  draftSession?: ScoreDraft
 }>()
 const emit = defineEmits<{
   focus: [id: string]
@@ -413,13 +404,19 @@ const emit = defineEmits<{
  * Local working copy. Edits apply here immediately and are saved on a short
  * debounce, so typing never waits on the network; `doc` is what the editor shows.
  */
-const draft = ref<Project | null>(null)
-const doc = computed<Project>(() => draft.value ?? props.project)
-const flushing = ref(false)
-let saveTimer: ReturnType<typeof setTimeout> | null = null
+const session = props.draftSession ?? createScoreDraft(() => props.project, async p => { await props.save?.(p) })
+const { draft, flushing, conflict, error, pending } = session
+const curvePreview = ref<Project | null>(null)
+const doc = computed(() => curvePreview.value ?? session.doc.value)
 let savedRevision = props.project.revision
 let pendingAuditions: { part: string; notes: string[] }[] = []
-const SAVE_DELAY = 250
+watch(session.accepted, () => {
+  savedRevision = props.project.revision
+  const ready = pendingAuditions.filter(a => a.notes.every(id => props.project.parts.find(p => p.id === a.part)?.notes.some(n => n.id === id)))
+  pendingAuditions = pendingAuditions.filter(a => !ready.includes(a))
+  for (const a of ready) for (const n of a.notes) emit('audition', a.part, n)
+})
+watch(conflict, value => { if (value) { pendingAuditions = [] } })
 const selected = ref(new Set<string>()),
   visible = ref(new Set(doc.value.parts.map((p) => p.id))),
   focused = ref(
@@ -527,7 +524,6 @@ const base = ref(1),
   voice = ref(1),
   actual = ref(1),
   normal = ref(1)
-const commandQueue: (() => void)[] = []
 let arrowHeld = false
 /** Speedy-Entry style insertion point: digits/letters insert here and advance. */
 const caret = ref<{
@@ -548,14 +544,11 @@ let lastEntry: {
   actual: number
   normal: number
 } | null = null
-/** Run now, or after the in-flight save so rapid keyboard entry is never dropped. */
+/** Keyboard edits always apply to the local draft; persistence is serialized separately. */
 function enqueue(fn: () => void) {
-  if (props.saving && props.editable && !conflict.value) commandQueue.push(fn)
-  else fn()
+  fn()
 }
-const error = ref(''),
-  conflict = ref<Project | null>(null),
-  viewport = ref<HTMLDivElement>(),
+const viewport = ref<HTMLDivElement>(),
   root = ref<HTMLElement>()
 const viewportStart = ref(0),
   viewportEnd = ref(20)
@@ -584,17 +577,11 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   resize?.disconnect()
-  detachMidi()
-  void flushNow()
+  cancelGesture()
+  void flushNow().catch(() => {})
 })
 /** Web MIDI step entry: play to enter (chords while held) or hold pitches and press a number. */
-const midiMode = ref<MidiEntryMode>(
-  readMidiEntryMode(typeof localStorage === 'undefined' ? undefined : localStorage),
-)
-const midiInputs = ref<string[]>([]),
-  midiError = ref('')
-const midiHeld = new HeldNotes()
-let midiAccess: MIDIAccess | null = null
+const { mode: midiMode, inputs: midiInputs, error: midiError, held: midiHeld } = useScoreMidiInput(onMidiNote)
 function midiEntryHead(pitch: number) {
   const c = caret.value,
     p = doc.value.parts.find((p) => p.id === c?.part),
@@ -608,14 +595,7 @@ function midiEntryHead(pitch: number) {
       p.key_signature,
   )
 }
-function onMidiMessage(event: MIDIMessageEvent) {
-  const message = parseMidiMessage(event.data)
-  if (!message) return
-  if (message.kind === 'off') {
-    midiHeld.release(message.pitch)
-    return
-  }
-  const chord = midiHeld.press(message.pitch, event.timeStamp)
+function onMidiNote(pitch: number, chord: boolean) {
   if (
     midiMode.value !== 'play' ||
     props.performance ||
@@ -624,57 +604,11 @@ function onMidiMessage(event: MIDIMessageEvent) {
     !caret.value
   )
     return
-  const head = midiEntryHead(message.pitch)
+  const head = midiEntryHead(pitch)
   if (!head) return
   if (chord) addToChord(head)
   else insertAtCaret([head])
 }
-function bindMidiInputs() {
-  if (!midiAccess) return
-  const names: string[] = []
-  for (const input of midiAccess.inputs.values()) {
-    input.onmidimessage = onMidiMessage
-    names.push(input.name || input.id)
-  }
-  midiInputs.value = names
-}
-async function attachMidi() {
-  midiError.value = ''
-  if (!('requestMIDIAccess' in navigator)) {
-    midiError.value = 'Web MIDI is not available in this browser.'
-    midiMode.value = 'off'
-    return
-  }
-  try {
-    midiAccess ??= await navigator.requestMIDIAccess()
-    midiAccess.onstatechange = bindMidiInputs
-    bindMidiInputs()
-  } catch (e) {
-    midiError.value = `MIDI access failed: ${e instanceof Error ? e.message : e}`
-    midiMode.value = 'off'
-  }
-}
-function detachMidi() {
-  if (midiAccess) {
-    midiAccess.onstatechange = null
-    for (const input of midiAccess.inputs.values()) input.onmidimessage = null
-  }
-  midiHeld.clear()
-  midiInputs.value = []
-}
-watch(
-  midiMode,
-  (mode) => {
-    try {
-      localStorage.setItem(midiEntryStorageKey, mode)
-    } catch {
-      /* private mode */
-    }
-    if (mode === 'off') detachMidi()
-    else void attachMidi()
-  },
-  { immediate: true },
-)
 watch(scale, () => nextTick(updateViewport))
 const origin = 210,
   history = ref<Project[]>([]),
@@ -766,7 +700,7 @@ const canEdit = computed(
   () => props.editable && !props.performance && !conflict.value,
 )
 /** Saving in progress (local draft not yet acknowledged by the server). */
-const pending = computed(() => flushing.value || !!draft.value)
+
 const picked = computed(() =>
   doc.value.parts.flatMap((p) =>
     p.notes
@@ -820,51 +754,7 @@ function toggleVisible(id: string) {
   set.has(id) ? set.delete(id) : set.add(id)
   visible.value = set
 }
-function scheduleSave(delay = SAVE_DELAY) {
-  if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    saveTimer = null
-    void flushSave()
-  }, delay)
-}
-async function flushSave() {
-  if (flushing.value || !draft.value || !props.save || conflict.value) return
-  if (props.saving) {
-    // Another save (graph, settings) is in flight; retry shortly.
-    scheduleSave(300)
-    return
-  }
-  const toSave = draft.value
-  flushing.value = true
-  error.value = ''
-  try {
-    await props.save(toSave)
-    savedRevision = props.project.revision
-    if (draft.value === toSave) draft.value = null
-    else {
-      draft.value = { ...draft.value, revision: props.project.revision }
-      scheduleSave(0)
-    }
-    const auditions = pendingAuditions
-    pendingAuditions = []
-    for (const a of auditions) for (const n of a.notes) emit('audition', a.part, n)
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-    pendingAuditions = []
-    commandQueue.length = 0
-    if (e instanceof ApiError && e.status === 400) {
-      // Validation failure: revert the unsaved edits to the last accepted state.
-      draft.value = null
-    } else {
-      conflict.value = toSave
-      draft.value = null
-    }
-  } finally {
-    flushing.value = false
-    await nextTick()
-    if (!conflict.value && commandQueue.length) commandQueue.shift()!()
-  }
-}
+const scheduleSave = session.schedule
 /** Apply an edit locally and schedule its save. Resolves true when applied. */
 async function commit(next: Project, record = true) {
   if (!canEdit.value || !props.save) return false
@@ -878,21 +768,8 @@ async function commit(next: Project, record = true) {
   return true
 }
 /** Save now (used before actions that need the server to know the note). */
-async function flushNow() {
-  if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = null
-  await flushSave()
-  // A save that was already in flight may have left newer edits behind.
-  if (draft.value && !flushing.value && !conflict.value) await flushSave()
-}
+const flushNow = session.flush
 defineExpose({ flush: flushNow })
-watch(
-  () => props.saving,
-  (saving) => {
-    if (!saving && !conflict.value && commandQueue.length)
-      commandQueue.shift()!()
-  },
-)
 function discardDraft() {
   conflict.value = null
   error.value = ''
@@ -927,14 +804,6 @@ function editNote(n: Note, p: Part, command: NoteCommand) {
   return changeNote(n, p, command)
 }
 function apply(command: NoteCommand, record = true) {
-  if (props.saving && props.editable && !conflict.value) {
-    const targets = new Set(selected.value)
-    commandQueue.push(() => {
-      selected.value = targets
-      apply(command, record)
-    })
-    return
-  }
   if (!canEdit.value) return
   if (selectedElement.value?.rest) {
     try {
@@ -1095,14 +964,6 @@ function remove() {
     })
     return
   }
-  if (props.saving && props.editable && !conflict.value) {
-    const targets = new Set(selected.value)
-    commandQueue.push(() => {
-      selected.value = targets
-      remove()
-    })
-    return
-  }
   if (!picked.value.length || !canEdit.value) return
   const next = clone(doc.value)
   for (const p of next.parts) {
@@ -1134,10 +995,6 @@ function remove() {
   })
 }
 function undo(redo = false) {
-  if (props.saving && props.editable && !conflict.value) {
-    commandQueue.push(() => undo(redo))
-    return
-  }
   const stack = redo ? future : history,
     other = redo ? history : future,
     previous = stack.value.at(-1)
@@ -1875,7 +1732,88 @@ const marquee = ref<{
   width: number
   height: number
 } | null>(null)
-const ghost = ref<{ left: number; top: number } | null>(null)
+const ghost = ref<{ left: number; top: number; kind?: string; label?: string } | null>(
+  null,
+)
+const clefGlyphs: Record<string, string> = { treble: '𝄞', bass: '𝄢', alto: '𝄡', tenor: '𝄡' }
+/** Preview of what a placement tool will put on the staff at the pointer. */
+function toolGhost(row: HTMLElement, pos: { x: number; y: number }) {
+  const surface = viewport.value!.querySelector('.ensemble-surface')!.getBoundingClientRect(),
+    rowTop = (row.getBoundingClientRect().top - surface.top) / zoom.value,
+    beat = Math.max(0, Math.round(beatAt(pos.x) / onsetSnap.value) * onsetSnap.value),
+    x = xAt(beat),
+    chosen = placement.value
+  if (!chosen) {
+    const index = durationKeys.indexOf(base.value)
+    return {
+      left: x,
+      top: Math.round(pos.y / 5) * 5,
+      kind: rest.value ? 'rest' : 'note',
+      label: rest.value ? '𝄽' : (durationSymbols[index] ?? '♩') + '.'.repeat(dots.value),
+    }
+  }
+  switch (chosen.kind) {
+    case 'dynamic':
+      return {
+        left: x,
+        top: rowTop + 160,
+        kind: 'dynamic',
+        label: dynamicLevels.find(([, v]) => String(v) === chosen.value)?.[0] ?? chosen.value,
+      }
+    case 'clef':
+      return { left: x, top: rowTop + 70, kind: 'clef', label: clefGlyphs[chosen.value || 'treble'] }
+    case 'meter': {
+      const [n, d] = (chosen.value || '4/4').split('/')
+      return { left: x, top: rowTop + 74, kind: 'meter', label: `${n}\n${d}` }
+    }
+    case 'tempo': {
+      const bpm = Math.round(tempoAt(doc.value, beat))
+      return { left: x, top: rowTop + 6, kind: 'tempo', label: `♩ = ${bpm}` }
+    }
+    case 'mark':
+      return {
+        left: x,
+        top: rowTop + (chosen.value === 'lyric' ? 142 : 58),
+        kind: `mark ${chosen.value}`,
+        label:
+          chosen.value === 'rehearsal'
+            ? 'A'
+            : chosen.value === 'cue'
+              ? '▶ cue'
+              : chosen.value === 'tempo'
+                ? 'rit.'
+                : chosen.value === 'expression'
+                  ? 'espr.'
+                  : chosen.value === 'lyric'
+                    ? 'la'
+                    : 'text',
+      }
+    case 'repeat':
+      return { left: x - 12, top: rowTop + 70, kind: 'barline', label: chosen.value === 'end' ? '𝄇' : '𝄆' }
+    case 'barline': {
+      const bar = barAt(beat)
+      return {
+        left: bar ? xAt(bar.end) - 12 : x,
+        top: rowTop + 70,
+        kind: 'barline',
+        label: chosen.value === 'final' ? '𝄂' : chosen.value === 'dashed' ? '┊' : '𝄁',
+      }
+    }
+    case 'accent':
+      return {
+        left: pos.x,
+        top: pos.y - 14,
+        kind: 'accent',
+        label: ({ staccato: '·', tenuto: '—', accent: '>', marcato: '^' } as Record<string, string>)[chosen.value || ''] ?? '>',
+      }
+    case 'bars': {
+      const bar = barAt(beat)
+      return { left: bar ? xAt(bar.start) - 12 : x, top: rowTop + 60, kind: 'barline', label: '+𝄀' }
+    }
+    default:
+      return { left: x, top: rowTop + 60, kind: 'note', label: chosen.value || chosen.kind }
+  }
+}
 function point(event: MouseEvent) {
   const v = viewport.value!,
     rect = v.querySelector('.ensemble-surface')!.getBoundingClientRect()
@@ -1937,6 +1875,15 @@ async function inspectElement() {
         ? 'shared'
         : 'part'
 }
+function cancelGesture() {
+  gesture.value = null
+  marquee.value = null
+  elementDrag = null
+  if (curveDrag?.frame) cancelAnimationFrame(curveDrag.frame)
+  curveDrag = null
+  curvePreview.value = null
+  phraseDrag.value = null
+}
 function pointerDown(event: PointerEvent) {
   if (event.button !== 0 || !(event.target instanceof Element)) return
   if (inlineText.value && !event.target.closest('.inline-text')) commitInlineText()
@@ -1956,6 +1903,7 @@ function pointerDown(event: PointerEvent) {
       handle: handle.dataset.curveHandle as 'start' | 'end' | 'shape',
       startX: event.clientX,
       startY: event.clientY,
+      base: doc.value,
       original: { ...original },
       frame: 0,
     }
@@ -1980,12 +1928,15 @@ function pointerDown(event: PointerEvent) {
       : Math.max(0, Math.round(beatAt(pos.x) / onsetSnap.value) * onsetSnap.value)
     root.value?.focus({ preventScroll: true })
     focus(partId)
+    const hairpinTool = isHairpin(placement.value.value || '')
     phraseDrag.value = {
       kind: placement.value.value as CurveKind | 'tie',
       part: partId,
       staff: node?.dataset.staffId || row.dataset.staffId!,
-      note: note?.id ?? null,
-      beat,
+      note: hairpinTool ? null : note?.id ?? null,
+      beat: hairpinTool
+        ? Math.max(0, Math.round(beatAt(pos.x) / onsetSnap.value) * onsetSnap.value)
+        : beat,
       x: pos.x,
       y: pos.y,
       toX: pos.x,
@@ -2211,7 +2162,7 @@ function pointerMove(event: PointerEvent) {
       curveDrag.frame = requestAnimationFrame(() => {
         if (!curveDrag) return
         curveDrag.frame = 0
-        if (curveDrag.latest) applyCurveDrag(curveDrag.latest, false)
+        if (curveDrag.latest) { try { applyCurveDrag(curveDrag.latest, false) } catch (e) { error.value = e instanceof Error ? e.message : String(e) } }
       })
     return
   }
@@ -2223,14 +2174,8 @@ function pointerMove(event: PointerEvent) {
         ? event.target.closest<HTMLElement>('[data-staff-id]')
         : null
     ghost.value =
-      tool.value === 'write' && row && canEdit.value
-        ? {
-            left: xAt(
-              Math.max(0, Math.round(beatAt(pos.x) / onsetSnap.value)) *
-                onsetSnap.value,
-            ),
-            top: Math.round(pos.y / 5) * 5,
-          }
+      row && canEdit.value && (placement.value || tool.value === 'write')
+        ? toolGhost(row, pos)
         : null
     return
   }
@@ -2252,7 +2197,8 @@ function pointerUp(event: PointerEvent) {
   }
   if (curveDrag) {
     if (curveDrag.frame) cancelAnimationFrame(curveDrag.frame)
-    applyCurveDrag(event, true)
+    try { applyCurveDrag(event, true) } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+    curvePreview.value = null
     curveDrag = null
     if (viewport.value?.hasPointerCapture(event.pointerId))
       viewport.value.releasePointerCapture(event.pointerId)
@@ -2472,6 +2418,7 @@ function keydown(event: KeyboardEvent) {
   }
   if (mod || event.altKey) return
   if (key === 'Escape') {
+    cancelGesture()
     selectedElement.value = null
     gesture.value = null
     marquee.value = null
@@ -3066,7 +3013,21 @@ watch(
                 @click="placeTool('dynamic', String(level))"
               >
                 <i class="dynamic-glyph">{{ name }}</i>
-              </button></ScoreToolMenu
+              </button><button
+                title="Crescendo · drag across the bars it spans (raises the ramp one level)"
+                aria-label="Crescendo tool"
+                :disabled="!canEdit"
+                @click="placeTool('phrase', 'crescendo')"
+              >
+                <svg width="30" height="14" viewBox="0 0 30 14" aria-hidden="true"><path d="M2 7 L28 1 M2 7 L28 13" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button
+              ><button
+                title="Decrescendo · drag across the bars it spans (lowers the ramp one level)"
+                aria-label="Decrescendo tool"
+                :disabled="!canEdit"
+                @click="placeTool('phrase', 'decrescendo')"
+              >
+                <svg width="30" height="14" viewBox="0 0 30 14" aria-hidden="true"><path d="M28 7 L2 1 M28 7 L2 13" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button
+              ></ScoreToolMenu
             >
             <ScoreToolMenu label="Clefs" symbol="𝄞" class="glyphs"
               ><button
@@ -3319,13 +3280,7 @@ watch(
           @pointerdown="pointerDown"
           @pointermove="pointerMove"
           @pointerup="pointerUp"
-          @pointercancel="
-            () => {
-              gesture = null
-              marquee = null
-              elementDrag = null
-            }
-          "
+          @pointercancel="cancelGesture"
           @pointerleave="ghost = null"
           @touchstart.passive="touchStart"
           @touchmove="touchMove"
@@ -3541,10 +3496,11 @@ watch(
               @pointerdown.stop
             />
             <span
-              v-if="ghost && !gesture"
+              v-if="ghost && !gesture && !phraseDrag"
               class="entry-ghost"
+              :class="ghost.kind"
               :style="{ left: `${ghost.left}px`, top: `${ghost.top}px` }"
-              >●</span
+              >{{ ghost.label ?? '●' }}</span
             >
           </div>
         </div>
@@ -4296,8 +4252,50 @@ watch(
   position: absolute;
   pointer-events: none;
   color: #087f8c;
-  opacity: 0.55;
+  opacity: 0.6;
   transform: translate(-3px, -8px);
+  white-space: pre;
+  line-height: 1;
+  font-size: 22px;
+}
+.entry-ghost.note {
+  font-size: 26px;
+  transform: translate(-6px, -24px);
+}
+.entry-ghost.rest {
+  font-size: 26px;
+  transform: translate(-6px, -28px);
+}
+.entry-ghost.dynamic {
+  font: italic 700 15px serif;
+}
+.entry-ghost.clef {
+  font-size: 40px;
+  transform: translate(-6px, -10px);
+}
+.entry-ghost.meter {
+  font: 700 17px serif;
+  line-height: 0.9;
+  text-align: center;
+}
+.entry-ghost.tempo {
+  font: 700 12px sans-serif;
+}
+.entry-ghost[class*='mark'] {
+  font-size: 12px;
+}
+.entry-ghost.mark.rehearsal {
+  border: 1px solid #087f8c;
+  padding: 1px 4px;
+  font-weight: 700;
+}
+.entry-ghost.barline {
+  font-size: 34px;
+  transform: translate(0, -8px);
+}
+.entry-ghost.accent {
+  font-size: 18px;
+  font-weight: 700;
 }
 .mark-dialog {
   display: flex;
@@ -4792,6 +4790,24 @@ watch(
 }
 .score-workspace {
   --violet: #7054a5;
+  color-scheme: light;
+  scrollbar-color: #b9c4c6 #f4f7f7;
+}
+.score-workspace ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: #f4f7f7;
+}
+.score-workspace ::-webkit-scrollbar-thumb {
+  background: #b9c4c6;
+  border-radius: 5px;
+  border: 2px solid #f4f7f7;
+}
+.score-workspace ::-webkit-scrollbar-thumb:hover {
+  background: #8fa0a3;
+}
+.score-workspace ::-webkit-scrollbar-corner {
+  background: #f4f7f7;
 }
 .score-workspace :deep(.midi-lanes) {
   background: #fff;

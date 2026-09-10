@@ -65,6 +65,16 @@ test('slur, tie and bracket drag tools, curve handles, and inline text entry', a
     { x: shapeBox.x + shapeBox.width / 2, y: shapeBox.y + shapeBox.height / 2 + 20 },
   )
   await expect.poll(async () => (await curves())[0]?.height).toBeGreaterThan(-15)
+  // The end handle lifts only its own end.
+  const endHandle = page.getByRole('button', { name: 'End handle of slur', exact: true })
+  const endBox = (await endHandle.boundingBox())!
+  await drag(
+    { x: endBox.x + endBox.width / 2, y: endBox.y + endBox.height / 2 },
+    { x: endBox.x + endBox.width / 2, y: endBox.y + endBox.height / 2 - 18 },
+  )
+  await expect.poll(async () => (await curves())[0]?.end_lift).toBeLessThan(-10)
+  expect((await curves())[0].lift).toBe(0)
+  expect((await curves())[0].end_note).toBe('c')
   // Backspace deletes the selected curve.
   hit = await onCurve()
   await page.mouse.click(hit.x, hit.y)
@@ -91,6 +101,47 @@ test('slur, tie and bracket drag tools, curve handles, and inline text entry', a
   await drag(await center('c'), await center('d'))
   await expect(page.getByRole('alert')).toContainText('same pitch')
   await page.keyboard.press('Escape')
+  // Crescendo: a wedge on the staff plus a one-level rise on the velocity ramp.
+  await page.getByLabel('Dynamics', { exact: true }).click()
+  await page.getByRole('button', { name: 'Crescendo tool', exact: true }).click()
+  await drag({ x: staffBox.x + 640, y: staffBox.y + 150 }, { x: staffBox.x + 900, y: staffBox.y + 150 })
+  await expect.poll(async () => (await curves()).some((c: any) => c.kind === 'crescendo')).toBe(true)
+  const hairpin = (await curves()).find((c: any) => c.kind === 'crescendo')
+  const ramp = async () => (await read()).parts[0].staves[0].dynamics?.events ?? []
+  await expect.poll(async () => (await ramp()).length).toBeGreaterThan(0)
+  const rampStart = (await ramp()).find((e: any) => Math.abs(e.beat - hairpin.start_beat) < 1e-9)
+  expect(rampStart.end - rampStart.start).toBe(16)
+  await page.keyboard.press('Escape')
+  // A multi-frame endpoint drag is one undo entry and carries the owned ramp.
+  const wedge = page.locator(`[data-score-element*="${hairpin.id}"]`).first()
+  const wedgePoint = await wedge.evaluate(el => {
+    const path = el.querySelector<SVGPathElement>('path:not([data-score-hit])')!
+    const pt = path.getPointAtLength(path.getTotalLength()/4), m=path.getScreenCTM()!
+    return {x:pt.x*m.a+pt.y*m.c+m.e,y:pt.x*m.b+pt.y*m.d+m.f}
+  })
+  await page.mouse.click(wedgePoint.x,wedgePoint.y)
+  const hairpinEnd = page.getByRole('button',{name:'End handle of crescendo',exact:true})
+  const hb=(await hairpinEnd.boundingBox())!
+  await drag({x:hb.x+hb.width/2,y:hb.y+hb.height/2},{x:hb.x+hb.width/2+70,y:hb.y+hb.height/2})
+  await expect.poll(async()=> (await curves()).find((c:any)=>c.id===hairpin.id)?.end_beat).toBeGreaterThan(hairpin.end_beat)
+  const moved=(await curves()).find((c:any)=>c.id===hairpin.id)
+  const owned=(await ramp()).find((e:any)=>e.id===`hairpin:${hairpin.id}`)
+  expect(owned.beat+owned.duration).toBe(moved.end_beat)
+  await page.getByRole('button',{name:'Undo',exact:true}).click()
+  await expect.poll(async()=> (await curves()).find((c:any)=>c.id===hairpin.id)?.end_beat).toBe(hairpin.end_beat)
+  expect((await ramp()).find((e:any)=>e.id===`hairpin:${hairpin.id}`).duration).toBe(hairpin.end_beat-hairpin.start_beat)
+  await page.keyboard.press('Escape')
+  // Dynamic marks show on the staff as text and can be deleted there.
+  await page.getByLabel('Dynamics', { exact: true }).click()
+  await page.getByRole('button', { name: 'p dynamic tool', exact: true }).click()
+  await staff.click({ position: { x: 300, y: 118 } })
+  const dynamicText = page.locator('[data-score-element*="dynamic"]').filter({ hasText: /^p$/ })
+  await expect(dynamicText).toBeVisible()
+  await page.keyboard.press('Escape')
+  await dynamicText.locator('text').first().click()
+  await expect(page.getByText('Selected dynamic', { exact: false })).toBeVisible()
+  await page.keyboard.press('Backspace')
+  await expect.poll(async () => (await ramp()).some((e: any) => e.start === 48)).toBe(false)
   // Text tool: inline entry at the clicked beat.
   await page.getByLabel('Text and tempo', { exact: true }).click()
   await page.getByRole('button', { name: 'Text tool', exact: true }).click()

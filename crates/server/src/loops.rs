@@ -4,18 +4,17 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        mpsc::{self, SyncSender, TrySendError},
+        mpsc::{self, SyncSender},
     },
 };
 
-type Snapshot = (String, u8, usize, u32, Vec<f32>);
+pub(crate) type Snapshot = (String, u8, usize, u32, Vec<f32>);
 enum Job {
     Save(String, Snapshot),
     Barrier(mpsc::Sender<()>),
 }
 pub struct Store {
     tx: SyncSender<Job>,
-    pending: Option<Job>,
     error: Arc<Mutex<Option<String>>>,
 }
 fn root() -> PathBuf {
@@ -96,36 +95,27 @@ impl Store {
                 }
             })
             .expect("Start loop file worker");
-        Self {
-            tx,
-            pending: None,
-            error,
-        }
+        Self { tx, error }
+    }
+    pub(crate) fn save(&self, project: String, snapshot: Snapshot) -> Result<(), String> {
+        self.tx
+            .send(Job::Save(project, snapshot))
+            .map_err(|e| e.to_string())
+    }
+    pub(crate) fn barrier(&self) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(Job::Barrier(tx)).map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?;
+        self.error().map_or(Ok(()), Err)
+    }
+    pub fn reset_error(&self) {
+        *self.error.lock().unwrap() = None;
     }
     pub fn error(&self) -> Option<String> {
         self.error.lock().unwrap().clone()
     }
-    pub fn poll(&mut self, project: &str, engine: &mut Engine) {
-        let job = self.pending.take().or_else(|| {
-            engine
-                .take_loop_snapshot()
-                .map(|s| Job::Save(project.into(), s))
-        });
-        if let Some(job) = job {
-            match self.tx.try_send(job) {
-                Ok(()) => {}
-                Err(TrySendError::Full(job)) => self.pending = Some(job),
-                Err(TrySendError::Disconnected(_)) => {
-                    *self.error.lock().unwrap() = Some("Loop storage worker unavailable".into())
-                }
-            }
-        }
-    }
-    // Between blocks only. Flush before acknowledging disable/clear or dropping an engine.
+    #[cfg(test)]
     pub fn flush(&mut self, project: &str, engine: &mut Engine) -> Result<(), String> {
-        if let Some(job) = self.pending.take() {
-            self.tx.send(job).map_err(|e| e.to_string())?;
-        }
         while let Some(snapshot) = engine.take_loop_snapshot() {
             self.tx
                 .send(Job::Save(project.into(), snapshot))
@@ -223,10 +213,10 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(pcm, [0.25, -0.25, 0.5, -0.5]);
-        store.pending = Some(Job::Save(
+        store.tx.send(Job::Save(
             p.id.clone(),
             (id.clone(), 1, 2, 100, vec![0.125, -0.125]),
-        ));
+        )).unwrap();
         store.flush(&p.id, &mut engine).unwrap();
         assert_eq!(
             hound::WavReader::open(&file)
@@ -237,10 +227,10 @@ mod tests {
             [0.125, -0.125]
         );
         // A queued replacement must complete before a subsequent clear.
-        store.pending = Some(Job::Save(
+        store.tx.send(Job::Save(
             p.id.clone(),
             (id.clone(), 1, 2, 100, vec![1., -1.]),
-        ));
+        )).unwrap();
         engine.clear_loop(&id, 1).unwrap();
         store.flush(&p.id, &mut engine).unwrap();
         assert!(!file.exists());
@@ -261,10 +251,10 @@ mod tests {
         let mut store = Store::at(root.clone());
         let p = pr0_core::demo_project("project".into(), "Loops".into(), pr0_core::Mode::Freeform);
         let mut engine = Engine::prepare(p.graph, 100.).unwrap();
-        store.pending = Some(Job::Save(
+        store.tx.send(Job::Save(
             p.id.clone(),
             ("node".into(), 1, 1, 100, vec![1.]),
-        ));
+        )).unwrap();
         assert!(
             store
                 .flush(&p.id, &mut engine)

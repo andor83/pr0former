@@ -37,6 +37,27 @@ pub struct AudioBlock {
     pub pcm: Arc<Vec<f32>>,
     pub monitors: BTreeMap<String, Arc<Vec<f32>>>,
 }
+struct MonitorSubscription {
+    engine: std::sync::mpsc::SyncSender<crate::audio::Command>,
+    session: String,
+    project: String,
+    node: Option<String>,
+}
+impl MonitorSubscription {
+    fn refresh(&self, enabled: bool) {
+        let _ = self.engine.try_send(crate::audio::Command::Monitor {
+            session: self.session.clone(),
+            project: self.project.clone(),
+            node: self.node.clone(),
+            enabled,
+        });
+    }
+}
+impl Drop for MonitorSubscription {
+    fn drop(&mut self) {
+        self.refresh(false);
+    }
+}
 type Peers = Arc<Mutex<BTreeMap<String, Arc<RTCPeerConnection>>>>;
 type Admissions = Arc<StdMutex<BTreeMap<String, Arc<AtomicBool>>>>;
 struct SessionLease {
@@ -317,6 +338,12 @@ pub async fn offer(
         .await
         .ok_or_else(|| bad("No local SDP"))?;
     let mut audio = app.media.audio.subscribe();
+    let subscription = MonitorSubscription {
+        engine: app.engine.clone(),
+        session: uuid::Uuid::new_v4().to_string(),
+        project: id.clone(),
+        node: monitor_node.clone(),
+    };
     let pc = peer.clone();
     let project_id = id.clone();
     {
@@ -331,6 +358,8 @@ pub async fn offer(
         peers.insert(key, peer.clone());
     }
     tokio::spawn(async move {
+        let subscription = subscription;
+        let mut subscription_seen = std::time::Instant::now() - Duration::from_secs(3);
         let _lease = lease;
         let Ok(mut encoder) =
             opus::Encoder::new(48000, opus::Channels::Stereo, opus::Application::Audio)
@@ -358,6 +387,10 @@ pub async fn offer(
                 }
             } else {
                 disconnected = 0;
+            }
+            if subscription_seen.elapsed() >= Duration::from_secs(2) {
+                subscription.refresh(true);
+                subscription_seen = std::time::Instant::now();
             }
             let next = tokio::time::timeout(Duration::from_secs(2), audio.recv()).await;
             let block = match next {

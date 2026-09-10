@@ -248,7 +248,7 @@ test('shared score meter/repeats and MIDI automation reach the graph and round-t
   await page.getByRole('button', { name: 'Score & Parts', exact: true }).click()
   await page.getByRole('button', { name: /^▸ Dynamics & ramps/ }).click()
   await expect(
-    page.getByRole('checkbox', { name: 'Show Expression · CC11', exact: true }),
+    page.getByRole('button', { name: 'Expression · CC11', exact: true }),
   ).toBeVisible()
   await page.getByLabel('Count in', { exact: true }).selectOption('0')
   await page.getByRole('button', { name: 'Play', exact: true }).click()
@@ -728,7 +728,7 @@ test('compact score dialogs, editable marks and drag-based piano roll', async ({
   await expect
     .poll(async () => (await read()).parts[0].staves[0].dynamics?.events)
     .toEqual([{ id: 'dyn', beat: 1, duration: 0, start: 64, end: 64, curve: 'linear' }])
-  expect((await read()).parts[0].dynamics).toBeFalsy()
+  expect((await read()).parts[0].dynamics.events).toEqual([{ id: 'dyn', beat: 1, duration: 1, start: 64, end: 96, curve: 'linear' }])
   // Clicking the graph adds a point on the active (velocity) line.
   const graphBox = (await graph.boundingBox())!
   await graph.click({ position: { x: 700, y: graphBox.height / 2 } })

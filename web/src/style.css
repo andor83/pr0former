@@ -173,3 +173,41 @@ body{position:fixed;inset:0}
 .metronome-toggle{margin-left:8px;color:#8a9a9d}.metronome-toggle[aria-pressed=true]{color:var(--amber);background:#dfb87918}.metronome-toggle:disabled{opacity:.35}
 
 .transport-right .button.collapsible{display:inline-flex;align-items:center;gap:8px}.transport-right .button.live{border-color:#3d6b66;color:var(--cyan)}
+
+.engine-console.console-standalone{position:fixed;inset:0;width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;margin:0;border:0;border-radius:0;display:flex;flex-direction:column}.engine-console.console-standalone .console-lines{flex:1;max-height:none}.console-controls .button.small{margin-left:8px}
+
+/* Light graph theme: canvas and library panels only; node cards keep their charcoal look. */
+.graph-light .graph-canvas{background:radial-gradient(ellipse at 55% 45%,#f7f9f9 0%,#e9eeee 80%)}
+.graph-light .node-library{background:#f4f7f7;border-right-color:#d3dcdd;color:#16232a}
+.graph-light .library-heading h3,.graph-light .library-node>span:nth-child(2),.graph-light .library-accordion-title{color:#16232a}
+.graph-light .library-node small,.graph-light .library-footer,.graph-light .library-heading .eyebrow,.graph-light .canvas-caption,.graph-light .canvas-bottom-note{color:#5a6c70}
+.graph-light .library-node:hover{background:#e2eaea}
+.graph-light .library-glyph{background:#ffffff;border-color:#cbd5d7;color:#087f8c}
+.graph-light .library-glyph.control{background:#fff4e0;border-color:#e0c48a;color:#8a5a00}
+.graph-light .library-glyph.spectral{color:#7054a5}
+.graph-light .search-box{background:#ffffff;border-color:#cbd5d7;color:#5a6c70}
+.graph-light .search-box input{color:#16232a}
+.graph-light .search-box kbd{border-color:#cbd5d7;color:#5a6c70}
+.graph-light .node-library>select,.graph-light .node-library-content>select{background:#ffffff;color:#16232a;border-color:#cbd5d7}
+.graph-light .subgraph-library{border-top-color:#d3dcdd}
+.graph-light .canvas-tools{background:#ffffffee;border-color:#cbd5d7}
+.graph-light .canvas-tools .icon-button{color:#3d4f53}
+.graph-light .canvas-tools .icon-button:hover{background:#e2eaea;color:#111}
+.graph-light .canvas-caption>span{color:#9aabaf}
+.graph-light .vue-flow__controls{border-color:#cbd5d7}
+.graph-light .vue-flow__controls-button{background:#ffffff;border-right-color:#cbd5d7;fill:#3d4f53}
+.graph-light .vue-flow__controls-button:hover{background:#e2eaea}
+.graph-light .vue-flow__background pattern circle,.graph-light .vue-flow__background-pattern-dots{fill:#c3cfd1}
+.graph-light .signal-edge{opacity:.85}
+.graph-light .channel-badge{background:#ffffff;border-color:#8fbdbb;color:#0b6b74}
+.graph-light .connection-hint{background:#fff4e0;color:#8a5a00}
+
+/* Persistent save feedback and larger interactive targets preserve the existing theme. */
+.save-status{font-size:11px;line-height:1.3;max-width:150px;color:var(--muted);white-space:normal}
+.ramp-node:focus-visible .hit{stroke:#087f8c!important;stroke-width:2!important}
+@media(pointer:coarse){
+  .workspace-tabs{height:44px;min-height:44px}
+  .workspace-tabs nav button,.topbar .icon-button,.score-workspace button{min-height:44px;min-width:44px}
+  .ramp-node .hit{r:22px}
+}
+@media(max-width:760px){.save-status{max-width:96px;font-size:10px}.topbar-right{gap:6px}}

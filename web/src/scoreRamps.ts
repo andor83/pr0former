@@ -5,6 +5,9 @@ import { staves } from './score'
 export interface RampNode {
   beat: number
   value: number
+  /** Authored outgoing event and identities of ramps ending at this point. Editor-only. */
+  event?: AutomationEvent
+  ends?: Record<string, number>
 }
 export const dynamicLevels: [string, number][] = [
   ['ppp', 16],
@@ -22,57 +25,62 @@ export function dynamicName(value: number) {
   return dynamicLevels.find(([, v]) => v === value)?.[0]
 }
 const eps = 1e-9
-/** Breakpoints implied by ramp events: each event contributes its start and (if it ramps) its end. */
+/** Preserve event identities, holds and interpolation; terminal points are handles, not events. */
 export function nodesFromEvents(events: AutomationEvent[]): RampNode[] {
-  const byBeat = new Map<number, number>()
-  for (const e of [...events].sort((a, b) => a.beat - b.beat)) {
-    byBeat.set(e.beat, e.start)
-    if (e.duration > 0) byBeat.set(e.beat + e.duration, e.end)
-  }
-  return [...byBeat.entries()]
-    .map(([beat, value]) => ({ beat, value }))
-    .sort((a, b) => a.beat - b.beat)
-}
-/** Linear ramps between consecutive breakpoints; the last one holds its value. */
-export function eventsFromNodes(
-  nodes: RampNode[],
-  previous: AutomationEvent[] = [],
-): AutomationEvent[] {
-  const sorted = [...nodes].sort((a, b) => a.beat - b.beat)
-  return sorted.map((n, i) => {
-    const next = sorted[i + 1]
-    return {
-      id: previous[i]?.id ?? newId(),
-      beat: n.beat,
-      duration: next ? Math.max(0, next.beat - n.beat) : 0,
-      start: n.value,
-      end: next ? next.value : n.value,
-      curve: 'linear' as const,
+  const byBeat = new Map<number, RampNode>()
+  for (const e of events) {
+    const old = byBeat.get(e.beat)
+    byBeat.set(e.beat, { ...old, beat: e.beat, value: e.duration === 0 ? e.end : e.start, event: { ...e } })
+    if (e.duration > 0) {
+      const beat = e.beat + e.duration, end = byBeat.get(beat)
+      byBeat.set(beat, { beat, value: e.end, ...end, ends: { ...end?.ends, [e.id]: e.end } })
     }
+  }
+  return [...byBeat.values()].sort((a,b) => a.beat-b.beat)
+}
+export function eventsFromNodes(nodes: RampNode[], _previous: AutomationEvent[] = []): AutomationEvent[] {
+  const sorted = [...nodes].sort((a,b) => a.beat-b.beat)
+  return sorted.flatMap((n, i) => {
+    if (!n.event && n.ends && Object.keys(n.ends).length) return []
+    const next = sorted[i+1]
+    if (n.event) {
+      const endpoint = sorted.find(p => p.ends?.[n.event!.id] !== undefined)
+      const endBeat = endpoint ? Math.max(n.beat, Math.min(endpoint.beat, next?.beat ?? Infinity)) : n.beat
+      return [{ ...n.event, beat: n.beat, start: n.event.start + n.value - (n.event.duration === 0 ? n.event.end : n.event.start),
+        duration: n.event.duration > 0 ? endBeat-n.beat : 0,
+        end: n.event.duration > 0 && endpoint ? (next && next.beat < endpoint.beat ? next.value : endpoint.ends![n.event.id]!) : n.value }]
+    }
+    return [{ id: newId(), beat: n.beat, duration: next ? next.beat-n.beat : 0,
+      start: n.value, end: next?.value ?? n.value, curve: 'linear' as const }]
   })
 }
-/** Value the line has at `beat` (what a note triggered there would receive). */
+export function curveValue(curve: AutomationEvent['curve'], t: number) {
+  t = Math.max(0, Math.min(1, t))
+  return curve === 'step' ? (t >= 1 ? 1 : 0) : curve === 'ease_in' ? t*t : curve === 'ease_out' ? 1-(1-t)*(1-t) : curve === 's_curve' ? t*t*(3-2*t) : t
+}
+/** The same pre-event fallback, interpolation and final hold as the engine. */
 export function interpolate(nodes: RampNode[], beat: number, fallback = neutralLevel) {
-  const sorted = [...nodes].sort((a, b) => a.beat - b.beat)
-  if (!sorted.length) return fallback
-  if (beat <= sorted[0]!.beat + eps) return sorted[0]!.value
-  const last = sorted.at(-1)!
-  if (beat >= last.beat - eps) return last.value
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const a = sorted[i]!,
-      b = sorted[i + 1]!
-    if (beat >= a.beat - eps && beat <= b.beat + eps) {
-      const t = b.beat === a.beat ? 1 : (beat - a.beat) / (b.beat - a.beat)
-      return a.value + (b.value - a.value) * t
-    }
-  }
-  return last.value
+  const events = eventsFromNodes(nodes)
+  return automationValue(events, beat, fallback)
+}
+export function automationValue(events: AutomationEvent[], beat: number, fallback = neutralLevel) {
+  const e = [...events].reverse().find(e => e.beat <= beat)
+  if (!e) return fallback
+  return e.start + (e.end-e.start) * curveValue(e.curve, e.duration === 0 ? 1 : (beat-e.beat)/e.duration)
 }
 /** Replace or insert the node at `beat`. */
+function withValue(node: RampNode | undefined, beat: number, value: number): RampNode {
+  return { ...node, beat, value, ...(node?.ends ? { ends: Object.fromEntries(Object.entries(node.ends).map(([id,end]) => [id, end === node.value ? value : end])) } : {}) }
+}
 export function setNode(nodes: RampNode[], beat: number, value: number): RampNode[] {
-  return [...nodes.filter((n) => Math.abs(n.beat - beat) > eps), { beat, value }].sort(
-    (a, b) => a.beat - b.beat,
-  )
+  return [...nodes.filter(n => Math.abs(n.beat-beat) > eps), withValue(nodes.find(n => Math.abs(n.beat-beat) <= eps), beat, value)].sort((a,b) => a.beat-b.beat)
+}
+export function moveNode(nodes: RampNode[], from: number, beat: number, value?: number): RampNode[] {
+  const node = nodes.find(n => Math.abs(n.beat-from) <= eps)
+  if (!node) return nodes
+  if (Math.abs(from-beat) > eps && nodes.some(n => Math.abs(n.beat-beat) <= eps))
+    throw new Error('A ramp point already occupies that beat.')
+  return [...removeNode(nodes, from), withValue(node, beat, value ?? node.value)].sort((a,b) => a.beat-b.beat)
 }
 export function removeNode(nodes: RampNode[], beat: number): RampNode[] {
   return nodes.filter((n) => Math.abs(n.beat - beat) > eps)
@@ -112,10 +120,10 @@ export function laneLabel(lane: AutomationLane) {
   return `${lane.name} · ${kind}`
 }
 export const velocityLine = (staffId: string) => `velocity:${staffId}`
-/** Ramp events for a staff: its own dynamics, else the legacy part-level dynamics on the first staff. */
+/** Ramp events for a staff: its own dynamics, else the legacy part-level dynamics. */
 export function staffDynamicsEvents(part: Part, staff: Staff): AutomationEvent[] {
   if (staff.dynamics) return staff.dynamics.events
-  return staves(part)[0]?.id === staff.id ? part.dynamics?.events || [] : []
+  return part.dynamics?.events || []
 }
 /** Lanes drawn as ramps; program changes are steps, notes are edited in the score itself. */
 export const rampMessages = ['cc', 'bend', 'pressure', 'poly_pressure', 'program'] as const
@@ -137,12 +145,24 @@ export function writeRamp(part: Part, lineId: string, nodes: RampNode[]): Part {
     const dynamics: Dynamics = {
       mode: 'velocity',
       controller: 11,
-      ...(list[index]!.dynamics ?? (index === 0 ? part.dynamics : null)),
+      ...(list[index]!.dynamics ?? part.dynamics),
       events: eventsFromNodes(nodes, previous),
     }
-    list[index] = { ...list[index]!, dynamics }
-    // The first staff takes over the legacy part-level dynamics so they are not applied twice.
-    return { ...part, staves: list, dynamics: index === 0 ? null : part.dynamics }
+    const previousIds = new Set(previous.map(e => e.id))
+    const curves = list[index]!.curves?.flatMap(c => {
+      if (!previousIds.has(`hairpin:${c.id}`)) return [c]
+      const event = dynamics.events.find(e => e.id === `hairpin:${c.id}`)
+      let retained = c.start_dynamic
+      if (retained && (!event || event.beat !== c.start_beat || event.duration === 0)) {
+        dynamics.events.push({ ...retained, beat:c.start_beat, duration:0 })
+        retained = null
+      }
+      return event && event.duration > 0 ? [{ ...c, start_dynamic:retained, start_beat:event.beat, end_beat:event.beat+event.duration }] : []
+    })
+    dynamics.events.sort((a,b)=>a.beat-b.beat)
+    list[index] = { ...list[index]!, dynamics, curves }
+    // Overrides are staff-local; other staves still inherit the part defaults.
+    return { ...part, staves: list }
   }
   return {
     ...part,

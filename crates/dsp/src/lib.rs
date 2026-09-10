@@ -1562,6 +1562,28 @@ impl Engine {
         }
     }
     /// Off-render persistence API. A zero-length snapshot deletes the previous recording.
+    pub fn take_loop_chunk(
+        &mut self,
+        limit: usize,
+    ) -> Option<(String, u8, usize, u32, usize, usize, Vec<f32>)> {
+        for node in &mut self.nodes {
+            if let Some(looper) = &mut node.looper {
+                if let Some((track, channels, offset, total, audio)) = looper.snapshot_chunk(limit)
+                {
+                    return Some((
+                        node.id.clone(),
+                        track,
+                        channels,
+                        self.clock.sample_rate as u32,
+                        offset,
+                        total,
+                        audio,
+                    ));
+                }
+            }
+        }
+        None
+    }
     pub fn take_loop_snapshot(&mut self) -> Option<(String, u8, usize, u32, Vec<f32>)> {
         for node in &mut self.nodes {
             if let Some(looper) = &mut node.looper {

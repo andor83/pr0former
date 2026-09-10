@@ -11,6 +11,7 @@ mod node_io;
 mod osc;
 mod output_buffer;
 mod performance;
+mod persistence;
 mod presence;
 mod recordings;
 mod resources;

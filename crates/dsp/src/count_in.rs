@@ -49,7 +49,8 @@ impl CountIn {
 /// accented on the first beat of each bar. Advanced once per engine sample.
 #[derive(Default)]
 pub struct Metronome {
-    last_index: Option<i64>,
+    last_index: Option<(i64, u64, u8, u8)>,
+    last_position: f64,
     click_sample: u64,
     accent: bool,
 }
@@ -61,17 +62,30 @@ impl Metronome {
     /// `beats_per_bar` and `beat_unit` describe the meter in force; the clock beat
     /// is in quarter notes. Returns the click sample while one is sounding.
     pub fn next(&mut self, clock: &Clock, beats_per_bar: u8, beat_unit: u8) -> Option<f32> {
+        self.next_at(clock, clock.beat, 0., beats_per_bar, beat_unit)
+    }
+    /// The scheduler supplies written position and meter origin across repeats/changes.
+    pub fn next_at(
+        &mut self,
+        clock: &Clock,
+        position: f64,
+        origin: f64,
+        beats_per_bar: u8,
+        beat_unit: u8,
+    ) -> Option<f32> {
         if !clock.running {
             self.last_index = None;
             return None;
         }
         let unit = 4. / f64::from(beat_unit.max(1));
-        let index = ((clock.beat + 1e-9) / unit).floor() as i64;
-        if Some(index) != self.last_index {
-            self.last_index = Some(index);
+        let index = ((position - origin + 1e-9) / unit).floor() as i64;
+        let key = (index, origin.to_bits(), beats_per_bar, beat_unit);
+        if Some(key) != self.last_index || position + 1e-9 < self.last_position {
+            self.last_index = Some(key);
             self.click_sample = clock.sample;
             self.accent = index.rem_euclid(i64::from(beats_per_bar.max(1))) == 0;
         }
+        self.last_position = position;
         let elapsed = (clock.sample - self.click_sample) as f64 / clock.sample_rate;
         if elapsed >= 0.03 {
             return None;
@@ -166,5 +180,33 @@ mod tests {
         assert!(count.next(&clock).is_none());
         assert_eq!(clock.beat, 0.);
         assert!(CountIn::new(0, 4).is_none());
+    }
+}
+
+#[cfg(test)]
+mod meter_tests {
+    use super::*;
+    #[test]
+    fn meter_changes_and_repeat_jumps_restart_the_written_accent() {
+        let mut clock = Clock::new(48000.);
+        clock.running = true;
+        let mut metro = Metronome::new();
+        metro.next_at(&clock, 3., 0., 4, 4);
+        assert!(!metro.accent);
+        clock.sample += 24000;
+        metro.next_at(&clock, 4., 4., 6, 8);
+        assert!(metro.accent);
+        clock.sample += 12000;
+        metro.next_at(&clock, 4.5, 4., 6, 8);
+        assert!(!metro.accent);
+        clock.sample += 24000;
+        metro.next_at(&clock, 4., 4., 6, 8);
+        assert!(metro.accent);
+        assert_eq!(metro.click_sample, clock.sample);
+        // Repeat within one denominator beat must still restart the click.
+        metro.next_at(&clock, 4.25, 4., 6, 8);
+        clock.sample += 12000;
+        metro.next_at(&clock, 4., 4., 6, 8);
+        assert_eq!(metro.click_sample, clock.sample);
     }
 }

@@ -1,6 +1,16 @@
+import { isHairpin, retimeHairpin } from './scoreCurves'
 import type { Note, Project } from './types'
 import { atBeat, metadata, staves, withNotation } from './score'
 import { newId } from './id'
+import {
+  moveNode,
+  nodesFromEvents,
+  removeNode,
+  setNode,
+  staffDynamicsEvents,
+  velocityLine,
+  writeRamp,
+} from './scoreRamps'
 export interface ScoreElement {
   kind: string
   part: string
@@ -56,7 +66,24 @@ export function deleteElement(
   if (e.kind === 'curve' && e.curve) {
     p.staves = staves(p)
     const s = p.staves.find((s) => s.id === e.staff)
-    if (s) s.curves = (s.curves || []).filter((c) => c.id !== e.curve)
+    if (s) {
+      const curve = s.curves?.find(c => c.id === e.curve)
+      s.curves = (s.curves || []).filter(c => c.id !== e.curve)
+      if (s.dynamics) s.dynamics = { ...s.dynamics, events: [...s.dynamics.events.filter(event => event.id !== `hairpin:${e.curve}`), ...(curve?.start_dynamic ? [{...curve.start_dynamic,beat:curve.start_beat,duration:0}] : [])].sort((a,b)=>a.beat-b.beat) }
+    }
+    return
+  }
+  if (e.kind === 'dynamic' && e.beat !== undefined) {
+    const s = staves(p).find((s) => s.id === e.staff)
+    if (s)
+      Object.assign(
+        p,
+        writeRamp(
+          p,
+          velocityLine(s.id),
+          removeNode(nodesFromEvents(staffDynamicsEvents(p, s)), e.beat),
+        ),
+      )
     return
   }
   const n = p.notes.find((n) => n.id === e.note)
@@ -138,17 +165,38 @@ export function moveElement(
     }
     return
   }
+  if (e.kind === 'dynamic' && e.beat !== undefined) {
+    const s = staves(p).find((s) => s.id === e.staff)
+    if (!s) return
+    const nodes = nodesFromEvents(staffDynamicsEvents(p, s)),
+      node = nodes.find((n) => Math.abs(n.beat - e.beat!) < 1e-9)
+    if (node)
+      Object.assign(
+        p,
+        writeRamp(
+          p,
+          velocityLine(s.id),
+          moveNode(nodes, node.beat, Math.max(0, node.beat + delta), node.value),
+        ),
+      )
+    return
+  }
   if (e.kind === 'curve' && e.curve) {
     p.staves = staves(p)
     const c = p.staves.find((s) => s.id === e.staff)?.curves?.find((c) => c.id === e.curve)
     if (c) {
       // Dragging the whole curve detaches it from its notes and shifts both ends.
       const shift = Math.max(-c.start_beat, delta)
+      if (isHairpin(c.kind)) {
+        Object.assign(p, retimeHairpin(p, e.staff!, c, c.start_beat+shift, c.end_beat+shift))
+        return
+      }
       c.start_beat += shift
       c.end_beat += shift
       c.start_note = null
       c.end_note = null
       c.lift = Math.max(-200, Math.min(200, c.lift - step * 5))
+      c.end_lift = Math.max(-200, Math.min(200, (c.end_lift ?? 0) - step * 5))
     }
     return
   }
