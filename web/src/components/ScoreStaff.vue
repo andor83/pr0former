@@ -44,6 +44,8 @@ const props = defineProps<{
   scale: number
   selected: Set<string>
   selectedElement?: string | null
+  /** Performance score is a read-only display; its notation must not capture input. */
+  interactive?: boolean
   beat: number
   origin: number
   /** First staff of its part: bar numbers, repeat counts and navigation text are drawn once per system. */
@@ -138,10 +140,14 @@ function render() {
         key = elementKey(e)
       el.dataset.scoreElement = key
       el.dataset.selected = String(props.selectedElement === key)
-      el.setAttribute('role', 'button')
-      el.setAttribute('aria-label', `${e.kind} at beat ${(e.beat ?? 0) + 1}`)
-      el.style.cursor = 'pointer'
-      el.style.pointerEvents = 'all'
+      if (props.interactive !== false) {
+        el.setAttribute('role', 'button')
+        el.setAttribute('aria-label', `${e.kind} at beat ${(e.beat ?? 0) + 1}`)
+        el.style.cursor = 'pointer'
+        el.style.pointerEvents = 'all'
+      } else {
+        el.style.pointerEvents = 'none'
+      }
       if (props.selectedElement === key) {
         el.style.filter = 'drop-shadow(0 0 2px #16803c)'
         el.setAttribute('color', '#16803c')

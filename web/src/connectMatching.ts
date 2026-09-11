@@ -5,6 +5,11 @@ export function matchingPorts(source:GraphNode,target:GraphNode,nodes:GraphNode[
   if(!a||!b)return []
   const inputs=[...b.inputs,...b.parameters.filter(p=>!p.structural).map(p=>({id:p.id,label:p.label,signal:'control' as const,fixed_channels:null}))]
   const pairs:{source_port:string;target_port:string}[]=[]
+  // A complete MIDI cable is the compact default for note-oriented nodes.
+  // Users can still wire the individual control ports explicitly afterward.
+  const midiIn=b.inputs.find(p=>p.signal==='midi'), midiOut=a.outputs.find(p=>p.signal==='midi')
+  if(midiIn&&midiOut&&!edges.some(e=>e.target===target.id&&e.target_port===midiIn.id)&&!edges.some(e=>e.source===source.id&&e.target===target.id&&e.source_port===midiOut.id&&e.target_port===midiIn.id))
+    return [{source_port:midiOut.id,target_port:midiIn.id}]
   for(const input of inputs){
     if(input.signal!=='control'&&edges.some(e=>e.target===target.id&&e.target_port===input.id))continue
     const output=a.outputs.find(o=>o.signal===input.signal&&(o.id===input.id||o.label.trim().toLowerCase()===input.label.trim().toLowerCase())&&(o.signal==='control'||(o.fixed_channels??source.channels)===(input.fixed_channels??target.channels)))

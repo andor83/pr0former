@@ -28,5 +28,6 @@ webrtc = "0.14"
 opus = "0.3"
 bytes = "1"
 if-addrs = "0.15"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 libc = "0.2"

@@ -26,7 +26,7 @@ export interface PartPlayback { position_end?:number|null; id: string; playing: 
 export interface Visualization {kind:'control'|'audio'|'spectral';value?:number|string;sequence?:number;generation?:number;size?:number;ready?:boolean;polar?:boolean;channels?:{magnitude:number[];phase:number[]}[];history?:string[];columns?:number}
 export interface Telemetry { worker_max_work_us?:number; worker_max_block_gap_us?:number; route_targets?:Record<string,string>; midi_input_error?: string | null; node_io?: {error: string | null; dropped: number}; count_in_remaining?: number | null; metronome?: boolean; sample_rate?:number;block_size?:number;visualizations?:Record<string,Visualization>;  parts: PartPlayback[]; type: 'telemetry'; project_id: string; revision: number; epoch: string; sequence: number; server_time: number; sample: number; beat: number; bpm: number; running: boolean; hardware_enabled: boolean; underruns: number; error: string; values: Record<string, Record<string, number>> }
 export interface Summary { id: string; name: string; mode: Mode; role: string; revision: number; bpm?:number; beats_per_bar?:number; beat_unit?:number; schema_version?:number; parts?:number; nodes?:number; owner?:string; opened?:number|null }
-export interface Member { id: string; username: string; role: string }
+export interface Member { id: string; username: string; role: string; first_name?:string; last_name?:string; organization?:string; avatar_revision?:number; assigned_parts?:number }
 
 
 export interface HardwareDeviceLevels {id:number;name:string;channels:number;levels:{channel:number;peak?:number}[]}

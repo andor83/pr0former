@@ -31,6 +31,7 @@ import QuickNodeBrowser from './components/QuickNodeBrowser.vue'
 import {recentProjects} from './projectSearch'
 import EngineConsole from './components/EngineConsole.vue'
 import TaskProgress from './components/TaskProgress.vue'
+import EnsembleWorkspace from './components/EnsembleWorkspace.vue'
 const settingsOpen = ref(false), systemOpen=ref(false), consoleOpen=ref(false), gearOpen=ref(false)
 /** Light or dark canvas and library for the signal graph; nodes keep their charcoal styling. */
 const graphLight = ref((() => { try { return localStorage.getItem('pr0former.graph.theme') === 'light' } catch { return false } })())
@@ -68,6 +69,72 @@ watch(() => project.value?.id, id => {
   scoreDraft.value = id ? createScoreDraft(() => project.value!, saveScoreProject) : null
 }, { flush: 'sync' })
 const descriptors = ref<Descriptor[]>([]), members = ref<Member[]>([])
+const defaultHeroTitles = [
+  { first: 'Insert pithy title here', second: 'Put something funny here too' },
+  ...['Stop, Collaborate and Listen', 'F*ck it, we\'ll do it live!', 'A very musical hampster wheel', 'Science b!tches', 'ERROR....nah JK', 'This is AI slop', 'Injecting the Raccoons Now', 'Now with 80% more cheese', 'Have you considered how Carl feels?', 'Illegal in many states', 'She turned me into a newt!', 'Welcome back Mr. Wick', 'Turning the frogs gay', 'Your bit drift is showing', 'you forgot to return your Amazon purchase', 'Saints be praised!', 'TETSUOOOOOOO', 'It\'s over 9000!'].map(first => ({ first, second: 'Live Electroacoustic Performance Platform' })),
+]
+const loginTitles = ref(defaultHeroTitles.map(title => ({ ...title })))
+const heroSlogan = ref('')
+const heroSubline = ref('')
+const heroTitleVisible = ref(false)
+let heroTitleTimer:ReturnType<typeof setTimeout>|undefined
+const heroTitleFadeMs = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 220
+type HeroPort = { label:string; signal:string }
+type HeroNode = { label:string; symbol:string; signal:string; category:string; channels:number; inputs:HeroPort[]; outputs:HeroPort[]; offset:number }
+const heroNodes = ref<HeroNode[]>([])
+function heroPortPreview(ports:HeroPort[], connected:HeroPort) {
+  return [connected, ...ports.filter(port => port !== connected)].slice(0, 2)
+}
+function chooseHeroTitle() {
+  const alternatives = loginTitles.value.filter(title => title.first !== heroSlogan.value || title.second !== heroSubline.value)
+  const choices = alternatives.length ? alternatives : loginTitles.value
+  const title = choices[Math.floor(Math.random() * choices.length)] || defaultHeroTitles[0]!
+  heroSlogan.value = title.first
+  heroSubline.value = title.second
+}
+function revealHeroTitle() {
+  clearTimeout(heroTitleTimer)
+  heroTitleVisible.value = false
+  chooseHeroTitle()
+  void nextTick(() => requestAnimationFrame(() => { heroTitleVisible.value = true }))
+}
+function cycleHeroTitle() {
+  if (!heroTitleVisible.value) return
+  clearTimeout(heroTitleTimer)
+  heroTitleVisible.value = false
+  heroTitleTimer = setTimeout(revealHeroTitle, heroTitleFadeMs)
+}
+function randomizeHero(randomizeSlogan = true) {
+  if (randomizeSlogan) chooseHeroTitle()
+  const available = descriptors.value.filter(d => d.outputs.length && d.inputs.length && d.kind !== 'subgraph' && !d.kind.startsWith('subgraph_'))
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const first = available[Math.floor(Math.random() * available.length)]
+    if (!first) break
+    const firstOutput = first.outputs[Math.floor(Math.random() * first.outputs.length)]!
+    const secondCandidates = available.filter(d => d !== first && d.inputs.some(p => p.signal === firstOutput.signal))
+    const second = secondCandidates[Math.floor(Math.random() * secondCandidates.length)]
+    const secondInput = second?.inputs.find(port => port.signal === firstOutput.signal)
+    const secondOutput = second?.outputs[Math.floor(Math.random() * second.outputs.length)]
+    const thirdCandidates = secondOutput ? available.filter(d => d !== first && d !== second && d.inputs.some(p => p.signal === secondOutput.signal)) : []
+    const third = thirdCandidates[Math.floor(Math.random() * thirdCandidates.length)]
+    const thirdInput = third?.inputs.find(port => port.signal === secondOutput?.signal)
+    if (second && secondInput && secondOutput && third && thirdInput) {
+      const chain = [
+        { descriptor:first, input:first.inputs[0]!, output:firstOutput },
+        { descriptor:second, input:secondInput, output:secondOutput },
+        { descriptor:third, input:thirdInput, output:third.outputs[0]! },
+      ]
+      heroNodes.value = chain.map(({descriptor,input,output}, index) => ({
+        label:descriptor.label, symbol:descriptor.symbol, category:descriptor.category,
+        signal:descriptor.outputs[0]?.signal || descriptor.inputs[0]?.signal || 'control', channels:descriptor.default_channels || 1, offset:[0, 34, 10][index]!,
+        inputs:heroPortPreview(descriptor.inputs, input), outputs:heroPortPreview(descriptor.outputs, output),
+      }))
+      return
+    }
+  }
+  heroNodes.value = []
+}
+watch(() => descriptors.value.length, count => { if (count && !user.value) randomizeHero(false) }, { immediate: true })
 const nodeLibraryOpen = ref(true), sampleLibraryOpen=ref(false)
 const samplePanel=ref<InstanceType<typeof SampleLibrary>>(),projectSamples=ref<SampleEntry[]>([])
 const tab = ref('graph'), library = ref(true), search = ref(''), category = ref('All nodes')
@@ -80,9 +147,10 @@ const tempoSource = computed(() => project.value?.graph.edges.find(e => e.target
 const graphId = ref<string | null>(null)
 const performanceId = ref<string | null>(null)
 const activeId = ref<string | null>(null), bpmDraft = ref(120), saving = ref(false), fullscreen = ref(false)
-const devices = ref<any>(null), inviteLink = ref(''), inviteRole = ref('performer')
+const devices = ref<any>(null)
 type SaveStatus = {revision:number;change_revision:number;dirty:boolean}
 const savedRevision = ref<SaveStatus | null>(null), checkpointBusy = ref(false)
+const revisionsOpen = ref(false), revisions = ref<{revision:number;current:boolean}[]>([]), loadedRevision = ref<number | null>(null), revisionsBusy = ref(false)
 const saveRequested = ref<string | null>(null)
 const unsaved = computed(() => !!project.value && (!savedRevision.value || project.value.revision > savedRevision.value.change_revision || parameterPending.value || saving.value || scoreDraft.value?.pending.value || scoreDraft.value?.conflict.value))
 const revisionText = computed(() => scoreDraft.value?.conflict.value ? 'Score draft needs attention' : scoreDraft.value?.pending.value ? 'Saving score…' : checkpointBusy.value ? 'Saving revision…' : savedRevision.value ? `Revision ${savedRevision.value.revision}${unsaved.value ? ' · Unsaved changes' : ' · Saved'}` : 'Loading revision…')
@@ -110,6 +178,26 @@ async function flushManualSave() {
     if (project.value?.id === id) notice.value = `Revision ${saved.revision} saved`
   } catch (e) { report(e) }
   finally { checkpointBusy.value = false }
+}
+async function openRevisions() {
+  if (!project.value) return
+  revisionsBusy.value = true
+  try { revisions.value = await api(`/projects/${project.value.id}/revisions`); revisionsOpen.value = true } catch (e) { report(e) }
+  finally { revisionsBusy.value = false }
+}
+async function loadRevision(revision: number) {
+  if (!project.value || revisionsBusy.value) return
+  revisionsBusy.value = true
+  try {
+    const result = await api<{project: Project; source_revision:number}>(`/projects/${project.value.id}/revisions/${revision}`)
+    project.value = result.project
+    bpmDraft.value = result.project.bpm
+    loadedRevision.value = result.source_revision === result.project.revision ? null : result.source_revision
+    scoreDraft.value = createScoreDraft(() => project.value!, saveScoreProject)
+    revisionsOpen.value = false
+    notice.value = `Loaded revision ${result.source_revision}; next save will create a new revision.`
+  } catch (e) { report(e) }
+  finally { revisionsBusy.value = false }
 }
 
 const libraryPanel = ref<InstanceType<typeof SubgraphLibrary>>(), savingSubgraph = ref<string | null>(null)
@@ -171,7 +259,19 @@ const editable = computed(() => !performanceLocked.value && ['owner', 'editor', 
 const conductor = computed(() => ['owner', 'conductor'].includes(role.value))
 const transportBusy = ref(false), parameterPending = ref(false)
 const countIn = ref('bar')
-watch(() => project.value?.id, () => { countIn.value = 'bar' })
+const countInOptions = new Set(['0', 'bar', ...Array.from({ length: 32 }, (_, i) => String(i + 1))])
+watch(() => project.value?.id, (id) => {
+  countIn.value = 'bar'
+  if (!id) return
+  try {
+    const saved = localStorage.getItem(`pr0former.count-in.${id}`)
+    if (saved && countInOptions.has(saved)) countIn.value = saved
+  } catch { /* storage may be unavailable in private/browser test contexts */ }
+}, { immediate: true })
+watch([() => project.value?.id, countIn], ([id, value]) => {
+  if (!id || !countInOptions.has(value)) return
+  try { localStorage.setItem(`pr0former.count-in.${id}`, value) } catch { /* ignore unavailable storage */ }
+})
 watch(()=>project.value?.id,async id=>{projectSamples.value=[];if(id){try{const samples=await api<SampleEntry[]>(`/projects/${id}/samples`);if(project.value?.id===id)projectSamples.value=samples}catch(e){report(e)}}})
 const countingIn = computed(() => active.value && !stale.value && telemetry.value?.count_in_remaining != null)
 const graphEditable = computed(() => editable.value && !saving.value && !parameterPending.value && !progress.value)
@@ -246,7 +346,7 @@ const flowNodes = computed<FlowNode[]>(() => visibleNodes.value.map(n => ({ id: 
 const flowEdges = computed<FlowEdge[]>(() => visibleEdges.value.filter(e=>!inputDrag.hidden.value.has(e.id)).map(e => {
   const source = project.value!.graph.nodes.find(n => n.id === e.source)
   const d = source ? nodeDescriptor(source, project.value!.graph.nodes, descriptors.value) : undefined
-  return { id: e.id, source: e.source, target: e.target, sourceHandle: e.source_port, targetHandle: e.target_port, type: 'signal', data: { projectId: project.value!.id, signal: d?.outputs.find(p => p.id === e.source_port)?.signal || 'control', channels: d?.outputs.find(p => p.id === e.source_port)?.fixed_channels || source?.channels || 1, active: graphActive.value && !stale.value } }
+  return { id: e.id, source: e.source, target: e.target, sourceHandle: e.source_port, targetHandle: e.target_port, type: 'signal', data: { projectId: project.value!.id, signal: d?.outputs.find(p => p.id === e.source_port)?.signal || 'control', channels: d?.outputs.find(p => p.id === e.source_port)?.fixed_channels || source?.channels || 1, active: graphActive.value && !stale.value, values: telemetry.value?.values?.[e.source] || {} } }
 }))
 provide('telemetry', telemetry)
 provide('telemetryStale',stale)
@@ -256,10 +356,13 @@ function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) }
 function report(e: unknown) { error.value = e instanceof Error ? e.message : String(e) }
 async function task(fn: () => Promise<void>) { error.value = ''; try { await fn() } catch (e) { report(e) } }
 async function refresh() { summaries.value = await api<Summary[]>('/projects') }
+async function refreshMembers() { if (project.value) members.value = await api<Member[]>(`/projects/${project.value.id}/members`) }
+function acceptEnsembleProject(saved:Project) { if(project.value?.id===saved.id&&saved.revision>=project.value.revision)project.value=saved }
 async function authenticate() {
   busy.value = true
   await task(async () => {
     user.value = await api('/' + (bootstrap.value || registering.value ? 'register' : 'login'), 'POST', { username: username.value, password: password.value, invite: invitation })
+    randomizeHero()
     password.value = ''
     if (invitation) { const joined = await api<{ project_id: string }>('/join', 'POST', { token: invitation }); await refresh(); await openProject(joined.project_id); history.replaceState({}, '', '/') }
     else { await refresh(); if (summaries.value[0]) await openProject((recentSummaries.value[0]||summaries.value[0]).id); else creating.value = true }
@@ -298,6 +401,7 @@ function connect(id: string) {
     if(message.type==='samples')void samplePanel.value?.refresh()
     if(message.type==='hardware_levels'){hardwareLevels.value=message;hardwareReceived.value=performance.now()}
     if(message.type==='project_save') acceptSaveStatus(id, message.save)
+    if(message.type==='members_changed') void refreshMembers().catch(report)
     if(message.type==='audio_engine_status'){engineEnabled.value=message.enabled;audioSettings.value.sample_rate=message.sample_rate;audioSettings.value.block_size=message.block_size}
     if(message.type==='system_audio'){audioSettings.value=message.settings}
     if (message.type === 'pong') { const rtt = performance.now() - message.client_time; if (rtt < bestRtt) { bestRtt = rtt; offset = message.server_time - (message.client_time + rtt / 2) } }
@@ -388,7 +492,7 @@ function dropSample(sample:SampleEntry,point:{x:number;y:number}){
     if(descriptor)addNode(descriptor,screenToFlowCoordinate(point),sample)
   }
 }
-function assignSample(sample:SampleEntry){if(!project.value||!selected.value)return;const next=clone(project.value),node=next.graph.nodes.find(n=>n.id===selected.value!.id)!;node.parameters.asset=sample.asset!;node.channels=sample.channels;void task(()=>saveProject(next))}
+function assignSample(sample:SampleEntry){if(!project.value||!selected.value)return;const next=clone(project.value),node=next.graph.nodes.find(n=>n.id===selected.value!.id)!;node.parameters.asset=sample.asset!;if(node.kind!=='convolution_reverb')node.channels=sample.channels;void task(()=>saveProject(next))}
 function assignNodeIo(io: IoConfig) {
   if (!project.value || !selected.value || !graphEditable.value) return
   const next = clone(project.value), node = next.graph.nodes.find(n => n.id === selected.value!.id)
@@ -462,7 +566,32 @@ const inputDrag=useInputConnectionDrag(graphCanvas,{
 })
 function onConnect(c: Connection) {
   if (!project.value || !graphEditable.value) return
-  const next = clone(project.value); next.graph.edges.push({ id: newId(), source: c.source, source_port: c.sourceHandle || 'out', target: c.target, target_port: c.targetHandle || 'in' }); void task(() => saveProject(next)); pendingPort.value = null
+  const sourcePort = c.sourceHandle || 'out', targetPort = c.targetHandle || 'in'
+  const next = clone(project.value)
+  if (next.graph.edges.some(e => e.source === c.source && e.source_port === sourcePort && e.target === c.target && e.target_port === targetPort)) {
+    pendingPort.value = null
+    return
+  }
+  const source = next.graph.nodes.find(n => n.id === c.source), target = next.graph.nodes.find(n => n.id === c.target)
+  const sourceDescriptor = source && nodeDescriptor(source, next.graph.nodes, descriptors.value)
+  const targetDescriptor = target && nodeDescriptor(target, next.graph.nodes, descriptors.value)
+  const port = targetDescriptor?.inputs.find(p => p.id === targetPort)
+  const sourcePortDescriptor = sourceDescriptor?.outputs.find(p => p.id === sourcePort)
+  const existing = next.graph.edges.find(e => e.target === c.target && e.target_port === targetPort)
+  const widthMatches = sourcePortDescriptor?.signal === 'audio' && source && target && (sourcePortDescriptor.fixed_channels ?? source.channels) === (port?.fixed_channels ?? target.channels)
+  if (source && target && port?.signal === 'audio' && widthMatches && existing) {
+    const mixerId = newId()
+    const mixer = { id: mixerId, kind: 'mixer', label: 'Convenience mixer', parent: target.parent || null, x: (source.x + target.x) / 2, y: (source.y + target.y) / 2 + 40, channels: target.channels, parameters: { gain: -6 } }
+    next.graph.nodes.push(mixer)
+    existing.target = mixerId; existing.target_port = 'a'
+    next.graph.edges.push(
+      { id: newId(), source: c.source, source_port: sourcePort, target: mixerId, target_port: 'b' },
+      { id: newId(), source: mixerId, source_port: 'out', target: c.target, target_port: targetPort },
+    )
+  } else {
+    next.graph.edges.push({ id: newId(), source: c.source, source_port: sourcePort, target: c.target, target_port: targetPort })
+  }
+  void task(() => saveProject(next)); pendingPort.value = null
 }
 function connectPort(node: string, port: string, direction: string) {
   if (!graphEditable.value) return
@@ -633,7 +762,8 @@ function nodeMenuKey(event: KeyboardEvent) {
     buttons[(current + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length]?.focus()
   }
 }
-async function transport(action: string) { if (!project.value) return; const run=async()=>{await api(`/projects/${project.value!.id}/transport`, 'POST', { action, bpm: bpmDraft.value, count_in_beats: action === 'play' ? countIn.value === 'bar' ? initialMeter.value.beats : Number(countIn.value) : 0 });await refreshAudio()};if(action==='activate')await withProgress('Starting audio engine and activating show',run);else await run() }
+async function transport(action: string, beat?: number) { if (!project.value) return; const run=async()=>{await api(`/projects/${project.value!.id}/transport`, 'POST', { action, beat, bpm: bpmDraft.value, count_in_beats: action === 'play' ? countIn.value === 'bar' ? initialMeter.value.beats : Number(countIn.value) : 0 });await refreshAudio()};if(action==='activate')await withProgress('Starting audio engine and activating show',run);else await run() }
+async function seekScore(beat: number) { if (!project.value || !graphActive.value || !conductor.value) return; await task(() => transport('seek', beat)) }
 async function launchPart(playing: boolean) { if (project.value && part.value) await api(`/projects/${project.value.id}/clip`, 'POST', { part: part.value.id, playing }) }
 function updatePart(part: Part) { if (!project.value) return; const next=clone(project.value); next.parts=next.parts.map(p=>p.id===part.id?part:p); void task(()=>saveProject(next)) }
 const scoreWorkspace = ref<{ flush: () => Promise<void> } | null>(null)
@@ -642,7 +772,6 @@ async function uploadXML(event: Event) { const input = event.target as HTMLInput
 function exportProject() { if (!project.value) return; const url = URL.createObjectURL(new Blob([JSON.stringify(project.value, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = `${project.value.name}.pr0.json`; a.click(); URL.revokeObjectURL(url) }
 async function importProject(event: Event) { const input = event.target as HTMLInputElement; const file = input.files?.[0]; if (!file || !project.value) return; await task(async () => { const imported = JSON.parse(await file.text()) as Project; imported.id = project.value!.id; imported.revision = project.value!.revision; await saveProject(imported) }); input.value = '' }
 
-async function invite() { if (!project.value) return; const result = await api<{ path: string }>(`/projects/${project.value.id}/invite`, 'POST', { role: inviteRole.value }); inviteLink.value = location.origin + result.path }
 function settingsSaved(saved: Project) {
   if (project.value?.id === saved.id && saved.revision >= project.value.revision) { project.value = saved; bpmDraft.value = saved.bpm }
   settingsOpen.value = false
@@ -652,7 +781,7 @@ async function enterStage() { await scoreDraft.value?.flush(); if (conductor.val
 async function exitStage() { if(conductor.value) await transport('prepare'); stage.value = false; fullscreen.value = false }
 async function auditionScore(part:string,note:string) { if(project.value && graphActive.value) await api(`/projects/${project.value.id}/audition`, 'POST', {part,note}) }
 async function toggleFullscreen() { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else fullscreen.value = !fullscreen.value }
-async function signOut() { await scoreDraft.value?.flush(); await api('/logout', 'POST'); stage.value = false; browserOpen.value=false; systemOpen.value=false; user.value = null; project.value = null; socket?.close(); clearTimeout(reconnect) }
+async function signOut() { await scoreDraft.value?.flush(); await api('/logout', 'POST'); stage.value = false; browserOpen.value=false; systemOpen.value=false; user.value = null; project.value = null; randomizeHero(); socket?.close(); clearTimeout(reconnect) }
 async function togglePlayback() {
   if (!project.value || !conductor.value || transportBusy.value || progress.value) return
   transportBusy.value = true
@@ -703,27 +832,28 @@ function keydown(event: KeyboardEvent) {
 onMounted(async () => {
   window.addEventListener('resize',phoneLayoutChanged)
   const tick = () => { now.value = performance.now(); frame = requestAnimationFrame(tick) }; frame = requestAnimationFrame(tick); window.addEventListener('keydown', keydown, true); window.addEventListener('pointerdown', outsideNodeMenu); window.addEventListener('offline', offline); window.addEventListener('online', online)
+  try { loginTitles.value = await api<typeof loginTitles.value>('/login-titles') } catch { /* use built-in title pairs */ } finally { revealHeroTitle() }
   await task(async () => { descriptors.value = await api<Descriptor[]>('/catalog'); const status = await api<{ bootstrap: boolean; active_project: string | null; graph_project:string|null }>('/status'); bootstrap.value = status.bootstrap; activeId.value = status.active_project; graphId.value = status.graph_project; try { user.value = await api('/me') } catch { return }; await refresh(); if (invitation) { const result = await api<{ project_id: string }>('/join', 'POST', { token: invitation }); await refresh(); await openProject(result.project_id); history.replaceState({}, '', '/') } else if (consoleProject) await openProject(consoleProject); else if (summaries.value[0]) await openProject((recentSummaries.value[0]||summaries.value[0]).id); else creating.value = true })
 })
-onBeforeUnmount(() => { window.removeEventListener('resize',phoneLayoutChanged); cancelAnimationFrame(frame); clearInterval(ping); clearTimeout(reconnect); clearTimeout(saveTimer); socket?.close(); window.removeEventListener('keydown', keydown, true); window.removeEventListener('pointerdown', outsideNodeMenu); window.removeEventListener('offline', offline); window.removeEventListener('online', online) })
+onBeforeUnmount(() => { window.removeEventListener('resize',phoneLayoutChanged); cancelAnimationFrame(frame); clearInterval(ping); clearTimeout(reconnect); clearTimeout(saveTimer); clearTimeout(heroTitleTimer); socket?.close(); window.removeEventListener('keydown', keydown, true); window.removeEventListener('pointerdown', outsideNodeMenu); window.removeEventListener('offline', offline); window.removeEventListener('online', online) })
 </script>
 
 <template>
   <EngineConsole v-if="consoleProject && user" :project-id="consoleProject" standalone />
   <div v-else class="app-shell" :class="{ 'fullscreen-fallback': fullscreen, 'performance-mode': stage }">
-    <header v-show="!stage" class="topbar"><a class="brand" href="/" aria-label="pr0former home"><span class="brand-mark">p<span>0</span></span><strong>pr<span>0</span>former</strong><sup>ALPHA</sup></a><div class="topbar-center"><template v-if="user"><button class="icon-button project-icon" aria-label="Choose project" :title="project ? `${project.name} · ${performanceLocked ? 'performance' : project.mode} · choose project` : 'Choose project'" @click="projectPicker = !projectPicker"><FolderOpen :size="16" /></button><button class="project-title" :title="project ? `${project.name} · ${performanceLocked ? 'PERFORMANCE' : project.mode.toUpperCase()}` : 'Choose project'" @click="projectPicker = !projectPicker">{{ project?.name || 'Your workspace' }}<ChevronDown :size="14" /></button><span v-if="project" class="mode-pill">{{ performanceLocked ? 'PERFORMANCE' : project.mode }}</span></template><template v-else><span class="tiny-dot"></span> ELECTROACOUSTIC PERFORMANCE WORKSPACE</template></div><div class="topbar-right"><span class="server-indicator"><span class="status-dot" :class="{ live: connected }"></span>{{ user ? connected ? 'Server connected' : 'Connecting' : 'Local performance server' }}</span><button class="icon-button" aria-label="Fullscreen" @click="task(toggleFullscreen)"><Maximize :size="17" /></button><button v-if="user" class="icon-button" aria-label="Project browser" title="Browse projects and samples" @click="browserOpen=true;projectPicker=false"><FolderOpen :size="19"/></button><button v-if="user && project && editable" class="icon-button save-button" :class="{ unsaved }" aria-label="Save revision" :title="`${revisionText} · Save revision (Cmd/Ctrl+S) · autosave every minute`" :disabled="checkpointBusy" @click="requestSave"><Save :size="18" /><i v-if="unsaved && !checkpointBusy" class="unsaved-dot" aria-hidden="true"></i></button><span v-if="project" class="revision save-status" role="status">{{ revisionText }}</span><div v-if="user" class="gear-menu" @keydown.esc="gearOpen=false"><button class="icon-button" aria-label="Settings menu" aria-haspopup="menu" :aria-expanded="gearOpen" @click="gearOpen=!gearOpen"><Settings :size="19"/></button><div v-if="gearOpen" class="settings-menu" role="menu"><button role="menuitem" :disabled="!project||saving" @click="settingsOpen=true;gearOpen=false">Project settings</button><button v-if="user.is_admin" role="menuitem" @click="systemOpen=true;gearOpen=false">System settings</button><button role="menuitem" :disabled="!project" @click="consoleOpen=true;gearOpen=false">Console</button></div></div><button v-if="user" class="avatar" :title="`Sign out ${user.username}`" @click="task(signOut)">{{ user.username.slice(0, 2).toUpperCase() }}</button></div></header>
+    <header v-show="!stage" class="topbar"><a class="brand" href="/" aria-label="pr0former home"><span class="brand-mark">p<span>0</span></span><strong>pr<span>0</span>former</strong><sup>ALPHA</sup></a><div class="topbar-center"><template v-if="user"><button class="icon-button project-icon" aria-label="Choose project" :title="project ? `${project.name} · ${performanceLocked ? 'performance' : project.mode} · choose project` : 'Choose project'" @click="projectPicker = !projectPicker"><FolderOpen :size="16" /></button><button class="project-title" :title="project ? `${project.name} · ${performanceLocked ? 'PERFORMANCE' : project.mode.toUpperCase()}` : 'Choose project'" @click="projectPicker = !projectPicker">{{ project?.name || 'Your workspace' }}<ChevronDown :size="14" /></button><span v-if="project" class="mode-pill">{{ performanceLocked ? 'PERFORMANCE' : project.mode }}</span></template><template v-else><span class="tiny-dot"></span> ELECTROACOUSTIC PERFORMANCE WORKSPACE</template></div><div class="topbar-right"><span class="server-indicator"><span class="status-dot" :class="{ live: connected }"></span>{{ user ? connected ? 'Server connected' : 'Connecting' : 'Local performance server' }}</span><button class="icon-button" aria-label="Fullscreen" @click="task(toggleFullscreen)"><Maximize :size="17" /></button><button v-if="user" class="icon-button" aria-label="Project browser" title="Browse projects and samples" @click="browserOpen=true;projectPicker=false"><FolderOpen :size="19"/></button><button v-if="user && project && editable" class="icon-button save-button" :class="{ unsaved }" aria-label="Save revision" :title="`${revisionText} · Save revision (Cmd/Ctrl+S) · autosave every minute`" :disabled="checkpointBusy" @click="requestSave"><Save :size="18" /><i v-if="unsaved && !checkpointBusy" class="unsaved-dot" aria-hidden="true"></i></button><button v-if="project" class="revision save-status" role="status" :aria-label="`${revisionText}. Browse revisions`" :disabled="revisionsBusy" @click="openRevisions">{{ revisionText }}</button><div v-if="user" class="gear-menu" @keydown.esc="gearOpen=false"><button class="icon-button" aria-label="Settings menu" aria-haspopup="menu" :aria-expanded="gearOpen" @click="gearOpen=!gearOpen"><Settings :size="19"/></button><div v-if="gearOpen" class="settings-menu" role="menu"><button role="menuitem" :disabled="!project||saving" @click="settingsOpen=true;gearOpen=false">Project settings</button><button v-if="user.is_admin" role="menuitem" @click="systemOpen=true;gearOpen=false">System settings</button><button role="menuitem" :disabled="!project" @click="consoleOpen=true;gearOpen=false">Console</button></div></div><button v-if="user" class="avatar" :title="`Sign out ${user.username}`" @click="task(signOut)">{{ user.username.slice(0, 2).toUpperCase() }}</button></div></header>
     <div v-if="error" class="error-banner" role="alert">{{ error }}<button class="icon-button" aria-label="Dismiss error" @click="error = ''"><X :size="16" /></button></div>
-    <main v-if="!user" class="welcome"><div class="welcome-copy"><div class="eyebrow"><span class="tiny-dot"></span> A SHARED SPACE FOR SOUND</div><h1>Compose the system.<br><em>Perform the unexpected.</em></h1><p>Scores, signals, and people.<br>One connected performance instrument.</p><div class="welcome-patch"><div class="mini-node amber">◷<small>CLOCK</small></div><span class="mini-wire"></span><div class="mini-node amber">×<small>MULTIPLY</small></div><span class="mini-wire cyan"></span><div class="mini-node cyan">∿<small>SOUND</small></div></div><span class="welcome-caption">BUILT FOR THE ROOM. OPEN TO POSSIBILITY.</span></div><form class="auth-card" @submit.prevent="authenticate"><div class="eyebrow">{{ bootstrap ? 'FIRST-TIME SETUP' : invitation ? 'YOU’RE INVITED' : 'WELCOME BACK' }}</div><h2>{{ bootstrap ? 'Create your first account' : registering ? 'Join the ensemble' : 'Enter your workspace' }}</h2><p>{{ bootstrap ? 'Your projects and audio stay on this server.' : 'Sign in to compose, connect, and perform.' }}</p><label>Username<input v-model="username" autocomplete="username" minlength="3" maxlength="64" required placeholder="Your username"></label><label>Password<input v-model="password" type="password" :autocomplete="registering || bootstrap ? 'new-password' : 'current-password'" required :minlength="registering || bootstrap ? 8 : 1" placeholder="Your password"></label><button class="button primary wide" :disabled="busy">{{ busy ? 'Connecting…' : bootstrap || registering ? 'Create account' : 'Sign in' }}<ChevronRight :size="17" /></button><button v-if="invitation && !bootstrap" type="button" class="text-button" @click="registering = !registering">{{ registering ? 'Already have an account? Sign in' : 'New here? Create an account' }}</button><div class="auth-footer"><Radio :size="14" /> Connect on the same physical network.</div></form></main>
+    <main v-if="!user" class="welcome"><div class="welcome-copy"><div class="eyebrow"><span class="tiny-dot"></span> A SHARED SPACE FOR SOUND</div><h1 class="hero-title" :class="{ visible: heroTitleVisible }" role="button" tabindex="0" title="Show another title" @click="cycleHeroTitle" @keydown.enter.prevent="cycleHeroTitle" @keydown.space.prevent="cycleHeroTitle">{{ heroSlogan }}<br><em>{{ heroSubline }}</em></h1><div v-if="heroNodes.length" class="welcome-patch" aria-label="Example compatible signal graph"><template v-for="(node,index) in heroNodes" :key="`${node.label}-${index}`"><article class="mini-node" :class="node.signal" :style="{ transform: `translateY(${node.offset}px)` }"><div class="mini-node-cap"><span>{{ node.category }}</span><Settings2 :size="11" /></div><div class="mini-node-title"><span>{{ node.symbol }}</span><strong>{{ node.label }}</strong></div><div class="mini-node-ports"><div><span v-for="port in node.inputs" :key="`in-${port.label}`" class="mini-port input" :class="port.signal"><i></i>{{ port.label }}</span></div><div><span v-for="port in node.outputs" :key="`out-${port.label}`" class="mini-port output" :class="port.signal">{{ port.label }}<i></i></span></div></div><div class="mini-node-foot"><span>{{ node.signal === 'control' ? 'CONTROL' : node.signal === 'midi' ? 'MIDI' : `${node.channels} CH` }}</span><span>—</span></div></article><svg v-if="index < heroNodes.length - 1" class="mini-wire" viewBox="0 0 58 190" preserveAspectRatio="none" aria-hidden="true"><path :class="node.outputs[0]?.signal" :d="`M 0 ${node.offset + 69} C 18 ${node.offset + 69}, 38 ${heroNodes[index + 1]!.offset + 69}, 58 ${heroNodes[index + 1]!.offset + 69}`" /></svg></template></div></div><form class="auth-card" @submit.prevent="authenticate"><div class="eyebrow">{{ bootstrap ? 'FIRST-TIME SETUP' : invitation ? 'YOU’RE INVITED' : 'WELCOME BACK' }}</div><h2>{{ bootstrap ? 'Create your first account' : registering ? 'Join the ensemble' : 'Enter your workspace' }}</h2><p>{{ bootstrap ? 'Your projects and audio stay on this server.' : 'Sign in to compose, connect, and perform.' }}</p><label>Username<input v-model="username" autocomplete="username" minlength="3" maxlength="64" required placeholder="Your username"></label><label>Password<input v-model="password" type="password" :autocomplete="registering || bootstrap ? 'new-password' : 'current-password'" required :minlength="registering || bootstrap ? 8 : 1" placeholder="Your password"></label><button class="button primary wide" :disabled="busy">{{ busy ? 'Connecting…' : bootstrap || registering ? 'Create account' : 'Sign in' }}<ChevronRight :size="17" /></button><button v-if="invitation && !bootstrap" type="button" class="text-button" @click="registering = !registering">{{ registering ? 'Already have an account? Sign in' : 'New here? Create an account' }}</button><div class="auth-footer"><Radio :size="14" /> Connect on the same physical network.</div></form></main>
     <template v-else>
       <div v-if="projectPicker" class="project-popover"><button @click="browserOpen=true;projectPicker=false"><FolderOpen :size="16"/> Browse all projects</button><div class="eyebrow">RECENTLY OPENED</div><button v-for="p in recentSummaries" :key="p.id" @click="task(() => openProject(p.id))"><span>{{ p.name }}</span><small>{{ p.mode }}</small></button><button @click="creating = true; projectPicker = false"><Plus :size="16" /> New project</button></div>
-      <div v-if="project" v-show="!stage" class="workspace-tabs"><nav><button :class="{ active: tab === 'graph' }" @click="tab = 'graph'"><Network :size="13" /> Signal Graph</button><button :class="{ active: tab === 'score' }" @click="tab = 'score'"><Music2 :size="13" /> Score & Parts</button><button :class="{ active: tab === 'ensemble' }" @click="tab = 'ensemble'"><Users :size="13" /> Ensemble</button><button :class="{ active: tab === 'monitor' }" @click="tab = 'monitor'"><Headphones :size="13" /> Monitor</button></nav><div class="graph-legend"><span><i class="legend-audio"></i>Audio</span><span><i class="legend-control"></i>Control</span><span><i class="legend-spectral"></i>Spectral</span></div></div>
+      <div v-if="project" v-show="!stage" class="workspace-tabs"><nav><button :class="{ active: tab === 'graph' }" @click="tab = 'graph'"><Network :size="13" /> Signal Graph</button><button :class="{ active: tab === 'score' }" @click="tab = 'score'"><Music2 :size="13" /> Score & Parts</button><button :class="{ active: tab === 'ensemble' }" @click="tab = 'ensemble'"><Users :size="13" /> Ensemble</button><button :class="{ active: tab === 'monitor' }" @click="tab = 'monitor'"><Headphones :size="13" /> Monitor</button></nav><div class="graph-legend"><span><i class="legend-audio"></i>Audio</span><span><i class="legend-control"></i>Control</span><span><i class="legend-spectral"></i>Spectral</span><span><i class="legend-midi"></i>MIDI</span></div></div>
       <StageView v-if="project && stage" :project="project" :user-id="user?.id||''" :beats="scoreBeats" :part="part" :beat="partBeat" :meter-beat="meterBeat" :position="scorePosition" :bpm="active && telemetry ? telemetry.bpm : project.bpm" :active="active" :stale="stale" :running="running" :status="partStatus" :can-launch="canLaunchPart" :monitor-open="stageMonitor" @select="selectedPart = $event" @launch="playing => task(() => launchPart(playing))" @exit="task(exitStage)" @fullscreen="task(toggleFullscreen)" @monitor="stageMonitor = !stageMonitor" />
       <div v-else-if="project && tab === 'graph'" class="graph-workspace" :class="{ 'graph-light': graphLight }">
         <aside v-if="library" class="node-library"><div class="library-heading"><button class="library-accordion-title" :aria-expanded="nodeLibraryOpen" aria-controls="node-library-content" @click="sampleLibraryOpen=false;nodeLibraryOpen=!nodeLibraryOpen"><ChevronDown :size="14" :class="{collapsed:!nodeLibraryOpen}" /> Node library</button><button class="icon-button" aria-label="Hide node library" @click="library = false"><LayoutGrid :size="15" /></button></div><div :class="{expanded:nodeLibraryOpen}" :inert="!nodeLibraryOpen" :aria-hidden="!nodeLibraryOpen" id="node-library-content" class="node-library-content"><label class="search-box"><Search :size="15" /><input v-model="search" placeholder="Find a node…" aria-label="Search nodes"><kbd>/</kbd></label><select v-model="category" aria-label="Node category"><option v-for="c in categories" :key="c">{{ c }}</option></select><div class="library-list"><button v-for="d in catalog" :key="d.kind" class="library-node" :disabled="!graphEditable" :title="d.description" :draggable="graphEditable" @dragstart="libraryDrag($event,d.kind)" @touchstart.prevent @pointerdown="libraryTouchStart($event,{kind:d.kind},d.label)" @click="addNode(d)"><span class="library-glyph" :class="d.outputs[0]?.signal || 'audio'">{{ d.symbol }}</span><span>{{ d.label }}<small>{{ d.category }}</small></span><Plus :size="13" class="add-sign" /></button></div></div><SubgraphLibrary :open="!nodeLibraryOpen&&!sampleLibraryOpen" @toggle="nodeLibraryOpen=sampleLibraryOpen?false:!nodeLibraryOpen;sampleLibraryOpen=false" ref="libraryPanel" :editable="graphEditable" @touch-insert="libraryTouchStart" @insert="(id,version)=>task(()=>importSubgraph(id,version))" /><SampleLibrary @touch="(event,sample)=>libraryTouchStart(event,{sample:sample.id},sample.name)" ref="samplePanel" :key="project.id" :project-id="project.id" :open="sampleLibraryOpen" :editable="graphEditable" @toggle="sampleLibraryOpen=!sampleLibraryOpen;nodeLibraryOpen=false" @entries="projectSamples=$event" @use="addSampleNode" /></aside>
         <div v-if="libraryTouchPreview" class="library-touch-preview" :style="{left:`${libraryTouchPreview.x + 16}px`,top:`${libraryTouchPreview.y - 24}px`}" aria-hidden="true">＋ {{ libraryTouchPreview.label }}</div><div ref="graphCanvas" class="graph-canvas" @dragover.prevent @drop.prevent="libraryDrop"><VueFlow :key="graphParent || 'root'" :nodes="flowNodes" :edges="flowEdges" :node-types="nodeTypes" :edge-types="edgeTypes" :min-zoom="0.2" :max-zoom="2" :nodes-connectable="graphEditable" :connect-on-click="false" :delete-key-code="null" :pan-activation-key-code="null" :selection-key-code="true" :multi-selection-key-code="['Control','Meta']" :selection-mode="SelectionMode.Partial" :pan-on-drag="[1,2]" :fit-view-options="{maxZoom:phoneCompact ? 0.5 : 1}" fit-view-on-init @selection-start="selectionGesture=true" @selection-end="finishSelection" @connect="onConnect" @node-drag-stop="nodeDrag" @selection-drag-stop="nodeDrag" @selection-context-menu="groupMenu" @edge-click="({ edge }) => selectedEdges = [edge.id]" @node-click="selectedEdges = []" @pane-click="selectedEdges = []"><Background :gap="24" :size="1" pattern-color="#394043" /><Controls position="bottom-left" :show-interactive="false" /></VueFlow><div class="canvas-top"><button v-if="!library" class="button small" @click="library = true"><LayoutGrid :size="14" /> Library</button><nav class="graph-breadcrumbs" aria-label="Graph path"><button class="text-button" @click="navigateGraph(null)">Root graph</button><template v-for="n in breadcrumbs" :key="n.id"><span> / </span><button class="text-button" @click="navigateGraph(n.id)">{{n.label}}</button></template></nav><span class="canvas-caption">{{ visibleNodes.length }} NODES <span>/</span> {{ visibleEdges.length }} CONNECTIONS</span><div class="canvas-tools"><button class="icon-button" :disabled="!undo.length || !graphEditable" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" @click="task(undoEdit)"><Undo2 :size="16" /></button><button class="icon-button" :aria-label="graphLight ? 'Dark graph theme' : 'Light graph theme'" :aria-pressed="graphLight" :title="graphLight ? 'Switch the graph and library to the dark theme' : 'Switch the graph and library to the light theme'" @click="graphLight = !graphLight"><Sun v-if="!graphLight" :size="16" /><Moon v-else :size="16" /></button><button class="icon-button" aria-label="Export project" @click="exportProject"><Download :size="16" /></button><label class="icon-button import-button" title="Import project JSON"><Upload :size="16" /><input type="file" accept=".json" :disabled="!editable" @change="importProject"></label></div></div><svg v-if="inputDrag.preview.value" style="position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;z-index:50" aria-hidden="true"><path v-for="(origin,index) in inputDrag.preview.value.origins" :key="index" :d="`M ${origin.x} ${origin.y} C ${origin.x+70} ${origin.y}, ${inputDrag.preview.value.x-70} ${inputDrag.preview.value.y}, ${inputDrag.preview.value.x} ${inputDrag.preview.value.y}`" fill="none" :stroke="origin.color" stroke-width="1.5" stroke-dasharray="6 5" /></svg><div v-if="inputDrag.preview.value" class="connection-hint">Move {{inputDrag.preview.value.ids.length}} connections to an input · Drop elsewhere to disconnect · Esc to cancel</div><div v-else-if="pendingPort" class="connection-hint">Choose a {{ pendingPort.direction === 'source' ? 'target input' : 'source output' }} · Esc to cancel</div><div class="canvas-bottom-note"><span class="tiny-dot"></span>{{ active ? 'SHOW ACTIVE · EDIT NODES AND CONNECTIONS LIVE' : 'PATCH YOUR PERFORMANCE' }}</div></div>
       </div>
-      <div v-else-if="project && tab === 'score'" class="content-pane score-content"><ScoreWorkspace ref="scoreWorkspace" :key="project.id" :project="project" :user-id="user?.id||''" :members="members" :beats="scoreBeats" :editable="editable&&!stage" :saving="saving" :save="saveScoreProject" :draft-session="scoreDraft || undefined" @focus="selectedPart=$event" @audition="(part,note)=>task(()=>auditionScore(part,note))" ><template #tools><button aria-label="MusicXML" title="Export MusicXML" @click="task(downloadXML)"><Download :size="15" /></button><label class="score-import" role="button" tabindex="0" title="Import MusicXML" aria-label="Import MusicXML" @keydown.enter.prevent="($event.currentTarget as HTMLElement).querySelector('input')?.click()" @keydown.space.prevent="($event.currentTarget as HTMLElement).querySelector('input')?.click()"><Upload :size="15" /><input type="file" accept=".xml,.musicxml" style="display:none" :disabled="!editable" @change="task(() => uploadXML($event))"></label></template><template #footer><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(true))">Launch part</button><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(false))">Stop part</button><output class="mode-pill" aria-label="Part playback status">{{ partStatus }}</output><span v-if="notice" role="status">{{notice}}</span></template></ScoreWorkspace></div>
-      <div v-else-if="project && tab === 'ensemble'" class="content-pane"><div class="section-heading"><div><div class="eyebrow">PEOPLE IN THE PERFORMANCE</div><h2>Your ensemble</h2></div><span class="mode-pill">{{ members.length }} / 32 PLAYERS</span></div><div class="member-grid"><article v-for="m in members" :key="m.id" class="member-card"><span class="avatar">{{ m.username.slice(0, 2).toUpperCase() }}</span><div><h3>{{ m.username }}</h3><span>{{ m.role }}</span></div></article></div><section v-if="role === 'owner'" class="invite-panel"><h3>Invite a collaborator</h3><p>Create a single-use link valid for seven days.</p><div class="invite-controls"><select v-model="inviteRole"><option value="performer">Performer</option><option value="editor">Editor</option><option value="conductor">Conductor</option></select><button class="button primary" @click="task(invite)"><Plus :size="15" /> Create invitation</button></div><input v-if="inviteLink" :value="inviteLink" readonly aria-label="Invitation link" @focus="($event.target as HTMLInputElement).select()"></section></div>
+      <div v-else-if="project && tab === 'score'" class="content-pane score-content"><ScoreWorkspace ref="scoreWorkspace" :key="project.id" :project="project" :user-id="user?.id||''" :members="members" :beats="scoreBeats" :editable="editable&&!stage" :saving="saving" :save="saveScoreProject" :draft-session="scoreDraft || undefined" @focus="selectedPart=$event" @seek="seekScore" @audition="(part,note)=>task(()=>auditionScore(part,note))" ><template #tools><button aria-label="MusicXML" title="Export MusicXML" @click="task(downloadXML)"><Download :size="15" /></button><label class="score-import" role="button" tabindex="0" title="Import MusicXML" aria-label="Import MusicXML" @keydown.enter.prevent="($event.currentTarget as HTMLElement).querySelector('input')?.click()" @keydown.space.prevent="($event.currentTarget as HTMLElement).querySelector('input')?.click()"><Upload :size="15" /><input type="file" accept=".xml,.musicxml" style="display:none" :disabled="!editable" @change="task(() => uploadXML($event))"></label></template><template #footer><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(true))">Launch part</button><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(false))">Stop part</button><output class="mode-pill" aria-label="Part playback status">{{ partStatus }}</output><span v-if="notice" role="status">{{notice}}</span></template></ScoreWorkspace></div>
+      <div v-else-if="project && tab === 'ensemble'" class="content-pane"><EnsembleWorkspace :project="project" :members="members" :user-id="user?.id||''" :owner="role==='owner'" @refresh="task(refreshMembers)" @project="acceptEnsembleProject" @error="report" /></div>
       <div v-else-if="!project" class="empty-workspace"><Music2 :size="40" /><h2>A new space for your ensemble.</h2><button class="button primary" @click="creating = true"><Plus :size="16" /> Create a project</button></div>
       <MonitorWorkspace ref="monitorWorkspace" v-if="project" v-show="stage ? stageMonitor : tab === 'monitor'" :key="project.id" :project-id="project.id" :active="graphActive" :nodes="project.graph.nodes" :telemetry="telemetry" :hardware="hardwareLevels" :hardware-stale="!connected || now-hardwareReceived>500" :stale="stale" :age="now-receivedAt" :sample-rate="audioSettings.sample_rate" :block-size="audioSettings.block_size" :visible="stage ? stageMonitor : tab === 'monitor'" :stage="stage" />
       <footer v-if="project" class="transport-bar"><div class="transport-controls"><button class="icon-button stop-button" :disabled="!active || !conductor" aria-label="Stop" @click="task(() => transport('stop'))"><Square :size="16" fill="currentColor" /></button><button class="play-button" :disabled="!conductor || transportBusy || !!progress" :aria-label="running || countingIn ? 'Pause' : 'Play'" title="Space: play / pause" @click="task(togglePlayback)"><Pause v-if="running || countingIn" :size="19" fill="currentColor" /><Play v-else :size="19" fill="currentColor" /></button><div v-if="countingIn" class="position-display count-in-position" role="status"><strong>{{ telemetry?.count_in_remaining || '→' }}</strong><small>COUNT IN</small></div><div v-else class="position-display"><strong>{{ String(scorePosition.bar).padStart(3, '0') }}<span>:</span>{{ String(scorePosition.beat).padStart(2, '0') }}</strong><small>BAR · BEAT</small></div></div><label class="count-in-control">Count in<select v-model="countIn" aria-label="Count in" :disabled="!conductor || running || countingIn || transportBusy" title="Clicks play through connected browser monitors before starting from the beginning"><option value="0">Off</option><option value="bar">1 bar ({{ initialMeter.beats }} beats)</option><option v-for="beats in 32" :key="beats" :value="String(beats)">{{ beats }} {{ beats === 1 ? 'beat' : 'beats' }}</option></select></label><div class="tempo-control"><label for="tempo">TEMPO</label><input id="tempo" v-model.number="bpmDraft" type="number" min="1" max="400" :disabled="!graphActive || !conductor || !!tempoSource" :title="tempoSource ? 'Driven by ' + (project.graph.nodes.find(n=>n.id===tempoSource?.source)?.label || tempoSource.source) : 'Project tempo'" @change="task(() => transport('tempo'))"><span title="Quarter notes per minute">♩ BPM</span><div class="beat-lights"><i v-for="b in scorePosition.beats" :key="b" :class="{ lit: running && scorePosition.beat === b }"></i></div><button class="icon-button metronome-toggle" aria-label="Metronome" :aria-pressed="metronomeOn" :title="metronomeOn ? 'Metronome on · clicks in browser monitors while playing' : 'Metronome · click track in browser monitors while playing'" :disabled="!graphActive || !conductor" @click="task(toggleMetronome)"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.2 2h5.6l2.4 12H2.8z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 10.5 12.4 3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="10.8" r="1.2" fill="currentColor"/></svg></button></div><div class="transport-right"><span class="engine-label"><span class="status-dot" :class="{ live: graphActive && !stale }"></span>{{ graphActive ? stale ? 'ENGINE STALE' : 'ENGINE RUNNING' : 'ENGINE IDLE' }}<small>{{ audioSettings.sample_rate / 1000 }} kHz · {{ audioSettings.block_size }}-frame DSP blocks</small></span><button class="button collapsible" :class="{ live: graphActive }" :disabled="!conductor||!!progress" :aria-label="graphActive ? 'Disable audio engine' : 'Enable audio engine'" :title="graphActive ? 'Disable audio engine' : 'Enable audio engine'" @click="task(toggleEngine)"><Power :size="15" /><span class="button-label">{{ graphActive ? 'Disable audio engine' : 'Enable audio engine' }}</span></button><button v-if="!stage" class="button collapsible" aria-label="Performance mode" title="Performance mode · stage view for players" @click="task(enterStage)"><Presentation :size="15" /><span class="button-label">Performance mode</span></button><button class="icon-button browser-monitor-toggle" :class="{ 'monitor-on': monitorOn }" aria-label="Browser monitor" :aria-pressed="monitorOn" :aria-busy="['connecting','disconnecting','new'].includes(monitorState)" :title="monitorOn ? 'Turn off browser monitor' : graphActive ? 'Turn on browser monitor' : 'Enable the audio engine to monitor in this browser'" :disabled="(!graphActive && !monitorOn) || monitorState === 'disconnecting'" @click="monitorWorkspace?.toggleMonitor()"><Headphones :size="18" /></button></div></footer>
@@ -750,5 +880,6 @@ onBeforeUnmount(() => { window.removeEventListener('resize',phoneLayoutChanged);
     <NodeModal :route-targets="telemetry?.route_targets" :route-target="telemetry?.route_targets?.[selected?.id??'']" :samples="projectSamples" @sample="assignSample" :input-error="telemetry?.midi_input_error" :io-status="telemetry?.node_io" @io="assignNodeIo" :parts="project?.parts" @part="assignNodePart" :project-id="project?.id" v-if="selected && selectedDescriptor && project" :visualization="telemetry?.visualizations?.[selected.id]" :sample-rate="audioSettings.sample_rate" :block-size="audioSettings.block_size" :interfaces="audioSettings.interfaces.filter(i=>i.enabled)" :node="selected" :descriptor="selectedDescriptor" :nodes="project.graph.nodes" :edges="project.graph.edges" :values="telemetry?.values[selected.id]" :stale="stale" :editable="editable" :active="graphActive" :saving="saving" @rename="renameNode" @expand="navigateGraph(selected!.id)" @close="selectedNode = null" @change="editParameter" @disconnect="disconnect" @source="id => selectedNode = id" @undo="task(undoEdit)" @remove="removeNode" @upload="file => task(() => withProgress('Importing and converting clip', () => uploadSample(file)))" @channels="nodeChannels" @control="controlValue" @curve="editCurve" />
     <div v-if="creating" class="overlay"><form class="dialog-card" @submit.prevent="createProject"><header><div><div class="eyebrow">START SOMETHING</div><h2>New performance</h2></div><button type="button" class="icon-button" aria-label="Close" @click="creating = false"><X :size="20" /></button></header><label>Project name<input v-model="newName" maxlength="120" required autofocus></label><label>Performance mode</label><label v-for="m in [{ id: 'structured', title: 'Structured', text: 'A repeatable score and a shared timeline.' }, { id: 'conducted', title: 'Conducted', text: 'One conductor, an evolving performance.' }, { id: 'freeform', title: 'Freeform', text: 'Independent players, a common pulse.' }]" :key="m.id" class="mode-choice" :class="{ chosen: newMode === m.id }"><input v-model="newMode" type="radio" :value="m.id"><div><strong>{{ m.title }}</strong><p>{{ m.text }}</p></div></label><p class="feature-note">Structured mode follows the shared score. Conducted and freeform modes also support individual part launching.</p><button class="button primary wide" :disabled="busy">{{ busy ? 'Creating…' : 'Create performance' }}<Plus :size="16" /></button></form></div>
 
+    <div v-if="revisionsOpen" class="overlay" @click.self="revisionsOpen=false"><section class="dialog-card revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revisions-title"><header><div><div class="eyebrow">PROJECT HISTORY</div><h2 id="revisions-title">Revisions</h2></div><button type="button" class="icon-button" aria-label="Close" @click="revisionsOpen=false"><X :size="20" /></button></header><p class="feature-note">Select a revision to load it. Editing an older revision creates a new revision at the end of the history.</p><ol class="revision-list"><li v-for="entry in revisions" :key="entry.revision" :class="{ current: entry.current, loaded: loadedRevision === entry.revision }"><span class="revision-line" aria-hidden="true"></span><button class="revision-entry" @click="loadRevision(entry.revision)"><strong>Revision {{ entry.revision }}</strong><small v-if="entry.current">Current working copy</small><small v-else-if="loadedRevision === entry.revision">Loaded source · next save branches here</small><small v-else>Saved snapshot</small></button></li></ol></section></div>
   </div>
 </template>

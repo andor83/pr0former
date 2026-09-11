@@ -21,7 +21,11 @@ const visualization=computed(()=>telemetry?.value?.visualizations?.[props.id])
 const isMath = computed(() => props.data.descriptor.category === 'Math')
 const signal = computed(() => props.data.descriptor.outputs[0]?.signal || props.data.descriptor.inputs[0]?.signal || 'control')
 const inputs = computed(() => [...props.data.descriptor.inputs, ...props.data.descriptor.parameters.filter(p => !p.structural).map(p => ({ id: p.id, label: p.label, signal: 'control' as const }))])
-const height = computed(() => props.data.node.kind === 'pitch_tracker' ? Math.max(210,172+30*(props.data.node.parameters.slots??1)) : props.data.node.kind === 'piano' ? 307 : props.data.node.kind === 'control_input' ? 260 : visualizer.value ? props.data.node.kind==='control_visualizer'?190:150+Math.ceil(props.data.node.channels/2)*(props.data.node.kind==='spectral_visualizer'?148:104) : Math.max(isMath.value ? 124 : 156, (props.data.node.kind === 'subgraph' ? 112 : 72) + Math.max(inputs.value.length, props.data.descriptor.outputs.length) * 30))
+const midiInputs = computed(() => inputs.value.filter(port => port.signal === 'midi'))
+const midiOutputs = computed(() => props.data.descriptor.outputs.filter(port => port.signal === 'midi'))
+const regularInputs = computed(() => inputs.value.filter(port => port.signal !== 'midi'))
+const regularOutputs = computed(() => props.data.descriptor.outputs.filter(port => port.signal !== 'midi'))
+const height = computed(() => props.data.node.kind === 'pitch_tracker' ? Math.max(210,172+30*(props.data.node.parameters.slots??1)) : props.data.node.kind === 'piano' ? 307 : props.data.node.kind === 'control_input' ? 260 : visualizer.value ? props.data.node.kind==='control_visualizer'?190:150+Math.ceil(props.data.node.channels/2)*(props.data.node.kind==='spectral_visualizer'?148:104) : Math.max(isMath.value ? 124 : 156, (props.data.node.kind === 'subgraph' ? 112 : 100) + Math.max(inputs.value.length, props.data.descriptor.outputs.length) * 30))
 function controlSelect(event: MouseEvent) {
   if (event.ctrlKey && event.button === 0 && !(event.target instanceof Element && event.target.closest('button,.vue-flow__handle'))) {
     event.preventDefault();event.stopPropagation();props.data.toggleSelection(props.id)
@@ -48,11 +52,18 @@ function controlSelect(event: MouseEvent) {
     <div v-if="isMath" class="math-symbol">{{ data.descriptor.symbol }}</div>
     <div v-else class="node-title"><span class="node-glyph">{{ data.descriptor.symbol }}</span>{{ data.node.label }}</div>
     <div v-if="isMath" class="math-label">{{ data.node.label }}</div>
-    <div v-for="(port, index) in inputs" :key="`in-${port.id}`" class="port-row input-port" :style="{ top: `${65 + index * 30}px` }">
+    <div v-for="port in midiInputs" :key="`in-${port.id}`" class="port-row input-port midi-port" style="top: 65px">
       <Handle :id="port.id" type="target" :position="Position.Left" :class="port.signal" @click.stop="data.connectPort(id, port.id, 'target')" />
       <span>{{ port.label }}</span>
     </div>
-    <div v-for="(port, index) in data.descriptor.outputs" :key="`out-${port.id}`" class="port-row output-port" :style="{ top: `${65 + index * 30}px` }">
+    <div v-for="(port, index) in regularInputs" :key="`in-${port.id}`" class="port-row input-port" :style="{ top: `${65 + (index + midiInputs.length) * 30}px` }">
+      <Handle :id="port.id" type="target" :position="Position.Left" :class="port.signal" @click.stop="data.connectPort(id, port.id, 'target')" />
+      <span>{{ port.label }}</span>
+    </div>
+    <div v-for="port in midiOutputs" :key="`out-${port.id}`" class="port-row output-port midi-port" style="top: 65px">
+      <span>{{ port.label }}</span><Handle :id="port.id" type="source" :position="Position.Right" :class="port.signal" @click.stop="data.connectPort(id, port.id, 'source')" />
+    </div>
+    <div v-for="(port, index) in regularOutputs" :key="`out-${port.id}`" class="port-row output-port" :style="{ top: `${65 + (index + midiOutputs.length) * 30}px` }">
       <span>{{ port.label }}</span><Handle :id="port.id" type="source" :position="Position.Right" :class="port.signal" @click.stop="data.connectPort(id, port.id, 'source')" />
     </div>
     <PitchTrackerReadout v-if="data.node.kind==='pitch_tracker'" :slots="data.node.parameters.slots??1" :values="values" :stale="!data.active||(telemetryStale??true)" />

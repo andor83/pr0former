@@ -59,11 +59,11 @@ fn typed_midi_dispatch_and_render_do_not_allocate_or_free() {
     let graph = Graph {
         nodes: vec![source, node("out", "midi_output")],
         edges: vec![Edge {
-            id: "events".into(),
+            id: "midi".into(),
             source: "source".into(),
-            source_port: "events".into(),
+            source_port: "midi".into(),
             target: "out".into(),
-            target_port: "events".into(),
+            target_port: "midi".into(),
         }],
     };
     let mut engine = pr0_dsp::Engine::prepare(graph, 48000.).unwrap();

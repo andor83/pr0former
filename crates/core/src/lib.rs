@@ -252,6 +252,14 @@ fn port(id: &str, signal: Signal) -> Port {
         fixed_channels: None,
     }
 }
+fn midi_port() -> Port {
+    Port {
+        id: "midi".into(),
+        label: "MIDI".into(),
+        signal: Signal::Midi,
+        fixed_channels: None,
+    }
+}
 
 pub fn named_route(kind: &str) -> bool {
     matches!(
@@ -582,6 +590,22 @@ pub fn catalog() -> Vec<Descriptor> {
         &["live convolution", "cross synthesis"],
     );
     add(
+        "convolution_reverb",
+        "Convolution reverb",
+        "∗",
+        "Effect",
+        "Apply a selected room response or noise sample to audio. Choose the impulse or room recording in the node options; the response is continuously windowed and mixed without blocking the engine.",
+        vec![port("a", Audio)],
+        vec![port("out", Audio)],
+        vec![
+            Parameter { structural: true, ..param("asset", "Sample ID", "", 0., 1000000000., 0.) },
+            Parameter { structural: true, ..param("window", "Window size", "samples", 128., 2048., 256.) },
+            param("normalize", "Normalize response", "", 0., 1., 1.),
+            param("mix", "Wet/dry", "", 0., 1., 1.),
+        ],
+        &["IR reverb", "room reverb", "impulse response"],
+    );
+    add(
         "granular_synth",
         "Granular synth",
         "⋮",
@@ -590,6 +614,7 @@ pub fn catalog() -> Vec<Descriptor> {
         ["pitch", "velocity", "gate", "trigger", "note_off"]
             .into_iter()
             .map(|id| port(id, Control))
+            .chain(std::iter::once(midi_port()))
             .collect(),
         vec![port("out", Audio)],
         vec![
@@ -661,10 +686,12 @@ pub fn catalog() -> Vec<Descriptor> {
         ["pitch", "velocity", "gate", "trigger", "note_off"]
             .into_iter()
             .map(|id| port(id, Control))
+            .chain(std::iter::once(midi_port()))
             .collect(),
         ["pitch", "velocity", "gate", "trigger", "note_off"]
             .into_iter()
             .map(|id| port(id, Control))
+            .chain(std::iter::once(midi_port()))
             .collect(),
         vec![
             Parameter {
@@ -1017,7 +1044,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "Audio visualizer",
         "▥",
         "Audio",
-        "Transparent multichannel audio pass-through with block-rate spectral analysis and a spectrogram. Display updates are throttled; audio is unchanged.",
+        "Transparent multichannel audio pass-through with block-rate spectral analysis and a spectrogram. Enable the audio engine to visualize this signal; audio is unchanged.",
         vec![port("in", Audio)],
         vec![port("out", Audio)],
         vec![Parameter {
@@ -1031,7 +1058,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "Spectral visualizer",
         "▤",
         "Spectral",
-        "Transparent spectral-frame pass-through. Shows a spectrogram, FFT-bin magnitudes, and phase in radians for every channel; Cartesian and polar data are preserved.",
+        "Transparent spectral-frame pass-through. Enable the audio engine to visualize this signal with spectrogram, FFT-bin magnitudes, and phase in radians for every channel; Cartesian and polar data are preserved.",
         vec![port("in", Spectral)],
         vec![port("out", Spectral)],
         vec![
@@ -1084,6 +1111,7 @@ pub fn catalog() -> Vec<Descriptor> {
         ["pitch", "velocity", "gate", "trigger", "note_off"]
             .into_iter()
             .map(|id| port(id, Control))
+            .chain(std::iter::once(midi_port()))
             .collect(),
         vec![port("out", Audio)],
         vec![
@@ -1643,7 +1671,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "♪→",
         "Control",
         "Decode typed MIDI channel messages. Type is the status high nibble (8 note off, 9 note on, 11 CC, 12 program, 13 pressure, 14 bend). Number identifies a note/controller; value decodes 7-bit values or full 14-bit pitch bend. Channel is 1–16. Trigger marks an event. Filter type/number in the modal; zero type or -1 number accepts all.",
-        vec![port("events", Midi)],
+        vec![midi_port()],
         vec![
             port("type", Control),
             port("number", Control),
@@ -1658,15 +1686,34 @@ pub fn catalog() -> Vec<Descriptor> {
         &[],
     );
     for descriptor in &mut result {
+        let midi_input = matches!(
+            descriptor.kind.as_str(),
+            "midi_to_control"
+                | "midi_output"
+                | "midi_to_osc"
+                | "synth"
+                | "fm_synth"
+                | "poly_sampler"
+                | "granular_synth"
+                | "piano"
+        );
+        let midi_output = matches!(
+            descriptor.kind.as_str(),
+            "part_midi" | "midi_input" | "osc_to_midi" | "piano"
+        );
+        if midi_input {
+            descriptor.inputs.retain(|p| p.signal != Midi);
+            descriptor.inputs.push(midi_port());
+        }
+        if midi_output {
+            descriptor.outputs.retain(|p| p.signal != Midi);
+            descriptor.outputs.push(midi_port());
+        }
         if descriptor.kind == "part_midi" {
-            descriptor.outputs.push(port("events", Midi));
             descriptor.parameters.push(Parameter {
                 structural: true,
                 ..param("staff", "Staff (0 all, 1 first)", "", 0., 8., 0.)
             });
-        }
-        if descriptor.kind == "midi_output" {
-            descriptor.inputs.push(port("events", Midi));
         }
     }
     result
@@ -1800,7 +1847,7 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
-            if n.kind == "convolution"
+            if matches!(n.kind.as_str(), "convolution" | "convolution_reverb")
                 && n.parameters
                     .get("window")
                     .is_some_and(|v| v.fract() != 0. || !(*v as usize).is_power_of_two())
@@ -2744,9 +2791,10 @@ mod synth_contract_tests {
             assert_eq!(d.default_channels, 1);
             assert_eq!(
                 d.inputs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-                ["pitch", "velocity", "gate", "trigger", "note_off"]
+                ["pitch", "velocity", "gate", "trigger", "note_off", "midi"]
             );
-            assert!(d.inputs.iter().all(|p| p.signal == Signal::Control));
+            assert_eq!(d.inputs.last().unwrap().signal, Signal::Midi);
+            assert!(d.inputs[..5].iter().all(|p| p.signal == Signal::Control));
         }
         let mut p = demo_project("p".into(), "p".into(), Mode::Freeform);
         p.parts.clear();

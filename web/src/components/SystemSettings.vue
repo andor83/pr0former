@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { X, AudioLines } from '@lucide/vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { X, AudioLines, Plus, Trash2 } from '@lucide/vue'
 import { api } from '../api'
 import TaskProgress from './TaskProgress.vue'
 import ExternalSettings from './ExternalSettings.vue'
@@ -10,7 +10,11 @@ export interface AudioSettings {input_interfaces:{id:number;name:string;enabled:
 const props=defineProps<{projectId?:string;project?:Project;currentUserId:string;saving:boolean;editable:boolean;active:boolean}>()
 const emit=defineEmits<{close:[];saved:[settings:AudioSettings];part:[part:Part]}>()
 const dialog=ref<HTMLDialogElement>(),settings=ref<AudioSettings>({sample_rate:48000,block_size:128,interfaces:[],input_interfaces:[]}),devices=ref<any>(),error=ref(''),loading=ref(true),testingPending=ref(false),busy=ref(''),testing=ref(false),position=ref(0)
-const tab=ref<'audio'|'midi'|'osc'|'users'>(props.projectId?'audio':'users')
+const tab=ref<'audio'|'midi'|'osc'|'users'>(props.projectId?'audio':'users'), titleDialog=ref<HTMLDialogElement>(), loginTitles=ref<{first:string;second:string}[]>([]), titleBusy=ref(false), titleError=ref('')
+async function editLoginTitles(){titleError.value='';try{loginTitles.value=await api('/login-titles');titleDialog.value?.showModal()}catch(e){titleError.value=String(e)}}
+async function addLoginTitle(){loginTitles.value.push({first:'New title',second:'Live Electroacoustic Performance Platform'});await nextTick();const input=titleDialog.value?.querySelector<HTMLInputElement>('.login-title-row:last-child input');input?.scrollIntoView({block:'center'});input?.focus();input?.select()}
+function removeLoginTitle(index:number){loginTitles.value.splice(index,1)}
+async function saveLoginTitles(){titleBusy.value=true;try{loginTitles.value=await api('/login-titles','PUT',loginTitles.value);titleDialog.value?.close()}catch(e){titleError.value=String(e)}finally{titleBusy.value=false}}
 async function refreshDevices(){try{devices.value=await api('/devices')}catch(e){error.value=String(e)}}
 let disposed=false
 let stopTimer:ReturnType<typeof setTimeout>|undefined
@@ -29,12 +33,36 @@ onMounted(async()=>{dialog.value?.showModal();try{await refresh()}catch(e){error
 onBeforeUnmount(()=>{disposed=true;clearTimeout(stopTimer);void stop().catch(()=>{});socket?.close();cancelAnimationFrame(frame)})
 </script>
 <template>
-<dialog ref="dialog" class="parameter-modal system-settings" aria-labelledby="system-title" @cancel.prevent="close"><header class="modal-header"><div><div class="eyebrow">PERFORMANCE SERVER</div><h2 id="system-title">System settings</h2></div><button class="icon-button" aria-label="Close system settings" :disabled="!!busy" @click="close"><X :size="20"/></button></header>
+<dialog ref="dialog" class="parameter-modal system-settings" aria-labelledby="system-title" @cancel.prevent="close"><header class="modal-header"><div><div class="eyebrow">PERFORMANCE SERVER</div><h2 id="system-title" @dblclick="editLoginTitles">System settings</h2></div><button class="icon-button" aria-label="Close system settings" :disabled="!!busy" @click="close"><X :size="20"/></button></header>
 <div class="settings-layout"><nav role="tablist" aria-label="System settings sections"><button v-for="t in (['audio','midi','osc','users'] as const)" :key="t" :id="`system-tab-${t}`" :class="{active:tab===t}" role="tab" :aria-selected="tab===t" :aria-controls="`system-panel-${t}`" @click="tab=t">{{t==='audio'?'System audio':t==='users'?'Users':t.toUpperCase()}}</button></nav><section v-if="tab==='users'" id="system-panel-users" role="tabpanel" aria-labelledby="system-tab-users"><UserAdministration :current-user-id="currentUserId"/></section><section v-else-if="tab!=='audio' && project" :id="`system-panel-${tab}`" role="tabpanel" :aria-labelledby="`system-tab-${tab}`"><ExternalSettings :tab="tab" :project="project" :devices="devices" :editable="editable" :active="active" :saving="saving" @part="emit('part',$event)" @refresh="refreshDevices"/></section><section v-show="tab==='audio'" id="system-panel-audio" role="tabpanel" aria-labelledby="system-tab-audio"><h3>System audio</h3><p>These settings apply to every project on this server. Newly discovered devices are enabled by default. Device checkboxes save immediately; other settings use Save system audio.</p><p v-if="active" class="field-error">Deactivate the show before changing audio settings.</p><p v-if="error" role="alert" class="field-error">{{error}}</p><p v-if="devices?.error" class="field-error">{{devices.error}}</p>
 <fieldset :disabled="!editable||!projectId||active||loading||!!busy"><label>Global sample rate (Hz)<select v-model.number="settings.sample_rate"><option :value="44100">44,100 Hz</option><option :value="48000">48,000 Hz</option><option :value="88200">88,200 Hz</option><option :value="96000">96,000 Hz</option></select></label><p class="feature-note">Clips are converted and cached at this rate. Originals are retained. Other projects prepare their clips when opened.</p>
 <label>DSP block size<select v-model.number="settings.block_size"><option v-for="size in [32,64,128,256,512,1024]" :key="size" :value="size">{{size}} frames · {{(size/settings.sample_rate*1000).toFixed(2)}} ms</option></select></label><p class="feature-note">Smaller blocks increase scheduling overhead and reduce the target output queue. The device driver chooses its callback buffer separately.</p><h3>Active interfaces</h3><p class="feature-note">Checked outputs are available in Audio output node modals. With none selected, the engine serves browser monitors only.</p><p v-if="!settings.interfaces.length">No audio output interfaces detected.</p>
 <article v-for="i in settings.interfaces" :key="i.id" class="interface-card"><label class="check-label"><input v-model="i.enabled" type="checkbox" @change="toggleDevice('output',i)">{{i.name}}<span v-if="!devices?.interfaces.some((d:any)=>d.id===i.id)"> · unavailable</span></label><div class="latency-controls"><label class="check-label"><input v-model="i.correct_latency" :disabled="!i.enabled" type="checkbox">Correct for latency</label><label>Latency (ms)<input v-model.number="i.latency_ms" type="number" min="0" max="1000" step="0.1" :disabled="!i.enabled||!i.correct_latency"></label></div></article>
 <p class="feature-note">Correction delays faster checked interfaces to match the largest entered latency. Separate device clocks may drift; an OS aggregate device is preferable for synchronized multichannel output.</p><h3>Enabled native inputs</h3><p v-if="!settings.input_interfaces.length">No native audio inputs are available on the server.</p><article v-for="i in settings.input_interfaces" :key="i.id" class="interface-card"><label class="check-label"><input v-model="i.enabled" type="checkbox" @change="toggleDevice('input',i)">{{i.name}}<span v-if="!devices?.input_interfaces?.some((d:any)=>d.id===i.id)"> · unavailable</span></label></article><p class="feature-note">Checked inputs are selectable in Audio input nodes. Saved inputs start automatically with the audio engine. All physical channels are available in Monitor; node routes can select channels 1–64.</p><button class="button primary" @click="save">Save system audio</button></fieldset>
 <section class="latency-test"><h3>Latency test</h3><p>Save your interfaces, then compare the server metronome with the bouncing indicator. Enter measured output latencies above. This is manual calibration; browser and network delay affect the visual reference.</p><div class="metronome-track" aria-label="Metronome position"><span :style="{left:`${position}%`}" :class="{testing}"></span></div><button class="button" :disabled="!editable||!projectId||active||loading||testingPending||!!busy" @click="test">{{testing?'Stop latency test':'Start latency test'}}</button><small>Stops automatically after 60 seconds.</small></section>
-</section></div></dialog><TaskProgress v-if="busy" :title="busy" detail="Converting and caching this project’s clips. Original files are retained."/>
+</section></div></dialog>
+<dialog ref="titleDialog" class="parameter-modal login-title-editor" aria-labelledby="login-title-heading">
+  <header class="modal-header login-title-header">
+    <div><div class="eyebrow">LOGIN SCREEN · EASTER EGG</div><h2 id="login-title-heading">Login Title Pairs</h2></div>
+    <button class="icon-button modal-close" aria-label="Close title editor" :disabled="titleBusy" @click="titleDialog?.close()"><X :size="20"/></button>
+  </header>
+  <div class="login-title-body">
+    <div class="login-title-toolbar"><p class="login-title-intro">Each entry supplies the two paired lines shown on the login screen. One entry is chosen at random for each visit.</p><button class="button" :disabled="titleBusy" @click="addLoginTitle"><Plus :size="15"/> Add Pair</button></div>
+    <p v-if="titleError" class="field-error login-title-error" role="alert">{{titleError}}</p>
+    <div v-if="loginTitles.length" class="login-title-columns" aria-hidden="true"><span></span><span>First line</span><span>Second line</span><span></span></div>
+    <div class="login-title-list">
+      <div v-for="(title,index) in loginTitles" :key="index" class="login-title-row">
+        <span class="login-title-number">{{index + 1}}</span>
+        <label><span>First line</span><input v-model="title.first" :aria-label="`Pair ${index + 1} first line`"></label>
+        <label><span>Second line</span><input v-model="title.second" :aria-label="`Pair ${index + 1} second line`"></label>
+        <button class="icon-button danger login-title-delete" :aria-label="`Delete title pair ${index + 1}`" title="Delete pair" @click="removeLoginTitle(index)"><Trash2 :size="16"/></button>
+      </div>
+      <p v-if="!loginTitles.length" class="login-title-empty">No title pairs yet. Add one to keep the login screen from using the built-in defaults.</p>
+    </div>
+  </div>
+  <footer class="modal-footer login-title-footer">
+    <div><button class="button" :disabled="titleBusy" @click="titleDialog?.close()">Cancel</button><button class="button primary" :disabled="titleBusy || !loginTitles.length" @click="saveLoginTitles">{{titleBusy ? 'Saving…' : 'Save Title Pairs'}}</button></div>
+  </footer>
+</dialog>
+<TaskProgress v-if="busy" :title="busy" detail="Converting and caching this project’s clips. Original files are retained."/>
 </template>

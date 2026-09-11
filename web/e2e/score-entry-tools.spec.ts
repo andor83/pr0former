@@ -142,6 +142,17 @@ test('syncopation, point tools, mixing and preparation playback', async ({
   await page
     .getByRole('button', { name: 'Performance mode', exact: true })
     .click()
+  // Performance mode is a read-only score view: notation must not acquire a
+  // selection or highlight when it is clicked.
+  const performanceGlyph = page
+    .locator('[data-score-part="part-1"] [data-note-id]')
+    .first()
+  await expect(performanceGlyph).toHaveAttribute('data-selected', 'false')
+  await performanceGlyph.dispatchEvent('pointerdown', { button: 0 })
+  await performanceGlyph.dispatchEvent('pointerup', { button: 0 })
+  await expect(
+    page.locator('[data-score-element][data-selected="true"]'),
+  ).toHaveCount(0)
   const locked = await read()
   locked.parts[0].name = 'Forbidden'
   expect(

@@ -399,6 +399,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   focus: [id: string]
   audition: [part: string, note: string]
+  seek: [beat: number]
 }>()
 /**
  * Local working copy. Edits apply here immediately and are saved on a short
@@ -424,6 +425,19 @@ const selected = ref(new Set<string>()),
       doc.value.parts[0]?.id ||
       '',
   )
+const performanceSelection = computed(() =>
+  props.performance ? new Set<string>() : selected.value,
+)
+watch(
+  () => props.performance,
+  (locked) => {
+    if (locked) {
+      selected.value = new Set()
+      selectedElement.value = null
+    }
+  },
+  { immediate: true },
+)
 const zoomKey = 'pr0former.score.zoom'
 function readZoom() {
   try {
@@ -1822,6 +1836,9 @@ function point(event: MouseEvent) {
     y: (event.clientY - rect.top) / zoom.value,
   }
 }
+function seekFromClick(beat: number) {
+  if (!props.performance && Number.isFinite(beat)) emit('seek', Math.max(0, beat))
+}
 async function inspectElement() {
   if (props.performance) return
   const e = selectedElement.value
@@ -1887,6 +1904,17 @@ function cancelGesture() {
 function pointerDown(event: PointerEvent) {
   if (event.button !== 0 || !(event.target instanceof Element)) return
   if (inlineText.value && !event.target.closest('.inline-text')) commitInlineText()
+  // Performance mode keeps the score available as a visual reference. Do not
+  // let notes, marks, or gestures create a selection or editing affordance.
+  // Clicking a staff row still focuses that part for its stage controls.
+  if (props.performance) {
+    selected.value = new Set()
+    selectedElement.value = null
+    const row = event.target.closest<HTMLElement>('[data-staff-id]')
+    if (row) focus(row.dataset.partId!)
+    event.preventDefault()
+    return
+  }
   const handle = event.target.closest<HTMLElement>('[data-curve-handle]')
   if (handle && canEdit.value) {
     const p = doc.value.parts.find((p) => p.id === handle.dataset.curvePart),
@@ -2063,6 +2091,7 @@ function pointerDown(event: PointerEvent) {
   ) {
     trackClick(mark.dataset.scoreElement!)
     selectedElement.value = JSON.parse(mark.dataset.scoreElement!)
+    seekFromClick(selectedElement.value?.beat ?? beatAt(point(event).x))
     selected.value = new Set()
     focus(selectedElement.value!.part)
     root.value?.focus({ preventScroll: true })
@@ -2085,6 +2114,9 @@ function pointerDown(event: PointerEvent) {
   root.value?.focus({ preventScroll: true })
   focus(row.dataset.partId!)
   if (node) {
+    const notePart = doc.value.parts.find((p) => p.id === row.dataset.partId),
+      note = notePart?.notes.find((n) => n.id === node.dataset.noteId)
+    if (note) seekFromClick(note.beat)
     trackClick(`${row.dataset.partId}:${node.dataset.noteId}`)
     const key = noteKey(row.dataset.partId!, node.dataset.noteId!),
       multi = event.ctrlKey || event.metaKey,
@@ -2123,6 +2155,7 @@ function pointerDown(event: PointerEvent) {
     event.preventDefault()
     return
   }
+  seekFromClick(Math.max(0, beatAt(point(event).x)))
   if (props.performance) return
   const pos = point(event),
     rect = row.getBoundingClientRect()
@@ -2189,6 +2222,16 @@ function pointerMove(event: PointerEvent) {
   }
 }
 function pointerUp(event: PointerEvent) {
+  if (props.performance) {
+    gesture.value = null
+    marquee.value = null
+    elementDrag = null
+    phraseDrag.value = null
+    curveDrag = null
+    if (viewport.value?.hasPointerCapture(event.pointerId))
+      viewport.value.releasePointerCapture(event.pointerId)
+    return
+  }
   if (phraseDrag.value) {
     if (viewport.value?.hasPointerCapture(event.pointerId))
       viewport.value.releasePointerCapture(event.pointerId)
@@ -3376,10 +3419,13 @@ watch(
                     :timeline="doc.score"
                     :view-start="viewportStart"
                     :view-end="viewportEnd"
-                    :selected="selected"
+                    :selected="performanceSelection"
                     :selected-element="
-                      selectedElement ? elementKey(selectedElement) : null
+                      performance || !selectedElement
+                        ? null
+                        : elementKey(selectedElement)
                     "
+                    :interactive="!performance"
                     :beat="beats[p.id] || 0"
                     :first="staffIndex === 0"
                   />

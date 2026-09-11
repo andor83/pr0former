@@ -16,4 +16,13 @@ describe('matching port connections',()=>{
     expect(matchingPorts(a,b,[a,b],[],descriptors)).toEqual([{source_port:'pitch',target_port:'pitch'}])
     expect(matchingPorts(a,b,[a,b],[{id:'e',source:'a',source_port:'pitch',target:'b',target_port:'pitch'}],descriptors)).toEqual([])
   })
+  it('prefers one MIDI cable when note controls overlap',()=>{
+    const a=node('a',0),b=node('b',400)
+    const base={label:'Node',symbol:'',category:'Audio',description:'',aliases:[],parameters:[]}
+    const descriptors:Descriptor[]=[
+      {...base,kind:'a',inputs:[],outputs:[{id:'pitch',label:'Pitch',signal:'control'},{id:'midi',label:'MIDI',signal:'midi'}]},
+      {...base,kind:'b',outputs:[],inputs:[{id:'pitch',label:'Pitch',signal:'control'},{id:'midi',label:'MIDI',signal:'midi'}]},
+    ]
+    expect(matchingPorts(a,b,[a,b],[],descriptors)).toEqual([{source_port:'midi',target_port:'midi'}])
+  })
 })

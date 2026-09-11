@@ -213,10 +213,13 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(pcm, [0.25, -0.25, 0.5, -0.5]);
-        store.tx.send(Job::Save(
-            p.id.clone(),
-            (id.clone(), 1, 2, 100, vec![0.125, -0.125]),
-        )).unwrap();
+        store
+            .tx
+            .send(Job::Save(
+                p.id.clone(),
+                (id.clone(), 1, 2, 100, vec![0.125, -0.125]),
+            ))
+            .unwrap();
         store.flush(&p.id, &mut engine).unwrap();
         assert_eq!(
             hound::WavReader::open(&file)
@@ -227,10 +230,13 @@ mod tests {
             [0.125, -0.125]
         );
         // A queued replacement must complete before a subsequent clear.
-        store.tx.send(Job::Save(
-            p.id.clone(),
-            (id.clone(), 1, 2, 100, vec![1., -1.]),
-        )).unwrap();
+        store
+            .tx
+            .send(Job::Save(
+                p.id.clone(),
+                (id.clone(), 1, 2, 100, vec![1., -1.]),
+            ))
+            .unwrap();
         engine.clear_loop(&id, 1).unwrap();
         store.flush(&p.id, &mut engine).unwrap();
         assert!(!file.exists());
@@ -251,10 +257,13 @@ mod tests {
         let mut store = Store::at(root.clone());
         let p = pr0_core::demo_project("project".into(), "Loops".into(), pr0_core::Mode::Freeform);
         let mut engine = Engine::prepare(p.graph, 100.).unwrap();
-        store.tx.send(Job::Save(
-            p.id.clone(),
-            ("node".into(), 1, 1, 100, vec![1.]),
-        )).unwrap();
+        store
+            .tx
+            .send(Job::Save(
+                p.id.clone(),
+                ("node".into(), 1, 1, 100, vec![1.]),
+            ))
+            .unwrap();
         assert!(
             store
                 .flush(&p.id, &mut engine)

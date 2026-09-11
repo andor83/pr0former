@@ -294,6 +294,10 @@ impl RuntimeNode {
             self.bindings
                 .iter()
                 .any(|b| !b.parameter && b.destination == i && b.midi_lane.is_none())
+                || self
+                    .bindings
+                    .iter()
+                    .any(|b| !b.parameter && b.signal == pr0_core::Signal::Midi)
         });
         for event in self
             .note_inputs
@@ -309,6 +313,42 @@ impl RuntimeNode {
             for event in notes.into_iter().flatten() {
                 self.graph_synth_event(event, index + 1);
             }
+        }
+    }
+    /// Decode a direct MIDI cable into the same five note controls used by
+    /// the explicit pitch/velocity/gate/trigger/note_off connections.
+    fn direct_midi_controls(&mut self) {
+        if !matches!(
+            self.kind.as_str(),
+            "synth"
+                | "fm_synth"
+                | "poly_sampler"
+                | "granular_synth"
+                | "midi_output"
+                | "midi_to_osc"
+        ) {
+            return;
+        }
+        if !self
+            .bindings
+            .iter()
+            .any(|b| !b.parameter && b.signal == pr0_core::Signal::Midi)
+        {
+            return;
+        }
+        let Some(midi) = self.midi_controls.as_mut() else {
+            return;
+        };
+        for index in 0..self.midi_frame.len {
+            let event = self.midi_frame.events[index];
+            let status = event.status >> 4;
+            if matches!(status, 8 | 9) {
+                midi.note(event.data1, if status == 8 { 0 } else { event.data2 });
+            }
+        }
+        let values = midi.tick();
+        for (index, value) in values.into_iter().enumerate() {
+            self.input[index][0] = value;
         }
     }
     fn device_frame(&self) -> [f32; MAX_DEVICE_CHANNELS] {
@@ -334,6 +374,7 @@ impl RuntimeNode {
         let input = self.input[0];
         let mut scalar = 0.;
         self.output = [0.; MAX_CHANNELS];
+        self.direct_midi_controls();
         self.control_text = None;
         if self.kind != "receive_control" {
             self.control_event_only = false;
@@ -437,9 +478,26 @@ impl RuntimeNode {
                 }
             }
             "part_midi" | "midi_input" | "osc_to_midi" => {
-                self.control[..5].copy_from_slice(&self.midi_controls.as_mut().unwrap().tick());
+                let values = self.midi_controls.as_mut().unwrap().tick();
+                self.control[..5].copy_from_slice(&values);
                 self.control[5] = self.control[0];
                 self.control[6] = self.control[1];
+                // Score driven Part MIDI also publishes its decoded note as a
+                // raw channel message so a direct MIDI cable remains lossless
+                // for downstream note-oriented nodes.
+                if self.kind == "part_midi"
+                    && self
+                        .bindings
+                        .iter()
+                        .any(|b| !b.parameter && b.signal == pr0_core::Signal::Midi)
+                    && (values[3] != 0. || values[4] != 0.)
+                {
+                    self.midi_frame.push(pr0_core::midi::Message {
+                        status: if values[4] != 0. { 0x80 } else { 0x90 },
+                        data1: values[0] as u8,
+                        data2: values[1] as u8,
+                    });
+                }
                 scalar = self.control[0];
             }
             "midi_output" | "midi_to_osc" | "poly_sampler" | "granular_synth" => {
@@ -448,6 +506,10 @@ impl RuntimeNode {
                     self.bindings
                         .iter()
                         .any(|b| !b.parameter && b.destination == i)
+                        || self
+                            .bindings
+                            .iter()
+                            .any(|b| !b.parameter && b.signal == pr0_core::Signal::Midi)
                 });
                 // Keep older MIDI number/value connections valid as aliases.
                 if self.kind == "midi_output" {
@@ -594,14 +656,21 @@ impl RuntimeNode {
             "send_audio" => self.output = input,
             "receive_audio" => self.output = self.route.as_ref().unwrap().audio,
             "send_spectral" | "receive_spectral" => {}
-            "convolution" => {
+            "convolution" | "convolution_reverb" => {
                 let mix = self.p("mix");
                 let normalize = self.p("normalize") > 0.;
+                let response = if self.kind == "convolution_reverb" && !self.sample.is_empty() {
+                    let frame = self.sample[self.sample_position % self.sample.len()];
+                    self.sample_position = self.sample_position.wrapping_add(1);
+                    frame.map(|sample| sample as f64)
+                } else {
+                    self.input[1]
+                };
                 self.output =
                     self.convolution
                         .as_mut()
                         .unwrap()
-                        .tick(input, self.input[1], mix, normalize);
+                        .tick(input, response, mix, normalize);
             }
             "granular_pitch_shift" => {
                 let shift = self.p("semitones");
@@ -1247,7 +1316,7 @@ impl Engine {
                         n.parameters.get("grain_ms").copied().unwrap_or(20.),
                     ))
                 }),
-                convolution: (n.kind == "convolution").then(|| {
+                convolution: matches!(n.kind.as_str(), "convolution" | "convolution_reverb").then(|| {
                     Box::new(convolution::Convolution::new(
                         n.parameters.get("window").copied().unwrap_or(256.) as usize,
                         n.channels,
@@ -1256,7 +1325,16 @@ impl Engine {
                 sampler: (n.kind == "poly_sampler").then(|| Box::new(sampler::Sampler::default())),
                 midi_controls: (matches!(
                     n.kind.as_str(),
-                    "part_midi" | "midi_input" | "osc_to_midi" | "piano"
+                    "part_midi"
+                        | "midi_input"
+                        | "osc_to_midi"
+                        | "piano"
+                        | "synth"
+                        | "fm_synth"
+                        | "poly_sampler"
+                        | "granular_synth"
+                        | "midi_output"
+                        | "midi_to_osc"
                 ))
                 .then(|| Box::new(midi_controls::MidiControls::new())),
                 control_text: None,
@@ -1505,7 +1583,7 @@ impl Engine {
                     && nodes[idx].kind.starts_with("receive_")
                 {
                     1
-                } else if nodes[idx].kind == "convolution" {
+                } else if matches!(nodes[idx].kind.as_str(), "convolution" | "convolution_reverb") {
                     nodes[idx].p("window") as usize
                 } else if let Some(shifter) = &nodes[idx].pitch_shift {
                     shifter.latency()
@@ -4545,9 +4623,9 @@ mod typed_midi_tests {
                     node("sink", "midi_output", None),
                 ],
                 edges: vec![
-                    edge("a", "source", "events", "group", "in"),
+                    edge("a", "source", "midi", "group", "in"),
                     edge("b", "in", "out", "out", "in"),
-                    edge("c", "group", "out", "sink", "events"),
+                    edge("c", "group", "out", "sink", "midi"),
                 ],
             }
         } else {
@@ -4556,7 +4634,7 @@ mod typed_midi_tests {
                     node("source", "part_midi", None),
                     node("sink", "midi_output", None),
                 ],
-                edges: vec![edge("a", "source", "events", "sink", "events")],
+                edges: vec![edge("a", "source", "midi", "sink", "midi")],
             }
         }
     }

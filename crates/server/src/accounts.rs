@@ -4,6 +4,7 @@ pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS user_profiles(user_id TEXT PRIMARY KEY REFERENCES users(id),is_admin INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,deleted INTEGER NOT NULL DEFAULT 0,body TEXT NOT NULL DEFAULT '{}',revision INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL DEFAULT 0);
         INSERT OR IGNORE INTO user_profiles(user_id,is_admin,created) SELECT id,CASE WHEN rowid=(SELECT min(rowid) FROM users) THEN 1 ELSE 0 END,strftime('%s','now') FROM users;
         CREATE TRIGGER IF NOT EXISTS initialize_user_profile AFTER INSERT ON users BEGIN INSERT INTO user_profiles(user_id,is_admin,created) VALUES(new.id,CASE WHEN (SELECT count(*) FROM users)=1 THEN 1 ELSE 0 END,strftime('%s','now')); END;
+        CREATE TABLE IF NOT EXISTS user_avatars(user_id TEXT PRIMARY KEY REFERENCES users(id),body BLOB NOT NULL,revision INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS project_recents(user_id TEXT REFERENCES users(id),project_id TEXT REFERENCES projects(id),opened INTEGER NOT NULL,PRIMARY KEY(user_id,project_id));")
 }
 pub fn is_admin(db: &Connection, id: &str) -> bool {

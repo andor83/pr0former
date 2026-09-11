@@ -107,6 +107,21 @@ pub struct Media {
     admissions: Admissions,
 }
 impl Media {
+    pub async fn close_project_user(&self, project: &str, user: &str) {
+        let key = format!("{project}/{user}");
+        let token = self.admissions.lock().unwrap().get(&key).cloned();
+        if let Some(token) = &token {
+            token.store(true, Ordering::Release);
+        }
+        let peer = self.peers.lock().await.remove(&key);
+        if let Some(peer) = peer {
+            let _ = tokio::time::timeout(Duration::from_secs(5), peer.close()).await;
+        }
+        if let Some(token) = token {
+            release_slot(&self.admissions, &key, &token);
+        }
+    }
+
     pub async fn close_project(&self, project: &str) {
         let prefix = format!("{project}/");
         {

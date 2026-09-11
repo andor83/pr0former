@@ -10,6 +10,72 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+const BUILTIN_EPIANO: &str = "builtin-electric-piano";
+const BUILTIN_DRUMS: &str = "builtin-fm-drum-machine";
+
+fn builtin_graph(id: &str) -> Option<Graph> {
+    let (name, drum) = match id {
+        BUILTIN_EPIANO => ("Electric Piano", false),
+        BUILTIN_DRUMS => ("FM Drum Machine", true),
+        _ => return None,
+    };
+    let mut nodes = vec![
+        json!({"id":"root","kind":"subgraph","label":name,"x":0,"y":0,"channels":2,"parameters":{}}),
+    ];
+    let mut edges = Vec::new();
+    if !drum {
+        nodes.extend([
+            json!({"id":"midi","kind":"subgraph_input_midi","label":"MIDI In","parent":"root","x":0,"y":80,"channels":1,"parameters":{}}),
+            json!({"id":"fm","kind":"fm_synth","label":"Electric Piano FM","parent":"root","x":220,"y":50,"channels":2,"parameters":{"carrier_frequency":440.0,"modulator_frequency":880.0,"fm_depth":180.0,"amplitude":0.3,"release":220.0,"carrier_waveform":0.0,"modulator_waveform":0.0}}),
+            json!({"id":"verb","kind":"reverb","label":"Light Reverb","parent":"root","x":470,"y":50,"channels":2,"parameters":{"decay":0.55,"mix":0.16}}),
+            json!({"id":"out","kind":"subgraph_output_audio","label":"Stereo Out","parent":"root","x":720,"y":80,"channels":2,"parameters":{}}),
+        ]);
+        edges.extend([json!({"id":"e1","source":"midi","source_port":"out","target":"fm","target_port":"midi"}),json!({"id":"e2","source":"fm","source_port":"out","target":"verb","target_port":"in"}),json!({"id":"e3","source":"verb","source_port":"out","target":"out","target_port":"in"})]);
+    } else {
+        nodes.push(json!({"id":"midi","kind":"subgraph_input_midi","label":"MIDI In","parent":"root","x":0,"y":20,"channels":1,"parameters":{}}));
+        let names = ["Bass Drum", "Snare", "Tom 1", "Tom 2", "Hi Hat", "Cymbal"];
+        for (i, name) in names.iter().enumerate() {
+            let id = format!("voice{i}");
+            let trigger = format!("trigger{i}");
+            nodes.push(json!({"id":trigger,"kind":"subgraph_input_control","label":format!("{name} Trigger"),"parent":"root","x":0,"y":100.0+i as f64*95.0,"channels":1,"parameters":{}}));
+            nodes.push(json!({"id":id,"kind":"fm_synth","label":name,"parent":"root","x":230,"y":80.0+i as f64*95.0,"channels":2,"parameters":{"carrier_frequency":220.0*(i as f64+1.0),"modulator_frequency":440.0*(i as f64+1.0),"fm_depth":300.0,"amplitude":0.16,"release":90.0,"carrier_waveform":if i==1 {1.0} else {0.0},"modulator_waveform":1.0}}));
+            edges.push(json!({"id":format!("m{i}"),"source":"midi","source_port":"out","target":id,"target_port":"midi"}));
+            edges.push(json!({"id":format!("t{i}"),"source":trigger,"source_port":"out","target":id,"target_port":"trigger"}));
+            let pair = i / 2;
+            edges.push(json!({"id":format!("a{i}"),"source":id,"source_port":"out","target":format!("mix{pair}"),"target_port":if i % 2 == 0 { "a" } else { "b" }}));
+        }
+        for (id, a, b) in [
+            ("mix0", "voice0", "voice1"),
+            ("mix1", "voice2", "voice3"),
+            ("mix2", "voice4", "voice5"),
+            ("mix3", "mix0", "mix1"),
+            ("mix4", "mix3", "mix2"),
+        ] {
+            nodes.push(json!({"id":id,"kind":"crossfade","label":"Drum mix","parent":"root","x":400,"y":100,"channels":2,"parameters":{"mix":0.5}}));
+            if id == "mix3" || id == "mix4" {
+                edges.push(json!({"id":format!("{id}a"),"source":a,"source_port":"out","target":id,"target_port":"a"}));
+                edges.push(json!({"id":format!("{id}b"),"source":b,"source_port":"out","target":id,"target_port":"b"}));
+            }
+        }
+        edges.push(json!({"id":"mixverb","source":"mix4","source_port":"out","target":"verb","target_port":"in"}));
+        nodes.push(json!({"id":"verb","kind":"reverb","label":"Drum Room","parent":"root","x":500,"y":260,"channels":2,"parameters":{"decay":0.35,"mix":0.08}}));
+        nodes.push(json!({"id":"out","kind":"subgraph_output_audio","label":"Stereo Out","parent":"root","x":740,"y":260,"channels":2,"parameters":{}}));
+        edges.push(json!({"id":"vo","source":"verb","source_port":"out","target":"out","target_port":"in"}));
+    }
+    serde_json::from_value(json!({"nodes":nodes,"edges":edges})).ok()
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    use super::*;
+    #[test]
+    fn builtins_have_valid_graphs() {
+        for id in [BUILTIN_EPIANO, BUILTIN_DRUMS] {
+            builtin_graph(id).unwrap().validate().unwrap();
+        }
+    }
+}
+
 pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS subgraph_library(id TEXT PRIMARY KEY,owner TEXT NOT NULL REFERENCES users(id),name TEXT NOT NULL,public INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS subgraph_versions(library_id TEXT NOT NULL REFERENCES subgraph_library(id),version INTEGER NOT NULL,name TEXT NOT NULL,public INTEGER NOT NULL,body TEXT NOT NULL,created INTEGER NOT NULL,PRIMARY KEY(library_id,version));
@@ -43,9 +109,16 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>
             .unwrap()
             .push(json!({"version":version,"name":version_name,"public":published}));
     }
+    entries.insert(BUILTIN_EPIANO.into(), json!({"id":BUILTIN_EPIANO,"name":"Electric Piano","owned":false,"public":true,"owner":"pr0former","builtin":true,"versions":[{"version":1,"name":"FM electric piano","public":true}]}));
+    entries.insert(BUILTIN_DRUMS.into(), json!({"id":BUILTIN_DRUMS,"name":"FM Drum Machine","owned":false,"public":true,"owner":"pr0former","builtin":true,"versions":[{"version":1,"name":"Six-trigger FM drums","public":true}]}));
     Ok(Json(json!(entries.into_values().collect::<Vec<_>>())))
 }
 fn read_version(db: &Connection, id: &str, version: u64, u: &str) -> Api<Graph> {
+    if version == 1 {
+        if let Some(graph) = builtin_graph(id) {
+            return Ok(graph);
+        }
+    }
     let body: String = db.query_row("SELECT v.body FROM subgraph_versions v JOIN subgraph_library l ON l.id=v.library_id WHERE l.id=?1 AND v.version=?2 AND (l.owner=?3 OR v.public=1)", params![id,version,u], |r| r.get(0))
         .map_err(|_| Failure(StatusCode::NOT_FOUND,"Subgraph version is unavailable".into()))?;
     serde_json::from_str(&body).map_err(internal)

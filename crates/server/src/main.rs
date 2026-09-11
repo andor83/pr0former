@@ -26,7 +26,7 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_ha
 use axum::{
     Json, Router,
     extract::{
-        Path, State, WebSocketUpgrade,
+        Multipart, Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode, header},
@@ -35,7 +35,7 @@ use axum::{
 };
 use pr0_core::{Mode, Project, catalog, demo_project};
 use rusqlite::{Connection, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex},
@@ -127,6 +127,111 @@ fn role(app: &App, project: &str, user: &str) -> Api<String> {
             |r| r.get(0),
         )
         .map_err(|_| Failure(StatusCode::FORBIDDEN, "Project access required".into()))
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LoginTitle {
+    first: String,
+    second: String,
+}
+fn default_login_titles() -> Vec<LoginTitle> {
+    let mut titles = vec![LoginTitle {
+        first: "Insert pithy title here".into(),
+        second: "Put something funny here too".into(),
+    }];
+    titles.extend(
+        [
+            "Stop, Collaborate and Listen",
+            "F*ck it, we'll do it live!",
+            "A very musical hampster wheel",
+            "Science b!tches",
+            "ERROR....nah JK",
+            "This is AI slop",
+            "Injecting the Raccoons Now",
+            "Now with 80% more cheese",
+            "Have you considered how Carl feels?",
+            "Illegal in many states",
+            "She turned me into a newt!",
+            "Welcome back Mr. Wick",
+            "Turning the frogs gay",
+            "Your bit drift is showing",
+            "you forgot to return your Amazon purchase",
+            "Saints be praised!",
+            "TETSUOOOOOOO",
+            "It's over 9000!",
+        ]
+        .into_iter()
+        .map(|first| LoginTitle {
+            first: first.into(),
+            second: "Live Electroacoustic Performance Platform".into(),
+        }),
+    );
+    titles
+}
+async fn login_titles(State(app): State<App>) -> Api<Json<Vec<LoginTitle>>> {
+    let db = app.db.lock().unwrap();
+    let mut stmt = db
+        .prepare("SELECT first,second FROM login_titles ORDER BY rowid")
+        .map_err(internal)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(LoginTitle {
+                first: r.get(0)?,
+                second: r.get(1)?,
+            })
+        })
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    Ok(Json(if rows.is_empty() {
+        default_login_titles()
+    } else {
+        rows
+    }))
+}
+async fn save_login_titles(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(titles): Json<Vec<LoginTitle>>,
+) -> Api<Json<Vec<LoginTitle>>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    let admin: bool = app
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT is_admin FROM user_profiles WHERE user_id=?1",
+            [&u],
+            |r| r.get(0),
+        )
+        .map_err(|_| bad("Administrator required"))?;
+    if !admin || titles.len() > 100 {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "Administrator required".into(),
+        ));
+    }
+    if titles.iter().any(|t| {
+        t.first.trim().is_empty()
+            || t.first.len() > 200
+            || t.second.trim().is_empty()
+            || t.second.len() > 200
+    }) {
+        return Err(bad("Title lines must be 1–200 characters"));
+    }
+    let mut db = app.db.lock().unwrap();
+    let tx = db.transaction().map_err(internal)?;
+    tx.execute("DELETE FROM login_titles", [])
+        .map_err(internal)?;
+    for t in &titles {
+        tx.execute(
+            "INSERT INTO login_titles(first,second) VALUES(?1,?2)",
+            [&t.first, &t.second],
+        )
+        .map_err(internal)?;
+    }
+    tx.commit().map_err(internal)?;
+    Ok(Json(titles))
 }
 fn can_edit(role: &str) -> Api<()> {
     if !matches!(role, "owner" | "editor" | "conductor") {
@@ -466,6 +571,33 @@ async fn get_project(
     app.logs
         .push(&id, "info", "Project loaded; sample caches ready");
     Ok(Json(json!({"project":project,"role":r})))
+}
+async fn list_revisions(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Api<Json<Vec<revisions::RevisionEntry>>> {
+    let u = user(&app, &headers)?;
+    role(&app, &id, &u)?;
+    let current = load(&app, &id)?.revision;
+    let entries = revisions::list(&app.db.lock().unwrap(), &id, current).map_err(internal)?;
+    Ok(Json(entries))
+}
+async fn get_revision(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path((id, revision)): Path<(String, u64)>,
+) -> Api<Json<Value>> {
+    let u = user(&app, &headers)?;
+    role(&app, &id, &u)?;
+    let latest = load(&app, &id)?.revision;
+    let db = app.db.lock().unwrap();
+    let body = revisions::body(&db, &id, revision).map_err(|_| bad("Revision not found"))?;
+    let mut project: Project = serde_json::from_str(&body).map_err(internal)?;
+    project.revision = latest;
+    Ok(Json(
+        json!({"project": project, "source_revision": revision, "latest_revision": latest}),
+    ))
 }
 fn validate_live_update(previous: &Project, next: &Project) -> Result<(), String> {
     if next.mode != previous.mode {
@@ -889,6 +1021,8 @@ struct Transport {
     bpm: Option<f64>,
     #[serde(default)]
     enabled: Option<bool>,
+    #[serde(default)]
+    beat: Option<f64>,
 }
 async fn transport(
     State(app): State<App>,
@@ -959,6 +1093,13 @@ async fn transport(
             return Err(bad("Enable this project’s audio engine first"));
         }
         match c.action.as_str() {
+            "seek" => {
+                let beat = c.beat.ok_or_else(|| bad("Beat required"))?;
+                if !beat.is_finite() || beat < 0.0 {
+                    return Err(bad("Beat must be a finite non-negative number"));
+                }
+                send(&app, audio::Command::Seek(beat))?;
+            }
             "play" | "pause" | "stop" => send(
                 &app,
                 audio::Command::Transport {
@@ -1099,10 +1240,290 @@ async fn members(
 ) -> Api<Json<Value>> {
     let u = user(&app, &headers)?;
     role(&app, &id, &u)?;
+    let project = load(&app, &id)?;
     let db = app.db.lock().unwrap();
-    let mut s=db.prepare("SELECT u.id,u.username,m.role FROM members m JOIN users u ON u.id=m.user_id WHERE m.project_id=?1").map_err(internal)?;
-    let rows=s.query_map([id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"username":r.get::<_,String>(1)?,"role":r.get::<_,String>(2)?}))).map_err(internal)?.collect::<Result<Vec<_>,_>>().map_err(internal)?;
+    let mut s=db.prepare("SELECT u.id,u.username,m.role,p.body,COALESCE(a.revision,0) FROM members m JOIN users u ON u.id=m.user_id JOIN user_profiles p ON p.user_id=u.id LEFT JOIN user_avatars a ON a.user_id=u.id WHERE m.project_id=?1 ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'conductor' THEN 1 WHEN 'editor' THEN 2 ELSE 3 END,u.username").map_err(internal)?;
+    let rows=s.query_map([id],|r|{let user_id:String=r.get(0)?;let body:String=r.get(3)?;let fields:Value=serde_json::from_str(&body).unwrap_or(json!({}));Ok(json!({"id":user_id,"username":r.get::<_,String>(1)?,"role":r.get::<_,String>(2)?,"first_name":fields["first_name"],"last_name":fields["last_name"],"organization":fields["organization"],"avatar_revision":r.get::<_,u64>(4)?,"assigned_parts":project.parts.iter().filter(|part|part.performer.as_deref()==Some(&user_id)).count()}))}).map_err(internal)?.collect::<Result<Vec<_>,_>>().map_err(internal)?;
     Ok(Json(json!(rows)))
+}
+#[derive(Deserialize)]
+struct MemberEdit {
+    user_id: String,
+    role: String,
+}
+async fn add_member(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(edit): Json<MemberEdit>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let actor = user(&app, &headers)?;
+    if role(&app, &id, &actor)? != "owner" {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "Owner access required".into(),
+        ));
+    }
+    if !matches!(edit.role.as_str(), "performer" | "editor" | "conductor") {
+        return Err(bad("Invalid member role"));
+    }
+    let db = app.db.lock().unwrap();
+    let count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM members WHERE project_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .map_err(internal)?;
+    if count >= 32 {
+        return Err(bad("This project already has 32 members"));
+    }
+    let exists: bool = db
+        .query_row(
+            "SELECT enabled AND NOT deleted FROM user_profiles WHERE user_id=?1",
+            [&edit.user_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !exists {
+        return Err(bad("User unavailable"));
+    }
+    db.execute(
+        "INSERT INTO members(project_id,user_id,role) VALUES(?1,?2,?3)",
+        params![id, edit.user_id, edit.role],
+    )
+    .map_err(|_| bad("User is already an ensemble member"))?;
+    drop(db);
+    let _ = app
+        .events
+        .send(json!({"type":"members_changed","project_id":id}));
+    Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+struct UserSearch {
+    q: Option<String>,
+}
+async fn member_candidates(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<UserSearch>,
+) -> Api<Json<Value>> {
+    let actor = user(&app, &headers)?;
+    if role(&app, &id, &actor)? != "owner" {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "Owner access required".into(),
+        ));
+    }
+    let pattern = format!("%{}%", query.q.unwrap_or_default().trim().to_lowercase());
+    let db = app.db.lock().unwrap();
+    let mut statement=db.prepare("SELECT u.id,u.username,p.body,COALESCE(a.revision,0) FROM users u JOIN user_profiles p ON p.user_id=u.id LEFT JOIN user_avatars a ON a.user_id=u.id WHERE p.enabled=1 AND p.deleted=0 AND lower(u.username) LIKE ?2 AND NOT EXISTS(SELECT 1 FROM members m WHERE m.project_id=?1 AND m.user_id=u.id) ORDER BY u.username LIMIT 50").map_err(internal)?;
+    let rows=statement.query_map(params![id,pattern],|r|{let body:String=r.get(2)?;let fields:Value=serde_json::from_str(&body).unwrap_or(json!({}));Ok(json!({"id":r.get::<_,String>(0)?,"username":r.get::<_,String>(1)?,"first_name":fields["first_name"],"last_name":fields["last_name"],"organization":fields["organization"],"avatar_revision":r.get::<_,u64>(3)?}))}).map_err(internal)?.collect::<Result<Vec<_>,_>>().map_err(internal)?;
+    Ok(Json(json!(rows)))
+}
+fn unassign_member_parts(project: &mut Project, user_id: &str) -> usize {
+    project.parts.iter_mut().fold(0, |count, part| {
+        if part.performer.as_deref() == Some(user_id) {
+            part.performer = None;
+            count + 1
+        } else {
+            count
+        }
+    })
+}
+async fn remove_member(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path((id, target)): Path<(String, String)>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let actor = user(&app, &headers)?;
+    if role(&app, &id, &actor)? != "owner" {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "Owner access required".into(),
+        ));
+    }
+    let _guard = app.setup.lock().await;
+    if app.performance.lock().unwrap().as_deref() == Some(&id) {
+        return Err(bad("Exit performance mode before changing the ensemble"));
+    }
+    let target_role = role(&app, &id, &target)?;
+    if target_role == "owner" {
+        return Err(bad("Project owners cannot be removed"));
+    }
+    let mut project = load(&app, &id)?;
+    let changed = unassign_member_parts(&mut project, &target);
+    let prepared = if changed > 0 && app.graph.lock().unwrap().as_deref() == Some(&id) {
+        let next = project.clone();
+        Some(
+            tokio::task::spawn_blocking(move || samples::prepare(&next))
+                .await
+                .map_err(internal)?
+                .map_err(bad)?,
+        )
+    } else {
+        None
+    };
+    {
+        let mut db = app.db.lock().unwrap();
+        let tx = db.transaction().map_err(internal)?;
+        if changed > 0 {
+            let previous = project.revision;
+            project.revision += 1;
+            let body = serde_json::to_string(&project).map_err(internal)?;
+            let updated = tx
+                .execute(
+                    "UPDATE projects SET body=?1,revision=?2 WHERE id=?3 AND revision=?4",
+                    params![body, project.revision, id, previous],
+                )
+                .map_err(internal)?;
+            if updated == 0 {
+                return Err(Failure(
+                    StatusCode::CONFLICT,
+                    "Project changed. Reload before removing this member.".into(),
+                ));
+            }
+            revisions::schedule(&tx, &id, now()).map_err(internal)?;
+        }
+        tx.execute(
+            "DELETE FROM members WHERE project_id=?1 AND user_id=?2",
+            params![id, target],
+        )
+        .map_err(internal)?;
+        tx.execute(
+            "DELETE FROM project_recents WHERE project_id=?1 AND user_id=?2",
+            params![id, target],
+        )
+        .map_err(internal)?;
+        tx.commit().map_err(internal)?;
+    }
+    if let Some(engine) = prepared {
+        send(
+            &app,
+            audio::Command::Replace {
+                project: project.clone(),
+                engine: Box::new(engine),
+            },
+        )?;
+    }
+    if changed > 0 {
+        publish(&app, &project);
+    }
+    app.media.close_project_user(&id, &target).await;
+    let _ = app
+        .events
+        .send(json!({"type":"members_changed","project_id":id}));
+    Ok(Json(json!({"project":project,"unassigned_parts":changed})))
+}
+async fn user_avatar(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Api<Response> {
+    user(&app, &headers)?;
+    let bytes: Vec<u8> = app
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT body FROM user_avatars WHERE user_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(|_| Failure(StatusCode::NOT_FOUND, "Avatar not found".into()))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable",
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+fn crop_avatar(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use image::GenericImageView;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| "Choose a PNG, JPEG, or WebP image".to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let source = reader
+        .decode()
+        .map_err(|_| "Choose a PNG, JPEG, or WebP image".to_string())?;
+    let (width, height) = source.dimensions();
+    if width == 0 || height == 0 || width > 8192 || height > 8192 {
+        return Err("Avatar dimensions must be between 1 and 8192 pixels".into());
+    }
+    let side = width.min(height);
+    let square = source
+        .crop_imm((width - side) / 2, (height - side) / 2, side, side)
+        .resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    square
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|_| "Could not process avatar".to_string())?;
+    Ok(cursor.into_inner())
+}
+async fn upload_user_avatar(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    mut form: Multipart,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let actor = user(&app, &headers)?;
+    if actor != id {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "You can only change your own avatar".into(),
+        ));
+    }
+    let field = form
+        .next_field()
+        .await
+        .map_err(bad)?
+        .ok_or_else(|| bad("Select an image"))?;
+    let bytes = field.bytes().await.map_err(bad)?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(bad("Avatar images must be smaller than 4 MB"));
+    }
+    let png = tokio::task::spawn_blocking(move || crop_avatar(&bytes))
+        .await
+        .map_err(internal)?
+        .map_err(bad)?;
+    let db = app.db.lock().unwrap();
+    db.execute("INSERT INTO user_avatars(user_id,body,revision) VALUES(?1,?2,1) ON CONFLICT(user_id) DO UPDATE SET body=excluded.body,revision=user_avatars.revision+1",params![id,png]).map_err(internal)?;
+    let revision: u64 = db
+        .query_row(
+            "SELECT revision FROM user_avatars WHERE user_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .map_err(internal)?;
+    let projects = db
+        .prepare("SELECT project_id FROM members WHERE user_id=?1")
+        .map_err(internal)?
+        .query_map([&id], |r| r.get::<_, String>(0))
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)?;
+    drop(db);
+    for project_id in projects {
+        let _ = app
+            .events
+            .send(json!({"type":"members_changed","project_id":project_id,"user_id":id}));
+    }
+    Ok(Json(json!({"revision":revision})))
 }
 async fn devices(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
     let u = user(&app, &headers)?;
@@ -1488,7 +1909,9 @@ async fn main() {
         CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,body TEXT NOT NULL,revision INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS members(project_id TEXT REFERENCES projects(id),user_id TEXT REFERENCES users(id),role TEXT NOT NULL,PRIMARY KEY(project_id,user_id));
         CREATE TABLE IF NOT EXISTS revisions(project_id TEXT REFERENCES projects(id),revision INTEGER,body TEXT NOT NULL,PRIMARY KEY(project_id,revision));
-        CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),role TEXT,expires INTEGER,used INTEGER);").expect("Database migration");
+        CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),role TEXT,expires INTEGER,used INTEGER);
+        CREATE TABLE IF NOT EXISTS login_titles(first TEXT NOT NULL,second TEXT NOT NULL);").expect("Database migration");
+    db.execute("UPDATE login_titles SET first='Insert pithy title here',second='Put something funny here too' WHERE first='Compose the System' OR (first='Insert pithy title here' AND second='Also something funny here')", []).expect("Login title migration");
     accounts::migrate(&db).expect("Account migration");
     sample_library::migrate(&db).expect("Sample library migration");
     subgraphs::migrate(&db).expect("Subgraph library migration");
@@ -1535,6 +1958,10 @@ async fn main() {
     let desktop_app = app.clone();
     let assets = std::env::var("PR0_WEB_ROOT").unwrap_or("web/dist".into());
     let router = Router::new()
+        .route(
+            "/api/login-titles",
+            get(login_titles).put(save_login_titles),
+        )
         .route("/api/system/osc", get(osc::get))
         .route("/api/projects/{id}/system/osc", put(osc::put))
         .route("/api/status", get(status))
@@ -1599,6 +2026,8 @@ async fn main() {
         .route("/api/join", post(join))
         .route("/api/devices", get(devices))
         .route("/api/projects/{id}", get(get_project).put(update_project))
+        .route("/api/projects/{id}/revisions", get(list_revisions))
+        .route("/api/projects/{id}/revisions/{revision}", get(get_revision))
         .route(
             "/api/projects/{id}/save",
             get(save_status).post(save_project),
@@ -1606,7 +2035,21 @@ async fn main() {
         .route("/api/projects/{id}/parameter", put(parameter))
         .route("/api/projects/{id}/transport", post(transport))
         .route("/api/projects/{id}/invite", post(invite))
-        .route("/api/projects/{id}/members", get(members))
+        .route("/api/projects/{id}/members", get(members).post(add_member))
+        .route(
+            "/api/projects/{id}/members/candidates",
+            get(member_candidates),
+        )
+        .route(
+            "/api/projects/{id}/members/{user}",
+            axum::routing::delete(remove_member),
+        )
+        .route(
+            "/api/users/{id}/avatar",
+            get(user_avatar)
+                .put(upload_user_avatar)
+                .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
         .route("/api/projects/{id}/audio", post(audio_enable))
         .route("/api/projects/{id}/events", get(websocket))
         .route(
@@ -1698,6 +2141,29 @@ async fn main() {
 #[cfg(test)]
 mod live_edit_tests {
     use super::*;
+    #[test]
+    fn member_removal_unassigns_only_that_members_parts() {
+        let mut project = demo_project("x".into(), "x".into(), Mode::Freeform);
+        project.parts[0].performer = Some("removed".into());
+        let mut other = project.parts[0].clone();
+        other.id = "other".into();
+        other.performer = Some("kept".into());
+        project.parts.push(other);
+        assert_eq!(unassign_member_parts(&mut project, "removed"), 1);
+        assert_eq!(project.parts[0].performer, None);
+        assert_eq!(project.parts[1].performer.as_deref(), Some("kept"));
+    }
+    #[test]
+    fn avatars_are_center_cropped_to_a_small_png() {
+        let source = image::DynamicImage::new_rgb8(400, 200);
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let cropped = crop_avatar(&encoded.into_inner()).unwrap();
+        let image = image::load_from_memory(&cropped).unwrap();
+        assert_eq!((image.width(), image.height()), (256, 256));
+    }
     #[test]
     fn existing_missing_instrument_does_not_block_unrelated_live_graph_edits() {
         let mut previous = pr0_core::demo_project("x".into(), "x".into(), Mode::Structured);

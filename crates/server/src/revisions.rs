@@ -12,6 +12,33 @@ pub struct SaveStatus {
     pub dirty: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RevisionEntry {
+    pub revision: u64,
+    pub current: bool,
+}
+
+pub fn list(db: &Connection, id: &str, current: u64) -> rusqlite::Result<Vec<RevisionEntry>> {
+    let mut stmt =
+        db.prepare("SELECT revision FROM revisions WHERE project_id=?1 ORDER BY revision DESC")?;
+    stmt.query_map([id], |r| {
+        let revision: u64 = r.get(0)?;
+        Ok(RevisionEntry {
+            revision,
+            current: revision == current,
+        })
+    })?
+    .collect()
+}
+
+pub fn body(db: &Connection, id: &str, revision: u64) -> rusqlite::Result<String> {
+    db.query_row(
+        "SELECT body FROM revisions WHERE project_id=?1 AND revision=?2",
+        params![id, revision],
+        |r| r.get(0),
+    )
+}
+
 pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS pending_saves(

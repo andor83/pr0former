@@ -134,7 +134,7 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
     for node in &project.graph.nodes {
         if !matches!(
             node.kind.as_str(),
-            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth"
+            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "convolution_reverb"
         ) {
             continue;
         }
@@ -145,7 +145,14 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
         let mut reader = hound::WavReader::open(cache_path(&project.id, asset, rate))
             .map_err(|e| format!("Sample {asset}: {e}"))?;
         let spec = reader.spec();
-        if spec.channels as usize != node.channels {
+        if node.kind == "convolution_reverb" {
+            if !matches!(spec.channels, 1 | 2) {
+                return Err(format!(
+                    "Convolution response must be mono or stereo; sample has {} channels",
+                    spec.channels
+                ));
+            }
+        } else if spec.channels as usize != node.channels {
             return Err(format!(
                 "Sample has {} channels; node {} has {}",
                 spec.channels, node.label, node.channels
@@ -177,6 +184,9 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
                 let a = raw.get(index * channels + ch).copied().unwrap_or(0.);
                 let b = raw.get((index + 1) * channels + ch).copied().unwrap_or(a);
                 frame[ch] = a + (b - a) * fraction;
+            }
+            if node.kind == "convolution_reverb" && channels == 1 {
+                frame[1] = frame[0];
             }
             frames.push(frame);
         }
@@ -219,7 +229,7 @@ pub fn cache_project(project: &pr0_core::Project, rate: u32) -> Result<(), Strin
     for node in &project.graph.nodes {
         if matches!(
             node.kind.as_str(),
-            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth"
+            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "convolution_reverb"
         ) {
             let asset = node.parameters.get("asset").copied().unwrap_or(0.) as u32;
             if asset != 0 {

@@ -72,6 +72,7 @@ pub enum Command {
         action: String,
         count_in_beats: u8,
     },
+    Seek(f64),
     Tempo(f64),
     Control {
         node: String,
@@ -656,6 +657,16 @@ fn run(
                             &mut next_tempo,
                             &io,
                         );
+                    }
+                }
+                Command::Seek(beat) => {
+                    if let Some(e) = engine.as_mut() {
+                        let beat = beat.max(0.0);
+                        e.clock.beat = beat;
+                        e.graph_clock.beat = beat;
+                        e.clock.reset_generation = e.clock.reset_generation.wrapping_add(1);
+                        e.graph_clock.reset_generation =
+                            e.graph_clock.reset_generation.wrapping_add(1);
                     }
                 }
                 Command::Metronome(value) => metronome = value,
