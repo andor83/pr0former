@@ -85,3 +85,59 @@ fn typed_midi_dispatch_and_render_do_not_allocate_or_free() {
     CHECK.set(false);
     assert_eq!(CALLS.get(), 0);
 }
+
+#[test]
+fn fan_in_reset_and_decoding_do_not_allocate_or_free() {
+    let mut keys = node("keys", "midi_input");
+    keys.channels = 1;
+    let mut piano = node("piano", "piano");
+    piano.channels = 1;
+    let mut tone = node("tone", "synth");
+    tone.channels = 1;
+    let cable = |source: &str, target: &str| Edge {
+        id: format!("{source}-{target}"),
+        source: source.into(),
+        source_port: "midi".into(),
+        target: target.into(),
+        target_port: "midi".into(),
+    };
+    let graph = Graph {
+        nodes: vec![keys, piano, tone, node("out", "midi_output")],
+        edges: vec![
+            cable("keys", "tone"),
+            cable("piano", "tone"),
+            cable("keys", "out"),
+            cable("piano", "out"),
+        ],
+    };
+    let mut engine = pr0_dsp::Engine::prepare(graph, 48000.).unwrap();
+    let mut output = [[0.; 8]];
+    CALLS.set(0);
+    CHECK.set(true);
+    for value in 0..1024_u32 {
+        let pitch = (value % 128) as u8;
+        engine.node_midi_message(
+            "keys",
+            pr0_core::midi::Message {
+                status: 0x90 | (value % 16) as u8,
+                data1: pitch,
+                data2: 100,
+            },
+        );
+        engine.node_midi_message(
+            "piano",
+            pr0_core::midi::Message {
+                status: 0x80,
+                data1: pitch,
+                data2: 0,
+            },
+        );
+        if value % 64 == 63 {
+            engine.node_midi_reset("keys");
+        }
+        engine.render(&[], &mut output);
+        while engine.take_midi_message("out").is_some() {}
+    }
+    CHECK.set(false);
+    assert_eq!(CALLS.get(), 0);
+}

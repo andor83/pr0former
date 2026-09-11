@@ -9,12 +9,19 @@ pub struct Text {
     len: usize,
 }
 impl Text {
+    /// Callers validate length upstream; anything longer is truncated at a
+    /// character boundary rather than panicking on the audio worker.
     pub(crate) fn new(text: &str) -> Self {
+        debug_assert!(text.len() <= MAX_CONTROL_TEXT_BYTES);
+        let mut len = text.len().min(MAX_CONTROL_TEXT_BYTES);
+        while !text.is_char_boundary(len) {
+            len -= 1;
+        }
         let mut value = Self {
             bytes: [0; MAX_CONTROL_TEXT_BYTES],
-            len: text.len(),
+            len,
         };
-        value.bytes[..text.len()].copy_from_slice(text.as_bytes());
+        value.bytes[..len].copy_from_slice(&text.as_bytes()[..len]);
         value
     }
     pub fn as_str(&self) -> &str {

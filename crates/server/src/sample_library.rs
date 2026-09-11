@@ -272,7 +272,7 @@ pub async fn edit(
     }
     let _ = app
         .events
-        .send(json!({"type":"samples","project_id":project}));
+        .send(json!({"type":"samples","project_id":project}).into());
     entry(&db, &id, &project, &u).map(Json)
 }
 pub async fn add(
@@ -311,7 +311,7 @@ pub async fn add(
     .map_err(internal)?;
     let _ = app
         .events
-        .send(json!({"type":"samples","project_id":project}));
+        .send(json!({"type":"samples","project_id":project}).into());
     entry(&db, &id, &project, &u).map(Json)
 }
 pub async fn audio(
@@ -600,7 +600,7 @@ pub async fn delete(
     for (project, _) in links {
         let _ = app
             .events
-            .send(json!({"type":"samples","project_id":project}));
+            .send(json!({"type":"samples","project_id":project}).into());
     }
     Ok(Json(json!({"ok":true,"cleanup_errors":cleanup_errors})))
 }

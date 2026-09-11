@@ -488,7 +488,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "Global clock",
         "◷",
         "Timing",
-        "Authoritative project clock. Connect tempo to control project BPM (1–400), preserving beat phase. Disconnect to retain the last tempo.",
+        "Authoritative project clock. Connect tempo to control project BPM (1–400), preserving beat phase. Disconnect to retain the last tempo. Runs freely while the graph is loaded; show Play snaps it to the show beat and Stop rewinds it to zero.",
         vec![port("tempo", Control)],
         vec![
             port("tick", Control),
@@ -503,7 +503,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "Clock ratio",
         "×/÷",
         "Timing",
-        "Multiply/divide the project quarter-note pulse. Preserves phase through tempo and ratio edits; pauses with transport. Stop/rewind resets phase. Outputs pulse, fractional phase, and completed cycle count.",
+        "Multiply/divide the project quarter-note pulse. Preserves phase through tempo and ratio edits. Runs while the graph is loaded; show Play realigns it to the show beat and Stop/rewind resets phase. Outputs pulse, fractional phase, and completed cycle count.",
         vec![],
         vec![
             port("tick", Control),
@@ -1378,7 +1378,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "Stereo pan",
         "↔",
         "Audio",
-        "Constant-power stereo placement; first two channels are panned, other channels pass through.",
+        "Constant-power stereo balance: centre is unity, each extreme silences the opposite channel and the stereo image is kept. Mono and channels above two pass through.",
         vec![port("in", Audio)],
         vec![port("out", Audio)],
         vec![param("pan", "Pan", "", -1., 1., 0.)],
@@ -1636,7 +1636,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "Looper",
         "↻",
         "Audio",
-        "Eight independent audio loop tracks. Send track numbers 1–8 to Start loop (record), Stop loop record, Start playback or Stop playback; 0 is idle. Return to 0 before repeating the same command. Loop mode 0 records until stopped and starts immediately; a positive beat count queues record/play for the next project bar and ends recording after that many meter beats. Stops are immediate. Playback repeats the recorded audio without tempo stretching. Starting recording replaces that track. Playback can finish an in-progress recording. Loops are saved per project and node on disk. Clear removes the selected track immediately. Capacity limits recording duration.",
+        "Eight independent audio loop tracks. Send track numbers 1–8 to Start loop (record), Stop loop record, Start playback or Stop playback; 0 is idle. Return to 0 before repeating the same command. Loop mode 0 records until stopped and starts immediately; a positive beat count queues record/play for the next bar of the graph clock (aligned to the show while it plays) and ends recording after that many meter beats. Stops are immediate. Playback repeats the recorded audio without tempo stretching. Starting recording replaces that track. Playback can finish an in-progress recording. Loops are saved per project and node on disk. Clear removes the selected track immediately. Capacity limits recording duration.",
         vec![
             port("in", Audio),
             port("start_loop", Control),
@@ -2201,7 +2201,11 @@ impl Graph {
             {
                 return Err("Audio channel widths do not match".into());
             }
-            if !occupied.insert((t, edge.target_port.clone())) && signal != Signal::Control {
+            // Control inputs arbitrate multiple sources; MIDI inputs concatenate
+            // every source's messages in connection order within each sample.
+            if !occupied.insert((t, edge.target_port.clone()))
+                && !matches!(signal, Signal::Control | Signal::Midi)
+            {
                 return Err("Input already has a driver; use a mixer or math node".into());
             }
             outgoing[s].push(t);
@@ -2833,6 +2837,47 @@ mod tests {
         demo_project("x".into(), "Demo".into(), Mode::Conducted)
             .validate()
             .unwrap();
+    }
+    #[test]
+    fn midi_inputs_accept_multiple_sources_audio_inputs_do_not() {
+        let p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        let make = |id: &str, kind: &str| {
+            let mut n = p.graph.nodes[0].clone();
+            n.id = id.into();
+            n.kind = kind.into();
+            n.channels = 2;
+            n.parameters.clear();
+            n
+        };
+        let edge = |source: &str, sp: &str, target: &str, tp: &str| Edge {
+            id: format!("{source}-{target}-{tp}"),
+            source: source.into(),
+            source_port: sp.into(),
+            target: target.into(),
+            target_port: tp.into(),
+        };
+        let midi = Graph {
+            nodes: vec![make("a", "piano"), make("b", "piano"), make("s", "synth")],
+            edges: vec![
+                edge("a", "midi", "s", "midi"),
+                edge("b", "midi", "s", "midi"),
+            ],
+        };
+        assert!(midi.validate().is_ok());
+        let audio = Graph {
+            nodes: vec![
+                make("x", "oscillator"),
+                make("y", "oscillator"),
+                make("g", "gain"),
+            ],
+            edges: vec![edge("x", "out", "g", "in"), edge("y", "out", "g", "in")],
+        };
+        assert!(
+            audio
+                .validate()
+                .unwrap_err()
+                .contains("already has a driver")
+        );
     }
     #[test]
     fn graph_rejects_cycle_and_duplicate_driver() {

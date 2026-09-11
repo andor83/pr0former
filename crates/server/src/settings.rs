@@ -305,7 +305,9 @@ async fn apply(
         "info",
         &format!("DSP block size set to {} frames", s.block_size),
     );
-    let _ = app.events.send(json!({"type":"system_audio","settings":s}));
+    let _ = app
+        .events
+        .send(json!({"type":"system_audio","settings":s}).into());
     Ok(Json(s))
 }
 pub async fn logs(

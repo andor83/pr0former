@@ -173,9 +173,13 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
         for c in &s.curves {
             if let Some(mark) = &c.start_dynamic {
                 if !["crescendo", "decrescendo"].contains(&c.kind.as_str())
-                    || mark.id.is_empty() || mark.id.len() > 120
-                    || !mark.start.is_finite() || !(0. ..=127.).contains(&mark.start)
-                    || !mark.end.is_finite() || !(0. ..=127.).contains(&mark.end) {
+                    || mark.id.is_empty()
+                    || mark.id.len() > 120
+                    || !mark.start.is_finite()
+                    || !(0. ..=127.).contains(&mark.start)
+                    || !mark.end.is_finite()
+                    || !(0. ..=127.).contains(&mark.end)
+                {
                     return Err("Invalid retained hairpin dynamic".into());
                 }
             }
@@ -373,12 +377,26 @@ mod tests {
         assert_eq!(empty.tempo_at(3.), None);
         p.score = Some(timeline);
         assert!(p.validate().is_ok());
-        for (beat, bpm) in [(-1., 100.), (17., 100.), (2., 0.5), (2., 401.), (2., f64::NAN)] {
+        for (beat, bpm) in [
+            (-1., 100.),
+            (17., 100.),
+            (2., 0.5),
+            (2., 401.),
+            (2., f64::NAN),
+        ] {
             p.score.as_mut().unwrap().tempos = vec![TempoChange { beat, bpm }];
             assert!(p.validate().is_err(), "tempo {beat} {bpm}");
         }
-        p.score.as_mut().unwrap().tempos =
-            vec![TempoChange { beat: 4., bpm: 100. }, TempoChange { beat: 4., bpm: 120. }];
+        p.score.as_mut().unwrap().tempos = vec![
+            TempoChange {
+                beat: 4.,
+                bpm: 100.,
+            },
+            TempoChange {
+                beat: 4.,
+                bpm: 120.,
+            },
+        ];
         assert!(p.validate().is_err());
         p.score.as_mut().unwrap().tempos.clear();
         for (kind, text, beat) in [("nonsense", "x", 0.), ("cue", "   ", 0.), ("cue", "x", -1.)] {
@@ -391,8 +409,18 @@ mod tests {
             assert!(p.validate().is_err(), "mark {kind} {text} {beat}");
         }
         p.parts[0].staves[0].marks = vec![
-            StaffMark { id: "a".into(), beat: 0., kind: "text".into(), text: "x".into() },
-            StaffMark { id: "a".into(), beat: 1., kind: "text".into(), text: "y".into() },
+            StaffMark {
+                id: "a".into(),
+                beat: 0.,
+                kind: "text".into(),
+                text: "x".into(),
+            },
+            StaffMark {
+                id: "a".into(),
+                beat: 1.,
+                kind: "text".into(),
+                text: "y".into(),
+            },
         ];
         assert!(p.validate().is_err());
         p.parts[0].staves[0].marks.clear();
@@ -422,7 +450,12 @@ mod tests {
             assert!(p.validate().is_err());
         }
         let mut hairpin = curve(None, 4., "crescendo");
-        hairpin.start_dynamic = Some(DynamicMark { id: "p".into(), start: 48., end: 48., curve: Curve::Step });
+        hairpin.start_dynamic = Some(DynamicMark {
+            id: "p".into(),
+            start: 48.,
+            end: 48.,
+            curve: Curve::Step,
+        });
         p.parts[0].staves[0].curves = vec![hairpin.clone()];
         assert!(p.validate().is_ok());
         hairpin.start_dynamic.as_mut().unwrap().start = f64::NAN;
@@ -595,7 +628,10 @@ impl Timeline {
         }
         let mut last = -1.;
         for t in &self.tempos {
-            if !valid(t.beat) || t.beat <= last || !t.bpm.is_finite() || !(1.0..=400.).contains(&t.bpm)
+            if !valid(t.beat)
+                || t.beat <= last
+                || !t.bpm.is_finite()
+                || !(1.0..=400.).contains(&t.bpm)
             {
                 return Err("Invalid or unordered tempo change".into());
             }

@@ -188,6 +188,8 @@ struct RuntimeNode {
     note_inputs: note_inputs::NoteInputs,
     midi_lanes: Vec<MidiLane>,
     outgoing_notes: [Option<note_inputs::NoteEvent>; 2],
+    outgoing_control: Option<visualizer::Datum>,
+    last_control: Option<visualizer::Datum>,
     sampler: Option<Box<sampler::Sampler>>,
     granular: Option<Box<granular::Granular>>,
     pitch_shift: Option<Box<granular::PitchShift>>,
@@ -316,16 +318,14 @@ impl RuntimeNode {
         }
     }
     /// Decode a direct MIDI cable into the same five note controls used by
-    /// the explicit pitch/velocity/gate/trigger/note_off connections.
+    /// the explicit pitch/velocity/gate/trigger/note_off connections. A port
+    /// that also has its own scalar connection keeps that scalar value.
+    /// `midi_output` is excluded: its typed input is forwarded raw by the
+    /// orchestration worker, so decoding it here would send every note twice.
     fn direct_midi_controls(&mut self) {
         if !matches!(
             self.kind.as_str(),
-            "synth"
-                | "fm_synth"
-                | "poly_sampler"
-                | "granular_synth"
-                | "midi_output"
-                | "midi_to_osc"
+            "synth" | "fm_synth" | "poly_sampler" | "granular_synth" | "midi_to_osc"
         ) {
             return;
         }
@@ -336,19 +336,20 @@ impl RuntimeNode {
         {
             return;
         }
+        let scalar: [bool; 5] = std::array::from_fn(|i| {
+            self.bindings
+                .iter()
+                .any(|b| !b.parameter && b.destination == i && b.signal != pr0_core::Signal::Midi)
+        });
         let Some(midi) = self.midi_controls.as_mut() else {
             return;
         };
-        for index in 0..self.midi_frame.len {
-            let event = self.midi_frame.events[index];
-            let status = event.status >> 4;
-            if matches!(status, 8 | 9) {
-                midi.note(event.data1, if status == 8 { 0 } else { event.data2 });
-            }
-        }
+        midi.feed(&self.midi_frame.events[..self.midi_frame.len], false);
         let values = midi.tick();
         for (index, value) in values.into_iter().enumerate() {
-            self.input[index][0] = value;
+            if !scalar[index] {
+                self.input[index][0] = value;
+            }
         }
     }
     fn device_frame(&self) -> [f32; MAX_DEVICE_CHANNELS] {
@@ -440,14 +441,23 @@ impl RuntimeNode {
             "piano" => {
                 let values = std::array::from_fn(|i| self.input[i][0]);
                 let connected = std::array::from_fn(|i| {
-                    self.bindings
-                        .iter()
-                        .any(|b| !b.parameter && b.destination == i)
+                    self.bindings.iter().any(|b| {
+                        !b.parameter && b.destination == i && b.signal != pr0_core::Signal::Midi
+                    })
                 });
                 let notes = self.note_inputs.tick(values, connected);
                 let midi = self.midi_controls.as_mut().unwrap();
+                // Own key clicks and typed cables arrive as raw messages; scalar
+                // cables are decoded and republished so the typed output is a
+                // complete channel-one mirror of everything the piano shows.
+                midi.feed(&self.midi_frame.events[..self.midi_frame.len], false);
                 for note in notes.into_iter().flatten() {
                     midi.note(note.pitch, note.velocity);
+                    self.midi_frame.push(pr0_core::midi::Message {
+                        status: if note.velocity == 0 { 0x80 } else { 0x90 },
+                        data1: note.pitch,
+                        data2: note.velocity,
+                    });
                 }
                 self.control[..5].copy_from_slice(&midi.tick());
                 scalar = self.control[0];
@@ -478,38 +488,28 @@ impl RuntimeNode {
                 }
             }
             "part_midi" | "midi_input" | "osc_to_midi" => {
-                let values = self.midi_controls.as_mut().unwrap().tick();
+                // Every producer receives raw channel messages; the scalar
+                // outlets are a decoding of the same frame that the typed
+                // output forwards, so the two can never disagree.
+                let cc_controls = self.kind == "midi_input" && self.p("mode") == 1.;
+                let midi = self.midi_controls.as_mut().unwrap();
+                midi.feed(&self.midi_frame.events[..self.midi_frame.len], cc_controls);
+                let values = midi.tick();
                 self.control[..5].copy_from_slice(&values);
                 self.control[5] = self.control[0];
                 self.control[6] = self.control[1];
-                // Score driven Part MIDI also publishes its decoded note as a
-                // raw channel message so a direct MIDI cable remains lossless
-                // for downstream note-oriented nodes.
-                if self.kind == "part_midi"
-                    && self
-                        .bindings
-                        .iter()
-                        .any(|b| !b.parameter && b.signal == pr0_core::Signal::Midi)
-                    && (values[3] != 0. || values[4] != 0.)
-                {
-                    self.midi_frame.push(pr0_core::midi::Message {
-                        status: if values[4] != 0. { 0x80 } else { 0x90 },
-                        data1: values[0] as u8,
-                        data2: values[1] as u8,
-                    });
-                }
                 scalar = self.control[0];
             }
             "midi_output" | "midi_to_osc" | "poly_sampler" | "granular_synth" => {
                 let mut values = std::array::from_fn(|i| self.input[i][0]);
                 let mut connected = std::array::from_fn(|i| {
-                    self.bindings
-                        .iter()
-                        .any(|b| !b.parameter && b.destination == i)
-                        || self
+                    self.bindings.iter().any(|b| {
+                        !b.parameter && b.destination == i && b.signal != pr0_core::Signal::Midi
+                    }) || (self.kind != "midi_output"
+                        && self
                             .bindings
                             .iter()
-                            .any(|b| !b.parameter && b.signal == pr0_core::Signal::Midi)
+                            .any(|b| !b.parameter && b.signal == pr0_core::Signal::Midi))
                 });
                 // Keep older MIDI number/value connections valid as aliases.
                 if self.kind == "midi_output" {
@@ -643,6 +643,36 @@ impl RuntimeNode {
                     .tick(self.p("gate") > 0., input[0] > 0., settings, sr);
             }
             "gate" => scalar = if self.p("open") > 0. { input[0] } else { 0. },
+            "osc_input" => match self.fallback {
+                visualizer::Datum::Number(value) => scalar = value,
+                visualizer::Datum::Text(value) => self.control_text = Some(value),
+            },
+            "osc_output" => {
+                // With a trigger connected, publish on its rising edge; otherwise
+                // publish changed values. The orchestration worker bounds the rate.
+                let datum = self
+                    .input_text
+                    .map(visualizer::Datum::Text)
+                    .unwrap_or(visualizer::Datum::Number(input[0]));
+                let triggered = self
+                    .bindings
+                    .iter()
+                    .any(|b| !b.parameter && b.destination == 1);
+                let publish = if triggered {
+                    let trigger = self.input[1][0];
+                    let edge = trigger > 0. && self.previous <= 0.;
+                    self.previous = trigger;
+                    edge
+                } else {
+                    self.last_control != Some(datum)
+                };
+                if publish {
+                    self.outgoing_control = Some(datum);
+                    self.last_control = Some(datum);
+                }
+                scalar = input[0];
+                self.control_text = self.input_text;
+            }
             "send_control" => {
                 scalar = input[0];
                 self.control_text = self.input_text;
@@ -666,11 +696,11 @@ impl RuntimeNode {
                 } else {
                     self.input[1]
                 };
-                self.output =
-                    self.convolution
-                        .as_mut()
-                        .unwrap()
-                        .tick(input, response, mix, normalize);
+                self.output = self
+                    .convolution
+                    .as_mut()
+                    .unwrap()
+                    .tick(input, response, mix, normalize);
             }
             "granular_pitch_shift" => {
                 let shift = self.p("semitones");
@@ -1036,12 +1066,13 @@ impl RuntimeNode {
                 scalar = self.smooth;
             }
             "pan" => {
+                // Balance law: the centre is unity on both sides and each
+                // extreme silences the opposite channel; the image is kept.
                 self.output = input;
-                let angle = (self.p("pan") + 1.) * PI / 4.;
                 if self.channels >= 2 {
-                    let mono = (input[0] + input[1]) * 0.5;
-                    self.output[0] = mono * angle.cos();
-                    self.output[1] = mono * angle.sin();
+                    let angle = (self.p("pan") + 1.) * PI / 4.;
+                    self.output[0] = input[0] * (angle.cos() * std::f64::consts::SQRT_2).min(1.);
+                    self.output[1] = input[1] * (angle.sin() * std::f64::consts::SQRT_2).min(1.);
                 }
             }
             "crossfade" => {
@@ -1162,6 +1193,8 @@ pub struct Engine {
     pub graph_clock: Clock,
     pub graph: Graph,
     priority: Vec<usize>,
+    /// Indices of named send nodes; receives scan only these each sample.
+    senders: Vec<usize>,
 }
 impl Engine {
     pub fn prepare(graph: Graph, sample_rate: f64) -> Result<Self, String> {
@@ -1271,6 +1304,8 @@ impl Engine {
                 midi_pending: Box::new(midi_events::Buffer::new()),
                 midi_frame: Box::new(midi_events::Buffer::new()),
                 outgoing_notes: [None; 2],
+                outgoing_control: None,
+                last_control: None,
                 recorder: if n.kind == "record" {
                     let width = graph
                         .edges
@@ -1316,12 +1351,14 @@ impl Engine {
                         n.parameters.get("grain_ms").copied().unwrap_or(20.),
                     ))
                 }),
-                convolution: matches!(n.kind.as_str(), "convolution" | "convolution_reverb").then(|| {
-                    Box::new(convolution::Convolution::new(
-                        n.parameters.get("window").copied().unwrap_or(256.) as usize,
-                        n.channels,
-                    ))
-                }),
+                convolution: matches!(n.kind.as_str(), "convolution" | "convolution_reverb").then(
+                    || {
+                        Box::new(convolution::Convolution::new(
+                            n.parameters.get("window").copied().unwrap_or(256.) as usize,
+                            n.channels,
+                        ))
+                    },
+                ),
                 sampler: (n.kind == "poly_sampler").then(|| Box::new(sampler::Sampler::default())),
                 midi_controls: (matches!(
                     n.kind.as_str(),
@@ -1583,7 +1620,10 @@ impl Engine {
                     && nodes[idx].kind.starts_with("receive_")
                 {
                     1
-                } else if matches!(nodes[idx].kind.as_str(), "convolution" | "convolution_reverb") {
+                } else if matches!(
+                    nodes[idx].kind.as_str(),
+                    "convolution" | "convolution_reverb"
+                ) {
                     nodes[idx].p("window") as usize
                 } else if let Some(shifter) = &nodes[idx].pitch_shift {
                     shifter.latency()
@@ -1593,10 +1633,17 @@ impl Engine {
                     0
                 };
         }
+        let senders = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.route.as_ref().is_some_and(|r| r.send))
+            .map(|(i, _)| i)
+            .collect();
         Ok(Self {
             nodes,
             priority,
             order,
+            senders,
             clock: Clock::new(sample_rate),
             graph_clock: Clock {
                 running: true,
@@ -1865,15 +1912,17 @@ impl Engine {
     pub fn part_note(&mut self, part: &str, pitch: u8, velocity: u8) {
         self.part_staff_note(part, 1, pitch, velocity)
     }
+    /// Channel-one convenience over `part_staff_message`.
     pub fn part_staff_note(&mut self, part: &str, staff: u8, pitch: u8, velocity: u8) {
-        for node in &mut self.nodes {
-            if node.kind == "part_midi"
-                && node.part_id.as_deref() == Some(part)
-                && (node.p("staff") == 0. || node.p("staff") == f64::from(staff))
-            {
-                node.midi_controls.as_mut().unwrap().note(pitch, velocity);
-            }
-        }
+        self.part_staff_message(
+            part,
+            staff,
+            pr0_core::midi::Message {
+                status: if velocity == 0 { 0x80 } else { 0x90 },
+                data1: pitch,
+                data2: velocity,
+            },
+        );
     }
     pub fn part_notes_off(&mut self, part: &str) {
         for node in &mut self.nodes {
@@ -1909,38 +1958,27 @@ impl Engine {
             .filter_map(|n| n.part_id.as_ref().map(|p| (n.id.clone(), p.clone())))
             .collect()
     }
+    /// UI piano gestures enter the piano node as raw channel-one messages; the
+    /// node decodes them for its keys and scalar outlets and forwards them on
+    /// its typed output at the next render boundary.
     pub fn piano_note(&mut self, id: &str, pitch: u8, velocity: u8) {
         if (self.graph_clock.running || velocity == 0)
             && self.nodes.iter().any(|n| n.id == id && n.kind == "piano")
         {
             self.node_midi_note(id, pitch, velocity);
-            // UI piano gestures must feed both the legacy decoded control
-            // outputs and the typed MIDI output. Queue the channel message so
-            // it enters midi_frame at the next render boundary and can fan out
-            // to every connected MIDI destination.
-            self.node_midi_message(
-                id,
-                pr0_core::midi::Message {
-                    status: if velocity == 0 { 0x80 } else { 0x90 },
-                    data1: pitch,
-                    data2: velocity,
-                },
-            );
         }
     }
+    /// Channel-one convenience over `node_midi_message`; use the message form
+    /// when the channel matters.
     pub fn node_midi_note(&mut self, id: &str, pitch: u8, velocity: u8) {
-        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
-            if let Some(midi) = &mut node.midi_controls {
-                midi.note(pitch, velocity);
-            }
-        }
-    }
-    pub fn node_midi_cc(&mut self, id: &str, controller: u8, value: u8) {
-        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
-            if let Some(midi) = &mut node.midi_controls {
-                midi.cc(controller, value);
-            }
-        }
+        self.node_midi_message(
+            id,
+            pr0_core::midi::Message {
+                status: if velocity == 0 { 0x80 } else { 0x90 },
+                data1: pitch,
+                data2: velocity,
+            },
+        );
     }
     pub fn reset_midi_sources(&mut self) {
         for node in &mut self.nodes {
@@ -1949,11 +1987,18 @@ impl Engine {
             }
         }
     }
+    /// Release the node's decoded notes now and tell typed consumers to do the
+    /// same after anything already queued ahead of the reset.
     pub fn node_midi_reset(&mut self, id: &str) {
         if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
             if let Some(midi) = &mut node.midi_controls {
                 midi.release();
             }
+            node.midi_pending.push(pr0_core::midi::Message {
+                status: 0xb0,
+                data1: 123,
+                data2: 0,
+            });
         }
     }
     pub fn part_message(&mut self, part: &str, message: pr0_core::midi::Message) {
@@ -1972,17 +2017,31 @@ impl Engine {
             }
         }
     }
+    /// Stable node index for the lifetime of this prepared engine. The
+    /// orchestration worker resolves ids once per block and uses the `_at`
+    /// accessors per sample so no string comparisons run at audio rate.
+    pub fn node_index(&self, id: &str) -> Option<usize> {
+        self.nodes.iter().position(|n| n.id == id)
+    }
     pub fn take_midi_message(&mut self, id: &str) -> Option<pr0_core::midi::Message> {
+        self.node_index(id)
+            .and_then(|index| self.take_midi_message_at(index))
+    }
+    pub fn take_midi_message_at(&mut self, index: usize) -> Option<pr0_core::midi::Message> {
         self.nodes
-            .iter_mut()
-            .find(|n| n.id == id && n.kind == "midi_output")
+            .get_mut(index)
+            .filter(|n| n.kind == "midi_output")
             .and_then(|n| n.midi_frame.pop())
     }
     pub fn take_midi_output(&mut self, id: &str) -> [Option<note_inputs::NoteEvent>; 2] {
+        self.node_index(id)
+            .map(|index| self.take_midi_output_at(index))
+            .unwrap_or([None; 2])
+    }
+    pub fn take_midi_output_at(&mut self, index: usize) -> [Option<note_inputs::NoteEvent>; 2] {
         self.nodes
-            .iter_mut()
-            .find(|n| n.id == id)
-            .map(|n| std::mem::replace(&mut n.outgoing_notes, [None; 2]))
+            .get_mut(index)
+            .map(|n| std::mem::take(&mut n.outgoing_notes))
             .unwrap_or([None; 2])
     }
     pub fn note(&mut self, node: &str, pitch: u8, velocity: u8) {
@@ -2040,9 +2099,14 @@ impl Engine {
     /// Read a dedicated monitor after rendering one frame. Never sums into the
     /// hardware output. Wider bundles explicitly select their first two channels.
     pub fn monitor_frame(&self, id: &str) -> [f32; 2] {
+        self.node_index(id)
+            .map(|index| self.monitor_frame_at(index))
+            .unwrap_or([0.; 2])
+    }
+    pub fn monitor_frame_at(&self, index: usize) -> [f32; 2] {
         self.nodes
-            .iter()
-            .find(|n| n.id == id && n.kind == "monitor_output")
+            .get(index)
+            .filter(|n| n.kind == "monitor_output")
             .map(|n| {
                 [
                     n.output[0] as f32,
@@ -2053,23 +2117,38 @@ impl Engine {
     }
     /// Apply native output routing after gain; destinations sum without normalization.
     pub fn device_output_frame(&self, id: &str) -> [f32; MAX_DEVICE_CHANNELS] {
+        self.node_index(id)
+            .map(|index| self.device_output_frame_at(index))
+            .unwrap_or([0.; MAX_DEVICE_CHANNELS])
+    }
+    pub fn device_output_frame_at(&self, index: usize) -> [f32; MAX_DEVICE_CHANNELS] {
         self.nodes
-            .iter()
-            .find(|n| n.id == id && n.kind == "output")
+            .get(index)
+            .filter(|n| n.kind == "output")
             .map(|n| n.device_frame())
             .unwrap_or([0.; MAX_DEVICE_CHANNELS])
     }
 
     pub fn external(&mut self, node: &str, sample: [f32; MAX_CHANNELS]) {
+        if let Some(index) = self.node_index(node) {
+            self.external_at(index, sample);
+        }
+    }
+    pub fn external_at(&mut self, index: usize, sample: [f32; MAX_CHANNELS]) {
         let mut physical = [0.; MAX_DEVICE_CHANNELS];
         physical[..MAX_CHANNELS].copy_from_slice(&sample);
-        self.device_input(node, physical);
+        self.device_input_at(index, physical);
     }
     pub fn device_input(&mut self, node: &str, sample: [f32; MAX_DEVICE_CHANNELS]) {
+        if let Some(index) = self.node_index(node) {
+            self.device_input_at(index, sample);
+        }
+    }
+    pub fn device_input_at(&mut self, index: usize, sample: [f32; MAX_DEVICE_CHANNELS]) {
         if let Some(n) = self
             .nodes
-            .iter_mut()
-            .find(|n| n.id == node && matches!(n.kind.as_str(), "browser_input" | "input"))
+            .get_mut(index)
+            .filter(|n| matches!(n.kind.as_str(), "browser_input" | "input"))
         {
             n.external = sample;
             n.external_set = true;
@@ -2123,6 +2202,44 @@ impl Engine {
             self.control(id, value);
         }
         valid
+    }
+    /// Deliver one OSC argument to an `osc_input` node. Numbers require numeric
+    /// mode and text requires text mode; the value persists until replaced.
+    pub fn osc_input(&mut self, id: &str, value: &pr0_core::ControlValue) -> bool {
+        let Some(node) = self
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id && n.kind == "osc_input")
+        else {
+            return false;
+        };
+        let text_mode = node.p("text") == 1.;
+        let valid = match value {
+            pr0_core::ControlValue::Number(v) => !text_mode && v.is_finite(),
+            pr0_core::ControlValue::Text(s) => {
+                text_mode && s.len() <= pr0_core::MAX_CONTROL_TEXT_BYTES
+            }
+        };
+        if valid {
+            node.fallback = visualizer::Datum::prepare(Some(value));
+        }
+        valid
+    }
+    /// The value an `osc_output` node published since the last call, if any.
+    pub fn take_osc_output(&mut self, id: &str) -> Option<pr0_core::ControlValue> {
+        self.node_index(id)
+            .and_then(|index| self.take_osc_output_at(index))
+    }
+    pub fn take_osc_output_at(&mut self, index: usize) -> Option<pr0_core::ControlValue> {
+        self.nodes
+            .get_mut(index)
+            .and_then(|n| n.outgoing_control.take())
+            .map(|datum| match datum {
+                visualizer::Datum::Number(value) => pr0_core::ControlValue::Number(value),
+                visualizer::Datum::Text(text) => {
+                    pr0_core::ControlValue::Text(text.as_str().to_owned())
+                }
+            })
     }
     pub fn bang(&mut self, id: &str) -> bool {
         if let Some(node) = self.nodes.iter_mut().find(|n| {
@@ -2190,7 +2307,8 @@ impl Engine {
         let mut spectrum_source = None;
         let mut fallback: Option<(usize, usize, visualizer::Datum)> = None;
         let mut current_present = false;
-        for source in 0..self.nodes.len() {
+        for k in 0..self.senders.len() {
+            let source = self.senders[k];
             let Some(send) = self.nodes[source].route.as_ref() else {
                 continue;
             };
@@ -4769,5 +4887,454 @@ mod typed_midi_tests {
         engine.part_staff_message("p", 2, message);
         engine.render(&[], &mut [[0.; 8]]);
         assert_eq!(engine.take_midi_message("sink"), Some(message));
+    }
+}
+
+#[cfg(test)]
+mod osc_node_tests {
+    use super::*;
+    use pr0_core::ControlValue;
+    fn node(id: &str, kind: &str) -> pr0_core::Node {
+        let mut n = pr0_core::demo_project("osc".into(), "osc".into(), pr0_core::Mode::Freeform)
+            .graph
+            .nodes[0]
+            .clone();
+        n.id = id.into();
+        n.kind = kind.into();
+        n.label = id.into();
+        n.channels = 1;
+        n.parameters.clear();
+        n.control_value = None;
+        n
+    }
+    fn edge(source: &str, sp: &str, target: &str, tp: &str) -> pr0_core::Edge {
+        pr0_core::Edge {
+            id: format!("{source}.{sp}->{target}.{tp}"),
+            source: source.into(),
+            source_port: sp.into(),
+            target: target.into(),
+            target_port: tp.into(),
+        }
+    }
+    #[test]
+    fn osc_input_holds_numbers_or_text_by_mode_and_drives_downstream() {
+        let mut text = node("txt", "osc_input");
+        text.parameters.insert("text".into(), 1.);
+        let g = Graph {
+            nodes: vec![
+                node("num", "osc_input"),
+                text,
+                node("view", "control_visualizer"),
+                node("words", "control_visualizer"),
+            ],
+            edges: vec![
+                edge("num", "out", "view", "in"),
+                edge("txt", "out", "words", "in"),
+            ],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        assert!(e.osc_input("num", &ControlValue::Number(0.5)));
+        assert!(!e.osc_input("num", &ControlValue::Text("x".into())));
+        assert!(!e.osc_input("num", &ControlValue::Number(f64::NAN)));
+        assert!(e.osc_input("txt", &ControlValue::Text("hello".into())));
+        assert!(!e.osc_input("txt", &ControlValue::Number(1.)));
+        assert!(!e.osc_input("view", &ControlValue::Number(1.)));
+        e.render(&[], &mut [[0.; 8]]);
+        assert_eq!(e.telemetry()["num"]["_out"], 0.5);
+        assert_eq!(e.telemetry()["view"]["_out"], 0.5);
+        assert!(matches!(
+            &e.visualizations()["words"],
+            pr0_core::Visualization::Control { value: ControlValue::Text(t) } if t == "hello"
+        ));
+        e.render(&[], &mut [[0.; 8]; 8]);
+        assert_eq!(
+            e.telemetry()["num"]["_out"],
+            0.5,
+            "values persist until replaced"
+        );
+    }
+    #[test]
+    fn osc_output_publishes_on_change_or_trigger_edge() {
+        let mut value = node("v", "value");
+        value.parameters.insert("value".into(), 3.);
+        let mut trigger = node("t", "value");
+        trigger.parameters.insert("value".into(), 0.);
+        let mut words = node("w", "control_input");
+        words.parameters.insert("mode".into(), 4.);
+        words.control_value = Some(ControlValue::Text("hi".into()));
+        let g = Graph {
+            nodes: vec![
+                value,
+                trigger,
+                words,
+                node("changes", "osc_output"),
+                node("edges", "osc_output"),
+                node("text", "osc_output"),
+            ],
+            edges: vec![
+                edge("v", "out", "changes", "in"),
+                edge("v", "out", "edges", "in"),
+                edge("t", "out", "edges", "trigger"),
+                edge("w", "out", "text", "in"),
+            ],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 4]);
+        assert_eq!(e.take_osc_output("changes"), Some(ControlValue::Number(3.)));
+        assert_eq!(e.take_osc_output("changes"), None);
+        assert_eq!(e.take_osc_output("edges"), None, "no trigger edge yet");
+        assert_eq!(
+            e.take_osc_output("text"),
+            Some(ControlValue::Text("hi".into()))
+        );
+        e.render(&[], &mut [[0.; 8]; 4]);
+        assert_eq!(
+            e.take_osc_output("changes"),
+            None,
+            "unchanged values stay quiet"
+        );
+        e.parameter("v", "value", 4.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 4]);
+        assert_eq!(e.take_osc_output("changes"), Some(ControlValue::Number(4.)));
+        assert_eq!(e.take_osc_output("edges"), None);
+        e.parameter("t", "value", 1.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 4]);
+        assert_eq!(e.take_osc_output("edges"), Some(ControlValue::Number(4.)));
+        e.render(&[], &mut [[0.; 8]; 4]);
+        assert_eq!(e.take_osc_output("edges"), None, "held trigger fires once");
+        e.parameter("t", "value", 0.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 4]);
+        e.parameter("t", "value", 1.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 4]);
+        assert_eq!(e.take_osc_output("edges"), Some(ControlValue::Number(4.)));
+    }
+}
+
+#[cfg(test)]
+mod pan_tests {
+    use super::*;
+    #[test]
+    fn pan_is_a_balance_that_keeps_the_stereo_image() {
+        let template = pr0_core::demo_project("pan".into(), "pan".into(), pr0_core::Mode::Freeform)
+            .graph
+            .nodes[0]
+            .clone();
+        let node = |id: &str, kind: &str| {
+            let mut n = template.clone();
+            n.id = id.into();
+            n.kind = kind.into();
+            n.label = id.into();
+            n.channels = 2;
+            n.parameters.clear();
+            n
+        };
+        let mut graph = Graph {
+            nodes: vec![node("split", "channel_map"), node("pan", "pan")],
+            edges: vec![pr0_core::Edge {
+                id: "wire".into(),
+                source: "split".into(),
+                source_port: "out".into(),
+                target: "pan".into(),
+                target_port: "in".into(),
+            }],
+        };
+        for (pan, expected) in [(0., [0.5, -0.25]), (-1., [0.5, 0.]), (1., [0., -0.25])] {
+            graph.nodes[1].parameters.insert("pan".into(), pan);
+            let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
+            // Drive the map's input directly so the two channels differ.
+            e.nodes[0].output = [0.5, -0.25, 0., 0., 0., 0., 0., 0.];
+            let idx = e.nodes.iter().position(|n| n.id == "pan").unwrap();
+            e.nodes[idx].input[0] = [0.5, -0.25, 0., 0., 0., 0., 0., 0.];
+            e.nodes[idx].process(&Clock::new(48000.), &[0.; MAX_CHANNELS]);
+            let out = e.nodes[idx].output;
+            assert!((out[0] - expected[0]).abs() < 1e-9, "pan {pan}: {out:?}");
+            assert!((out[1] - expected[1]).abs() < 1e-9, "pan {pan}: {out:?}");
+            assert_eq!(out[2..], [0.; 6]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod unified_midi_tests {
+    //! One raw-message path: every producer's scalar outlets are a decoding of
+    //! the same frame its typed output forwards.
+    use super::*;
+    use pr0_core::midi::Message;
+    fn node(id: &str, kind: &str) -> pr0_core::Node {
+        let mut n = pr0_core::demo_project("u".into(), "u".into(), pr0_core::Mode::Structured)
+            .graph
+            .nodes[0]
+            .clone();
+        n.id = id.into();
+        n.kind = kind.into();
+        n.label = id.into();
+        n.channels = 1;
+        n.parameters.clear();
+        n.part_id = (kind == "part_midi").then(|| "p".to_string());
+        n
+    }
+    fn edge(source: &str, sp: &str, target: &str, tp: &str) -> pr0_core::Edge {
+        pr0_core::Edge {
+            id: format!("{source}.{sp}->{target}.{tp}"),
+            source: source.into(),
+            source_port: sp.into(),
+            target: target.into(),
+            target_port: tp.into(),
+        }
+    }
+    fn midi(source: &str, target: &str) -> pr0_core::Edge {
+        edge(source, "midi", target, "midi")
+    }
+    fn scalar(source: &str, target: &str) -> Vec<pr0_core::Edge> {
+        ["pitch", "velocity", "gate", "trigger", "note_off"]
+            .into_iter()
+            .map(|p| edge(source, p, target, p))
+            .collect()
+    }
+    fn m(status: u8, data1: u8, data2: u8) -> Message {
+        Message {
+            status,
+            data1,
+            data2,
+        }
+    }
+    fn tick(e: &mut Engine) {
+        e.render(&[], &mut [[0.; 8]; 16]);
+    }
+    fn held(e: &Engine, id: &str, pitch: u8) -> bool {
+        e.nodes
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap()
+            .voices
+            .iter()
+            .any(|v| {
+                v.owner == GRAPH_VOICE_OWNER && v.pitch == pitch && v.level > 0. && !v.releasing
+            })
+    }
+    fn releasing(e: &Engine, id: &str, pitch: u8) -> bool {
+        let voices: Vec<_> = e
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap()
+            .voices
+            .iter()
+            .filter(|v| v.owner == GRAPH_VOICE_OWNER && v.pitch == pitch && v.level > 0.)
+            .collect();
+        !voices.is_empty() && voices.iter().all(|v| v.releasing)
+    }
+    #[test]
+    fn midi_input_typed_output_carries_channel_and_drives_scalars() {
+        let g = Graph {
+            nodes: vec![node("keys", "midi_input"), node("sink", "midi_output")],
+            edges: vec![midi("keys", "sink")],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.node_midi_message("keys", m(0x93, 60, 100));
+        e.render(&[], &mut [[0.; 8]]);
+        assert_eq!(e.take_midi_message("sink"), Some(m(0x93, 60, 100)));
+        assert_eq!(e.take_midi_message("sink"), None);
+        assert_eq!(e.take_midi_output("sink"), [None, None]);
+        let t = e.telemetry();
+        assert_eq!(t["keys"]["pitch"], 60.);
+        assert_eq!(t["keys"]["velocity"], 100.);
+        assert_eq!(t["keys"]["trigger"], 1.);
+        assert_eq!(t["keys"]["gate"], 1.);
+        e.node_midi_message("keys", m(0x83, 60, 0));
+        e.render(&[], &mut [[0.; 8]; 2]);
+        assert_eq!(e.take_midi_message("sink"), None); // frame cleared each sample
+        assert_eq!(e.telemetry()["keys"]["gate"], 0.);
+    }
+    #[test]
+    fn osc_to_midi_typed_output_reaches_synth() {
+        let g = Graph {
+            nodes: vec![node("osc", "osc_to_midi"), node("tone", "synth")],
+            edges: vec![midi("osc", "tone")],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.node_midi_note("osc", 64, 100);
+        tick(&mut e);
+        assert!(held(&e, "tone", 64));
+        assert_eq!(e.telemetry()["osc"]["pitch"], 64.);
+        e.node_midi_note("osc", 64, 0);
+        tick(&mut e);
+        assert!(releasing(&e, "tone", 64));
+    }
+    #[test]
+    fn piano_receives_typed_midi_lights_keys_and_forwards() {
+        let g = Graph {
+            nodes: vec![
+                node("source", "part_midi"),
+                node("keys", "piano"),
+                node("tone", "synth"),
+            ],
+            edges: vec![midi("source", "keys"), midi("keys", "tone")],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.part_message("p", m(0x90, 60, 100));
+        tick(&mut e);
+        let t = e.telemetry();
+        assert_eq!(t["keys"]["_key60"], 1.);
+        assert_eq!(t["keys"]["gate"], 1.);
+        assert_eq!(t["keys"]["pitch"], 60.);
+        assert!(held(&e, "tone", 60));
+        e.part_message("p", m(0x80, 60, 0));
+        tick(&mut e);
+        assert_eq!(e.telemetry()["keys"]["_key60"], 0.);
+        assert!(releasing(&e, "tone", 60));
+    }
+    #[test]
+    fn piano_scalar_inputs_republish_on_typed_output() {
+        let mut edges = scalar("a", "b");
+        edges.push(midi("b", "tone"));
+        let g = Graph {
+            nodes: vec![
+                node("a", "piano"),
+                node("b", "piano"),
+                node("tone", "synth"),
+            ],
+            edges,
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.piano_note("a", 62, 100);
+        tick(&mut e);
+        assert_eq!(e.telemetry()["b"]["_key62"], 1.);
+        assert!(held(&e, "tone", 62));
+        e.piano_note("a", 62, 0);
+        tick(&mut e);
+        assert!(releasing(&e, "tone", 62));
+    }
+    #[test]
+    fn midi_output_emits_each_typed_note_once_and_scalar_notes_only_decoded() {
+        let g = Graph {
+            nodes: vec![node("source", "part_midi"), node("sink", "midi_output")],
+            edges: vec![midi("source", "sink")],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        let mut raw = vec![];
+        let mut decoded = vec![];
+        for (i, message) in [Some(m(0x92, 60, 100)), None, None, Some(m(0x82, 60, 0))]
+            .into_iter()
+            .chain(std::iter::repeat_n(None, 4))
+            .enumerate()
+        {
+            if let Some(message) = message {
+                e.part_message("p", message);
+            }
+            e.render(&[], &mut [[0.; 8]]);
+            while let Some(message) = e.take_midi_message("sink") {
+                raw.push((i, message));
+            }
+            decoded.extend(e.take_midi_output("sink").into_iter().flatten());
+        }
+        assert_eq!(raw, vec![(0, m(0x92, 60, 100)), (3, m(0x82, 60, 0))]);
+        assert!(decoded.is_empty(), "{decoded:?}");
+
+        let g = Graph {
+            nodes: vec![node("keys", "piano"), node("sink", "midi_output")],
+            edges: scalar("keys", "sink"),
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.piano_note("keys", 60, 100);
+        let mut raw = 0;
+        let mut decoded = vec![];
+        for _ in 0..4 {
+            e.render(&[], &mut [[0.; 8]]);
+            while e.take_midi_message("sink").is_some() {
+                raw += 1;
+            }
+            decoded.extend(e.take_midi_output("sink").into_iter().flatten());
+        }
+        assert_eq!(raw, 0);
+        assert_eq!(
+            decoded,
+            vec![note_inputs::NoteEvent {
+                pitch: 60,
+                velocity: 100
+            }]
+        );
+    }
+    #[test]
+    fn part_message_alone_drives_part_midi_scalar_outputs() {
+        let g = Graph {
+            nodes: vec![node("source", "part_midi"), node("sink", "midi_output")],
+            edges: scalar("source", "sink"),
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.part_message("p", m(0x90, 60, 100));
+        e.part_message("p", m(0x80, 60, 0));
+        let mut events = vec![];
+        for _ in 0..8 {
+            e.render(&[], &mut [[0.; 8]]);
+            events.extend(
+                e.take_midi_output("sink")
+                    .into_iter()
+                    .flatten()
+                    .map(|n| (n.pitch, n.velocity)),
+            );
+        }
+        assert_eq!(events, vec![(60, 100), (60, 0)]);
+        assert_eq!(e.telemetry()["source"]["gate"], 0.);
+    }
+    #[test]
+    fn midi_fan_in_concatenates_sources_in_connection_order() {
+        let g = Graph {
+            nodes: vec![
+                node("source", "part_midi"),
+                node("keys", "piano"),
+                node("sink", "midi_output"),
+            ],
+            edges: vec![midi("source", "sink"), midi("keys", "sink")],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.piano_note("keys", 62, 100);
+        e.part_message("p", m(0x94, 60, 90));
+        e.render(&[], &mut [[0.; 8]]);
+        let mut received = vec![];
+        while let Some(message) = e.take_midi_message("sink") {
+            received.push(message);
+        }
+        assert_eq!(received, vec![m(0x94, 60, 90), m(0x90, 62, 100)]);
+    }
+    #[test]
+    fn node_reset_releases_typed_consumers_after_queued_messages() {
+        let g = Graph {
+            nodes: vec![node("keys", "midi_input"), node("tone", "synth")],
+            edges: vec![midi("keys", "tone")],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.node_midi_message("keys", m(0x90, 60, 100));
+        tick(&mut e);
+        assert!(held(&e, "tone", 60));
+        e.node_midi_message("keys", m(0x90, 64, 100));
+        e.node_midi_reset("keys");
+        tick(&mut e);
+        assert!(releasing(&e, "tone", 60));
+        assert!(!held(&e, "tone", 64));
+        assert_eq!(e.telemetry()["keys"]["gate"], 0.);
+    }
+    #[test]
+    fn scalar_velocity_cable_overrides_typed_velocity() {
+        let mut vel = node("vel", "value");
+        vel.parameters.insert("value".into(), 42.);
+        let g = Graph {
+            nodes: vec![node("keys", "midi_input"), vel, node("tone", "synth")],
+            edges: vec![midi("keys", "tone"), edge("vel", "out", "tone", "velocity")],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.node_midi_message("keys", m(0x90, 60, 100));
+        tick(&mut e);
+        let voice = e
+            .nodes
+            .iter()
+            .find(|n| n.id == "tone")
+            .unwrap()
+            .voices
+            .iter()
+            .find(|v| v.pitch == 60 && v.level > 0.)
+            .copied()
+            .unwrap();
+        assert!((voice.level - 42. / 127.).abs() < 1e-9);
     }
 }

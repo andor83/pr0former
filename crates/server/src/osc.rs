@@ -244,6 +244,8 @@ impl Runtime {
                                                 if rest.is_empty()
                                                     && (action(&m).is_some()
                                                         || crate::node_io::osc_note(&m)
+                                                            .is_some()
+                                                        || crate::node_io::osc_value(&m)
                                                             .is_some()) =>
                                             {
                                                 messages.push(m)
@@ -292,7 +294,7 @@ pub enum Action {
     Control(String, pr0_core::ControlValue),
     Bang(String),
 }
-fn number(v: &rosc::OscType) -> Option<f64> {
+pub fn number(v: &rosc::OscType) -> Option<f64> {
     let n = match v {
         rosc::OscType::Int(n) => *n as f64,
         rosc::OscType::Float(n) => *n as f64,

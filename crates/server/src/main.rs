@@ -45,13 +45,41 @@ use tokio::sync::{broadcast, oneshot};
 use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
+/// A broadcast message serialized once by its producer. Socket tasks send the
+/// prepared text instead of re-serializing the same value for every client.
+#[derive(Clone)]
+pub struct Event {
+    pub value: Arc<Value>,
+    pub text: Arc<str>,
+    /// The same message without its `visualizations` payload, when it has one.
+    pub stripped: Option<Arc<str>>,
+}
+impl From<Value> for Event {
+    fn from(mut value: Value) -> Self {
+        let text: Arc<str> = value.to_string().into();
+        let stripped = match value.get("visualizations") {
+            Some(Value::Object(map)) if !map.is_empty() => {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("visualizations");
+                }
+                Some(Arc::<str>::from(value.to_string()))
+            }
+            _ => None,
+        };
+        Self {
+            value: Arc::new(value),
+            text,
+            stripped,
+        }
+    }
+}
 #[derive(Clone)]
 struct App {
     presence: Arc<Mutex<presence::Presence>>,
     resources: Arc<Mutex<resources::Stats>>,
     osc: Arc<osc::Runtime>,
     db: Arc<Mutex<Connection>>,
-    events: broadcast::Sender<Value>,
+    events: broadcast::Sender<Event>,
     engine: std::sync::mpsc::SyncSender<audio::Command>,
     active: Arc<Mutex<Option<String>>>,
     performance: Arc<Mutex<Option<String>>>,
@@ -321,7 +349,7 @@ fn publish_save(app: &App, id: &str, status: &revisions::SaveStatus, automatic: 
     );
     let _ = app
         .events
-        .send(json!({"type":"project_save","project_id":id,"save":status}));
+        .send(json!({"type":"project_save","project_id":id,"save":status}).into());
 }
 async fn resource_stats(State(app): State<App>, headers: HeaderMap) -> Api<Json<resources::Stats>> {
     user(&app, &headers)?;
@@ -380,7 +408,7 @@ fn start_autosave(app: App) {
 fn publish(app: &App, p: &Project) {
     let _ = app
         .events
-        .send(json!({"type":"project","project_id":p.id,"project":p}));
+        .send(json!({"type":"project","project_id":p.id,"project":p}).into());
 }
 fn send(app: &App, c: audio::Command) -> Api<()> {
     app.engine.try_send(c).map_err(|_| {
@@ -410,10 +438,15 @@ async fn register(
         ));
     }
     let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).map_err(internal)?;
-    let hash = Argon2::default()
-        .hash_password(c.password.as_bytes(), &salt)
-        .map_err(internal)?
-        .to_string();
+    let password = c.password.clone();
+    let hash = tokio::task::spawn_blocking(move || {
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|h| h.to_string())
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
     {
         let mut db = app.db.lock().unwrap();
         let tx = db.transaction().map_err(internal)?;
@@ -453,6 +486,18 @@ async fn register(
     )
     .await
 }
+/// A valid Argon2 hash of a throwaway password, used to keep login timing
+/// independent of whether a username exists.
+fn dummy_password_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).expect("salt");
+        Argon2::default()
+            .hash_password(b"pr0former-dummy-password", &salt)
+            .expect("hash")
+            .to_string()
+    })
+}
 async fn login(
     State(app): State<App>,
     headers: HeaderMap,
@@ -469,23 +514,44 @@ async fn login(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .ok();
-    let (id, hash) =
-        record.ok_or_else(|| Failure(StatusCode::UNAUTHORIZED, "Invalid credentials".into()))?;
-    Argon2::default()
-        .verify_password(
-            c.password.as_bytes(),
-            &PasswordHash::new(&hash).map_err(internal)?,
-        )
-        .map_err(|_| Failure(StatusCode::UNAUTHORIZED, "Invalid credentials".into()))?;
+    // Unknown usernames verify against a fixed hash so response time does not
+    // reveal which accounts exist. Argon2 never runs on the async executor.
+    let (id, hash) = match record {
+        Some((id, hash)) => (Some(id), hash),
+        None => (None, dummy_password_hash().to_owned()),
+    };
+    let password = c.password;
+    let verified = tokio::task::spawn_blocking(move || {
+        PasswordHash::new(&hash)
+            .map(|parsed| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &parsed)
+                    .is_ok()
+            })
+            .unwrap_or(false)
+    })
+    .await
+    .map_err(internal)?;
+    let id = match (id, verified) {
+        (Some(id), true) => id,
+        _ => {
+            return Err(Failure(
+                StatusCode::UNAUTHORIZED,
+                "Invalid credentials".into(),
+            ));
+        }
+    };
     let token = uid() + &uid();
-    app.db
-        .lock()
-        .unwrap()
-        .execute(
+    {
+        let db = app.db.lock().unwrap();
+        // Expired rows are swept opportunistically; the lookup also filters on expiry.
+        let _ = db.execute("DELETE FROM sessions WHERE expires<=?1", [now()]);
+        db.execute(
             "INSERT INTO sessions(token,user_id,expires) VALUES(?1,?2,?3)",
             params![token, id, now() + 86400],
         )
         .map_err(internal)?;
+    }
     let cookie = format!(
         "pr0_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400{}",
         if app.secure { "; Secure" } else { "" }
@@ -526,7 +592,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
         .unwrap_or(1);
     let ownership = engine_status(&app);
     Json(
-        json!({"bootstrap":count==0,"version":env!("CARGO_PKG_VERSION"),"build":build_info::json(),"active_project":ownership["active_project"],"graph_project":ownership["graph_project"],"monitor_transport":"webrtc_opus"}),
+        json!({"bootstrap":count==0,"version":env!("CARGO_PKG_VERSION"),"build":build_info::json(),"active_project":ownership.value["active_project"],"graph_project":ownership.value["graph_project"],"monitor_transport":"webrtc_opus"}),
     )
 }
 async fn list_projects(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
@@ -665,6 +731,7 @@ async fn update_project(
     validate_conductor(&app, &p)?;
     let active = app.active.lock().unwrap().as_deref() == Some(&id);
     settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
+    let previous_flat = previous.graph.flatten().map_err(bad)?;
     for node in &p.graph.nodes {
         if pr0_core::named_route(&node.kind)
             && previous
@@ -672,10 +739,7 @@ async fn update_project(
                 .nodes
                 .iter()
                 .any(|old| old.id == node.id && old.control_value != node.control_value)
-            && previous
-                .graph
-                .flatten()
-                .map_err(bad)?
+            && previous_flat
                 .edges
                 .iter()
                 .any(|e| e.target == node.id && e.target_port == "target")
@@ -1455,7 +1519,7 @@ async fn add_member(
     drop(db);
     let _ = app
         .events
-        .send(json!({"type":"members_changed","project_id":id}));
+        .send(json!({"type":"members_changed","project_id":id}).into());
     Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]
@@ -1578,7 +1642,7 @@ async fn remove_member(
     app.media.close_project_user(&id, &target).await;
     let _ = app
         .events
-        .send(json!({"type":"members_changed","project_id":id}));
+        .send(json!({"type":"members_changed","project_id":id}).into());
     Ok(Json(json!({"project":project,"unassigned_parts":changed})))
 }
 async fn user_avatar(
@@ -1586,17 +1650,27 @@ async fn user_avatar(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Api<Response> {
-    user(&app, &headers)?;
-    let bytes: Vec<u8> = app
-        .db
-        .lock()
-        .unwrap()
-        .query_row(
+    let u = user(&app, &headers)?;
+    let bytes: Vec<u8> = {
+        let db = app.db.lock().unwrap();
+        // Avatars are visible to the user themselves and to members of a shared project.
+        let shared: i64 = db
+            .query_row(
+                "SELECT count(*) FROM members a JOIN members b ON a.project_id=b.project_id WHERE a.user_id=?1 AND b.user_id=?2",
+                params![u, id],
+                |r| r.get(0),
+            )
+            .map_err(internal)?;
+        if u != id && shared == 0 {
+            return Err(Failure(StatusCode::NOT_FOUND, "Avatar not found".into()));
+        }
+        db.query_row(
             "SELECT body FROM user_avatars WHERE user_id=?1",
             [id],
             |r| r.get(0),
         )
-        .map_err(|_| Failure(StatusCode::NOT_FOUND, "Avatar not found".into()))?;
+        .map_err(|_| Failure(StatusCode::NOT_FOUND, "Avatar not found".into()))?
+    };
     Ok((
         [
             (header::CONTENT_TYPE, "image/png"),
@@ -1684,7 +1758,7 @@ async fn upload_user_avatar(
     for project_id in projects {
         let _ = app
             .events
-            .send(json!({"type":"members_changed","project_id":project_id,"user_id":id}));
+            .send(json!({"type":"members_changed","project_id":project_id,"user_id":id}).into());
     }
     Ok(Json(json!({"revision":revision})))
 }
@@ -1956,13 +2030,17 @@ async fn websocket(
     }
     let u = user(&app, &headers)?;
     role(&app, &id, &u)?;
-    Ok(ws.on_upgrade(move |socket| stream(socket, app, id, u, headers)))
+    // Client frames are small JSON commands; cap them well below tungstenite defaults.
+    Ok(ws
+        .max_message_size(64 * 1024)
+        .max_frame_size(64 * 1024)
+        .on_upgrade(move |socket| stream(socket, app, id, u, headers)))
 }
 // Snapshot both ownership states; graph processing and show transport are independent.
-fn engine_status(app: &App) -> Value {
+fn engine_status(app: &App) -> Event {
     let graph = app.graph.lock().unwrap();
     let active = app.active.lock().unwrap();
-    json!({"type":"engine_status","performance_project":*app.performance.lock().unwrap(),"active_project":*active,"graph_project":*graph,"server_time":audio::monotonic_ms()})
+    json!({"type":"engine_status","performance_project":*app.performance.lock().unwrap(),"active_project":*active,"graph_project":*graph,"server_time":audio::monotonic_ms()}).into()
 }
 
 async fn socket_text(socket: &mut WebSocket, value: String) -> Result<(), ()> {
@@ -2004,7 +2082,7 @@ async fn send_project_snapshot(socket: &mut WebSocket, app: &App, id: &str, u: &
         }
     }
     let status = engine_status(&app);
-    socket_text(socket, status.to_string()).await.is_ok()
+    socket_text(socket, status.text.to_string()).await.is_ok()
 }
 
 fn browser_midi_message(value: &Value) -> Option<pr0_core::midi::Message> {
@@ -2062,9 +2140,21 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
     let mut visualizers = false;
     let mut midi_window = tokio::time::Instant::now();
     let mut midi_messages = 0_u16;
+    // Performer authorization (mode, assigned parts) is cached per socket and
+    // refreshed on project/member broadcasts instead of reloading the project
+    // from SQLite for every inbound MIDI message.
+    let mut performer: Option<(bool, Vec<String>)> = None;
     loop {
         tokio::select! {
-            event=events.recv()=>match event{Ok(mut v)=>{if v["type"]=="session_revoked" && v["user_id"]==u {let _=socket_text(&mut socket,v.to_string()).await;break;} if !visualizers{if let Some(o)=v.as_object_mut(){o.remove("visualizations");}}if (v["type"]=="hardware_levels" || v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || v.get("project_id").and_then(Value::as_str)==Some(&id))&&socket_text(&mut socket, v.to_string()).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
+            event=events.recv()=>match event{Ok(event)=>{
+                let v=&event.value;
+                if v["type"]=="session_revoked" && v["user_id"]==u {let _=socket_text(&mut socket,event.text.to_string()).await;break;}
+                let mine=v.get("project_id").and_then(Value::as_str)==Some(&id);
+                if mine && (v["type"]=="project" || v["type"]=="members_changed") {performer=None;}
+                // Serialized once by the producer; non-subscribers take the variant without visualizations.
+                let text=if visualizers {&event.text} else {event.stripped.as_ref().unwrap_or(&event.text)};
+                if (v["type"]=="hardware_levels" || v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || mine)&&socket_text(&mut socket, text.to_string()).await.is_err(){break;}
+            },Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
             msg=socket.recv()=>match msg{
                 Some(Ok(Message::Text(text)))=>{
                     last_received=tokio::time::Instant::now();
@@ -2081,9 +2171,12 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                             if midi_window.elapsed() >= Duration::from_secs(1) { midi_window=tokio::time::Instant::now();midi_messages=0; }
                             midi_messages=midi_messages.saturating_add(1);
                             let part=v["part"].as_str();
-                            let authorized=load(&app,&id).ok().is_some_and(|project| {
-                                project.mode != Mode::Structured && app.active.lock().unwrap().as_deref()==Some(&id)
-                                    && part.is_some_and(|part| project.parts.iter().any(|candidate| candidate.id==part && candidate.performer.as_deref()==Some(&u)))
+                            if performer.is_none(){
+                                performer=load(&app,&id).ok().map(|project| (project.mode != Mode::Structured, project.parts.iter().filter(|candidate| candidate.performer.as_deref()==Some(&u)).map(|candidate| candidate.id.clone()).collect::<Vec<_>>()));
+                            }
+                            let authorized=performer.as_ref().is_some_and(|(performable, parts)| {
+                                *performable && app.active.lock().unwrap().as_deref()==Some(&id)
+                                    && part.is_some_and(|part| parts.iter().any(|candidate| candidate==part))
                             });
                             if midi_messages<=2048 && authorized {
                                 if let (Some(part),Some(message))=(part,browser_midi_message(&v)) {
@@ -2109,6 +2202,7 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                 Some(Ok(_))=>{last_received=tokio::time::Instant::now();}
             },
             _=check.tick()=>{
+                performer=None;
                 if user(&app,&headers).is_err() || role(&app,&id,&u).is_err() || last_received.elapsed() >= Duration::from_secs(30) {break;}
                 if tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Ping(Vec::new().into()))).await.map_or(true, |r| r.is_err()) {break;}
             }
@@ -2214,7 +2308,25 @@ async fn main() {
     start_autosave(app.clone());
     let desktop_app = app.clone();
     let assets = std::env::var("PR0_WEB_ROOT").unwrap_or("web/dist".into());
+    async fn security_headers(
+        request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> Response {
+        let mut response = next.run(request).await;
+        let headers = response.headers_mut();
+        for (name, value) in [
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "same-origin"),
+        ] {
+            headers
+                .entry(name)
+                .or_insert_with(|| header::HeaderValue::from_static(value));
+        }
+        response
+    }
     let router = Router::new()
+        .layer(axum::middleware::from_fn(security_headers))
         .route(
             "/api/login-titles",
             get(login_titles).put(save_login_titles),

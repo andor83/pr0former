@@ -39,6 +39,20 @@ impl MidiControls {
         }
         self.queue.push_back((controller, value, false));
     }
+    /// Decode fixed channel messages into the serializer. Note on/off become
+    /// `note`; CC 120/123 on any channel releases; other CC values reach `cc`
+    /// only when `cc_controls`. Everything else is ignored. No allocation.
+    pub fn feed(&mut self, events: &[pr0_core::midi::Message], cc_controls: bool) {
+        for event in events {
+            match event.status >> 4 {
+                9 => self.note(event.data1, event.data2),
+                8 => self.note(event.data1, 0),
+                11 if cc_controls => self.cc(event.data1, event.data2),
+                11 if matches!(event.data1, 120 | 123) => self.release(),
+                _ => {}
+            }
+        }
+    }
     /// Cancel unsent attacks and release every note already emitted, by pitch.
     pub fn release(&mut self) {
         self.queue.clear();
@@ -138,5 +152,37 @@ mod tests {
         assert_eq!(midi.dropped, CAPACITY as u64 + 1);
         assert_eq!(midi.tick(), [67., 0., 0., 0., 1.]);
         assert_eq!(midi.queue.capacity(), CAPACITY);
+    }
+    #[test]
+    fn feed_maps_notes_all_notes_off_and_optional_cc() {
+        use pr0_core::midi::Message;
+        let m = |status, data1, data2| Message {
+            status,
+            data1,
+            data2,
+        };
+        let mut midi = MidiControls::new();
+        midi.feed(&[m(0x93, 60, 100), m(0xb3, 7, 99), m(0xe0, 0, 64)], false);
+        assert_eq!(midi.tick(), [60., 100., 1., 1., 0.]);
+        midi.tick();
+        assert_eq!(midi.tick(), [60., 100., 1., 0., 0.]);
+        midi.feed(&[m(0x83, 60, 0)], false);
+        assert_eq!(midi.tick(), [60., 0., 0., 0., 1.]);
+        midi.tick();
+        midi.feed(&[m(0x90, 64, 90), m(0x90, 64, 0)], false);
+        assert_eq!(midi.tick(), [64., 90., 1., 1., 0.]);
+        midi.tick();
+        assert_eq!(midi.tick(), [64., 0., 0., 0., 1.]);
+        midi.tick();
+        midi.feed(&[m(0xb5, 7, 99)], true);
+        assert_eq!(midi.tick(), [7., 99., 0., 1., 0.]);
+        midi.tick();
+        midi.feed(&[m(0x90, 62, 80)], false);
+        midi.tick();
+        midi.tick();
+        midi.feed(&[m(0x90, 65, 80), m(0xb0, 123, 0)], false);
+        assert_eq!(midi.tick(), [62., 0., 0., 0., 1.]);
+        midi.tick();
+        assert_eq!(midi.tick()[3..], [0., 0.]);
     }
 }

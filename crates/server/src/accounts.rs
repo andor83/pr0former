@@ -230,7 +230,7 @@ fn protect_admin(db: &Connection, id: &str, remains: bool) -> Api<()> {
 async fn revoke_live(app: &App, id: &str) {
     let _ = app
         .events
-        .send(json!({"type":"session_revoked","user_id":id}));
+        .send(json!({"type":"session_revoked","user_id":id}).into());
     app.media.close_user(id).await;
 }
 pub async fn revoke(

@@ -140,4 +140,3 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
     );
     assert!(output.iter().flatten().all(|v| v.is_finite()));
 }
-

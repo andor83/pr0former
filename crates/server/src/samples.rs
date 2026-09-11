@@ -112,7 +112,7 @@ pub async fn upload(
     );
     let _ = app
         .events
-        .send(serde_json::json!({"type":"samples","project_id":id}));
+        .send(serde_json::json!({"type":"samples","project_id":id}).into());
     Ok(Json(result))
 }
 struct ImportDirectory(std::path::PathBuf);

@@ -15,6 +15,8 @@ use std::{
 pub enum Route {
     Midi(String, u8),
     Osc(std::net::SocketAddr, String),
+    /// Single-argument OSC value route with its maximum send rate in Hz.
+    OscValue(std::net::SocketAddr, String, u32),
 }
 impl Route {
     pub fn from_node(node: &Node) -> Option<Self> {
@@ -29,6 +31,19 @@ impl Route {
                 .parse()
                 .ok()
                 .map(|destination| Self::Osc(destination, io.address.clone())),
+            "osc_output" if !io.address.is_empty() => {
+                io.destination.parse().ok().map(|destination| {
+                    Self::OscValue(
+                        destination,
+                        io.address.clone(),
+                        node.parameters
+                            .get("rate")
+                            .copied()
+                            .unwrap_or(60.)
+                            .clamp(1., 200.) as u32,
+                    )
+                })
+            }
             _ => None,
         }
     }
@@ -46,6 +61,10 @@ enum Command {
         message: pr0_core::midi::Message,
     },
     Event(OutputEvent),
+    Value {
+        route: Route,
+        value: pr0_core::ControlValue,
+    },
     Reset(Vec<String>),
 }
 type Held = BTreeMap<(String, Route, u8), u32>;
@@ -110,6 +129,11 @@ impl Outputs {
                     Command::Midi { .. } => unreachable!(),
                     Command::Reset(nodes) => {
                         release(&mut held, &nodes, &mut midi, &osc, &worker_error)
+                    }
+                    Command::Value { route, value } => {
+                        if let Err(e) = send_value(&route, &value, &osc) {
+                            *worker_error.lock().unwrap() = Some(e);
+                        }
                     }
                     Command::Event(event) => {
                         if !event.cc {
@@ -179,6 +203,19 @@ impl Outputs {
         {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             self.panic.store(true, Ordering::Release);
+        }
+    }
+    /// Send one OSC value; the orchestration worker applies the node's rate limit.
+    pub fn value(&self, route: &Route, value: pr0_core::ControlValue) {
+        if self
+            .tx
+            .try_send(Command::Value {
+                route: route.clone(),
+                value,
+            })
+            .is_err()
+        {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn reset(&self, nodes: Vec<String>) {
@@ -253,6 +290,25 @@ fn send_message(
         .send(&bytes[..len])
         .map_err(|e| e.to_string())
 }
+fn send_value(
+    route: &Route,
+    value: &pr0_core::ControlValue,
+    osc: &crate::osc::Runtime,
+) -> Result<(), String> {
+    let Route::OscValue(destination, address, _) = route else {
+        return Err("OSC values require an OSC output route".into());
+    };
+    let packet = rosc::OscPacket::Message(rosc::OscMessage {
+        addr: address.clone(),
+        args: vec![match value {
+            pr0_core::ControlValue::Number(number) => rosc::OscType::Float(*number as f32),
+            pr0_core::ControlValue::Text(text) => rosc::OscType::String(text.clone()),
+        }],
+    });
+    let bytes = rosc::encoder::encode(&packet).map_err(|e| e.to_string())?;
+    osc.send(&bytes, *destination);
+    Ok(())
+}
 fn send(
     route: &Route,
     note: NoteEvent,
@@ -261,6 +317,7 @@ fn send(
     osc: &crate::osc::Runtime,
 ) -> Result<(), String> {
     match route {
+        Route::OscValue(..) => Err("OSC value routes carry no notes".into()),
         Route::Midi(port, channel) => {
             if !midi.contains_key(port) {
                 if std::env::var_os("PR0_DISABLE_NATIVE_DEVICES").is_some() {
@@ -425,12 +482,32 @@ pub fn route_midi(node: &Node, message: [u8; 3], engine: &mut Engine) {
         return;
     }
     let cc = node.parameters.get("mode") == Some(&1.);
-    match message[0] & 0xf0 {
-        0x90 if !cc => engine.node_midi_note(&node.id, message[1], message[2]),
-        0x80 if !cc => engine.node_midi_note(&node.id, message[1], 0),
-        0xb0 if cc => engine.node_midi_cc(&node.id, message[1], message[2]),
-        0xb0 if matches!(message[1], 120 | 123) => engine.node_midi_reset(&node.id),
-        _ => {}
+    // Forward the raw message with its channel nibble; the node decodes its own
+    // scalar outlets from the same frame that its typed output carries.
+    let forward = match message[0] & 0xf0 {
+        0x80 | 0x90 => !cc,
+        0xb0 => cc || matches!(message[1], 120 | 123),
+        _ => false,
+    };
+    if forward {
+        engine.node_midi_message(
+            &node.id,
+            pr0_core::midi::Message {
+                status: message[0],
+                data1: message[1],
+                data2: message[2],
+            },
+        );
+    }
+}
+/// A single numeric or short text argument for `osc_input` nodes.
+pub fn osc_value(message: &rosc::OscMessage) -> Option<pr0_core::ControlValue> {
+    match message.args.as_slice() {
+        [rosc::OscType::String(text)] if text.len() <= pr0_core::MAX_CONTROL_TEXT_BYTES => {
+            Some(pr0_core::ControlValue::Text(text.clone()))
+        }
+        [value] => crate::osc::number(value).map(pr0_core::ControlValue::Number),
+        _ => None,
     }
 }
 pub fn osc_note(message: &rosc::OscMessage) -> Option<NoteEvent> {
@@ -453,6 +530,102 @@ pub fn osc_note(message: &rosc::OscMessage) -> Option<NoteEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn osc_output_route_carries_destination_address_and_rate() {
+        let p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
+        let mut node = p.graph.nodes[0].clone();
+        node.kind = "osc_output".into();
+        node.parameters = [("rate".into(), 30.)].into();
+        node.io = Some(pr0_core::IoConfig {
+            port: String::new(),
+            address: "/level".into(),
+            destination: "127.0.0.1:9100".into(),
+        });
+        assert_eq!(
+            Route::from_node(&node),
+            Some(Route::OscValue(
+                "127.0.0.1:9100".parse().unwrap(),
+                "/level".into(),
+                30
+            ))
+        );
+        node.io.as_mut().unwrap().address.clear();
+        assert_eq!(Route::from_node(&node), None);
+        let message = rosc::OscMessage {
+            addr: "/level".into(),
+            args: vec![rosc::OscType::Float(0.25)],
+        };
+        assert_eq!(
+            osc_value(&message),
+            Some(pr0_core::ControlValue::Number(0.25))
+        );
+        let text = rosc::OscMessage {
+            addr: "/level".into(),
+            args: vec![rosc::OscType::String("go".into())],
+        };
+        assert_eq!(
+            osc_value(&text),
+            Some(pr0_core::ControlValue::Text("go".into()))
+        );
+        let pair = rosc::OscMessage {
+            addr: "/level".into(),
+            args: vec![rosc::OscType::Int(60), rosc::OscType::Int(100)],
+        };
+        assert_eq!(osc_value(&pair), None);
+    }
+    #[test]
+    fn route_midi_forwards_filtered_messages_with_channel_byte() {
+        let p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
+        let mut node = p.graph.nodes[0].clone();
+        node.id = "keys".into();
+        node.kind = "midi_input".into();
+        node.parameters = [("channel".into(), 0.)].into();
+        let mut sink = node.clone();
+        sink.id = "sink".into();
+        sink.kind = "midi_output".into();
+        sink.parameters.clear();
+        let mut engine = Engine::prepare(
+            Graph {
+                nodes: vec![node.clone(), sink],
+                edges: vec![pr0_core::Edge {
+                    id: "cable".into(),
+                    source: "keys".into(),
+                    source_port: "midi".into(),
+                    target: "sink".into(),
+                    target_port: "midi".into(),
+                }],
+            },
+            48000.,
+        )
+        .unwrap();
+        let message = |status, data1, data2| pr0_core::midi::Message {
+            status,
+            data1,
+            data2,
+        };
+        route_midi(&node, [0x93, 60, 100], &mut engine);
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(
+            engine.take_midi_message("sink"),
+            Some(message(0x93, 60, 100))
+        );
+        assert_eq!(engine.telemetry()["keys"]["pitch"], 60.);
+        assert_eq!(engine.telemetry()["keys"]["gate"], 1.);
+        engine.render(&[], &mut [[0.; 8]]);
+        // Note mode drops ordinary controllers before they reach the graph.
+        route_midi(&node, [0xb3, 7, 99], &mut engine);
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(engine.take_midi_message("sink"), None);
+        // All-notes-off is forwarded and releases the decoded note.
+        route_midi(&node, [0xb3, 123, 0], &mut engine);
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(
+            engine.take_midi_message("sink"),
+            Some(message(0xb3, 123, 0))
+        );
+        assert_eq!(engine.telemetry()["keys"]["note_off"], 1.);
+        assert_eq!(engine.telemetry()["keys"]["gate"], 0.);
+    }
     #[test]
     fn keyboard_channel_note_off_and_cc_are_routed_to_only_the_selected_node() {
         let p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
@@ -481,11 +654,25 @@ mod tests {
         assert_eq!(engine.telemetry()["keyboard"]["note_off"], 1.);
         assert_eq!(engine.telemetry()["keyboard"]["gate"], 0.);
         engine.render(&[], &mut [[0.; 8]]);
+        // In Note mode ordinary controllers never reach the graph.
+        route_midi(&node, [0xb1, 7, 99], &mut engine);
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(engine.telemetry()["keyboard"]["pitch"], 64.);
+        // Message type is structural, so a CC-mode node is a freshly prepared engine.
         node.parameters.insert("mode".into(), 1.);
+        let mut engine = Engine::prepare(
+            Graph {
+                nodes: vec![node.clone()],
+                edges: vec![],
+            },
+            48000.,
+        )
+        .unwrap();
         route_midi(&node, [0xb1, 7, 99], &mut engine);
         engine.render(&[], &mut [[0.; 8]]);
         assert_eq!(engine.telemetry()["keyboard"]["pitch"], 7.);
         assert_eq!(engine.telemetry()["keyboard"]["velocity"], 99.);
+        assert_eq!(engine.telemetry()["keyboard"]["trigger"], 1.);
     }
     #[test]
     fn osc_note_validation() {

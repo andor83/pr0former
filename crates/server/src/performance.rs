@@ -592,7 +592,6 @@ impl Sequencer {
                     if let Some((pitch, velocity)) = active {
                         let route = &lane.routes[index];
                         if staff == 0 || staff == route.staff {
-                            prepared.node_midi_note(&node, *pitch, *velocity);
                             prepared.node_midi_message(
                                 &node,
                                 pr0_core::midi::Message {
@@ -1168,7 +1167,6 @@ impl Sequencer {
                 if let Some(node) = &route.node {
                     engine.note_scoped(node, lane.owner, e.note_id, e.pitch, velocity);
                 }
-                engine.part_staff_note(&lane.id, route.staff, e.pitch, velocity);
                 engine.part_staff_message(
                     &lane.id,
                     route.staff,
@@ -1277,7 +1275,6 @@ impl Lane {
                 if let Some(node) = &route.node {
                     engine.note_scoped(node, self.owner, note_id as u32, pitch, velocity);
                 }
-                engine.part_staff_note(&self.id, route.staff, pitch, velocity);
                 engine.part_staff_message(
                     &self.id,
                     route.staff,

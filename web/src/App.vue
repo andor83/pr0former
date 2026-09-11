@@ -360,10 +360,13 @@ const flowNodes = computed<FlowNode[]>(() => visibleNodes.value.map(n => ({ id: 
 const flowEdges = computed<FlowEdge[]>(() => visibleEdges.value.filter(e=>!inputDrag.hidden.value.has(e.id)).map(e => {
   const source = project.value!.graph.nodes.find(n => n.id === e.source)
   const d = source ? nodeDescriptor(source, project.value!.graph.nodes, descriptors.value) : undefined
-  return { id: e.id, source: e.source, target: e.target, sourceHandle: e.source_port, targetHandle: e.target_port, type: 'signal', data: { projectId: project.value!.id, signal: d?.outputs.find(p => p.id === e.source_port)?.signal || 'control', channels: d?.outputs.find(p => p.id === e.source_port)?.fixed_channels || source?.channels || 1, active: graphActive.value && !stale.value, values: telemetry.value?.values?.[e.source] || {} } }
+  // Edge props carry only structure; edges read live telemetry through the
+  // injected shallow reference so the edge list is not rebuilt at 20 Hz.
+  return { id: e.id, source: e.source, target: e.target, sourceHandle: e.source_port, targetHandle: e.target_port, type: 'signal', data: { projectId: project.value!.id, signal: d?.outputs.find(p => p.id === e.source_port)?.signal || 'control', channels: d?.outputs.find(p => p.id === e.source_port)?.fixed_channels || source?.channels || 1 } }
 }))
 provide('telemetry', telemetry)
 provide('telemetryStale',stale)
+provide('graphActive',graphActive)
 const pendingPort = ref<{ node: string; port: string; direction: string } | null>(null)
 
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) }
