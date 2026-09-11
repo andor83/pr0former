@@ -67,7 +67,8 @@ test('Part MIDI and on-screen keyboard release notes independently on one FM syn
   ]}]
   const node=(id:string,kind:string,x:number,y:number,extra={})=>({id,kind,label:id,x,y,channels:1,parameters:{},...extra})
   p.graph={nodes:[node('Part','part_midi',0,0,{part_id:'score'}),node('Keys','piano',0,310),node('FM','fm_synth',450,0,{parameters:{release:1}})],edges:[]}
-  for(const source of ['Part','Keys'])for(const port of ['pitch','velocity','gate','trigger','note_off'])p.graph.edges.push({id:`${source}-${port}`,source,source_port:port,target:'FM',target_port:port})
+  for(const port of ['pitch','velocity','gate','trigger','note_off'])p.graph.edges.push({id:`Part-${port}`,source:'Part',source_port:port,target:'FM',target_port:port})
+  p.graph.edges.push({id:'Keys-midi',source:'Keys',source_port:'midi',target:'FM',target_port:'midi'})
   const saved=await page.request.put(`/api/projects/${p.id}`,{headers,data:p});expect(saved.ok()).toBe(true);p=await saved.json()
   let latest:any
   page.on('websocket',s=>s.on('framereceived',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='telemetry')latest=m}))

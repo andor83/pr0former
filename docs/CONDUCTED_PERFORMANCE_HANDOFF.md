@@ -1,10 +1,16 @@
 # Conducted performance handoff
 
-Last updated: 2026-09-11. The working branch is `codex/conducted-performance`.
-The previous, unrelated working-tree changes were committed separately as
-`81dadc0 Expand project management and universal MIDI routing` and are already
-on `origin/main`. The conducted-performance work described below is intentionally
-uncommitted so the next developer can review and continue it.
+Last updated: 2026-09-11. Conducted performance was committed as
+`58e790e Implement conducted performance workflow`, fast-forwarded into `main`,
+and pushed to `origin/main`.
+
+Post-merge investigation found that Piano-node clicks updated the five legacy
+control outputs but did not publish messages on the advertised typed MIDI output.
+The working tree now queues channel-one note-on/off messages for those gestures;
+a DSP regression covers one Piano MIDI output fanning out to both a sine synth
+and an FM synth. The pointer-driven FM browser test now uses the typed Piano MIDI
+cable, covering click through HTTP and engine routing. The correction is
+validated but remains uncommitted.
 
 ## Product contract agreed with the user
 

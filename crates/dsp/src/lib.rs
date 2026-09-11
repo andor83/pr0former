@@ -1914,6 +1914,18 @@ impl Engine {
             && self.nodes.iter().any(|n| n.id == id && n.kind == "piano")
         {
             self.node_midi_note(id, pitch, velocity);
+            // UI piano gestures must feed both the legacy decoded control
+            // outputs and the typed MIDI output. Queue the channel message so
+            // it enters midi_frame at the next render boundary and can fan out
+            // to every connected MIDI destination.
+            self.node_midi_message(
+                id,
+                pr0_core::midi::Message {
+                    status: if velocity == 0 { 0x80 } else { 0x90 },
+                    data1: pitch,
+                    data2: velocity,
+                },
+            );
         }
     }
     pub fn node_midi_note(&mut self, id: &str, pitch: u8, velocity: u8) {
@@ -4077,6 +4089,50 @@ mod poly_synth_tests {
             tick(&mut e);
             e.render(&[], &mut [[0.; 8]; 48000]);
             assert_eq!(e.audio_frame("tone", "out"), [0.; 8]);
+        }
+    }
+    #[test]
+    fn piano_typed_midi_output_fans_out_to_two_synths() {
+        let mut g = pr0_core::Graph {
+            nodes: vec![
+                node("keys", "piano", 1),
+                node("sine", "synth", 1),
+                node("fm", "fm_synth", 1),
+            ],
+            edges: vec![],
+        };
+        for target in ["sine", "fm"] {
+            g.edges.push(pr0_core::Edge {
+                id: format!("keys-{target}-midi"),
+                source: "keys".into(),
+                source_port: "midi".into(),
+                target: target.into(),
+                target_port: "midi".into(),
+            });
+        }
+        let mut e = Engine::prepare(g, 48_000.).unwrap();
+        e.piano_note("keys", 64, 100);
+        tick(&mut e);
+        for target in ["sine", "fm"] {
+            let node = e.nodes.iter().find(|node| node.id == target).unwrap();
+            assert!(node.voices.iter().any(|voice| {
+                voice.owner == GRAPH_VOICE_OWNER
+                    && voice.pitch == 64
+                    && voice.level > 0.
+                    && !voice.releasing
+            }));
+        }
+
+        e.piano_note("keys", 64, 0);
+        tick(&mut e);
+        for target in ["sine", "fm"] {
+            let node = e.nodes.iter().find(|node| node.id == target).unwrap();
+            assert!(
+                node.voices
+                    .iter()
+                    .filter(|voice| voice.owner == GRAPH_VOICE_OWNER && voice.pitch == 64)
+                    .all(|voice| voice.releasing)
+            );
         }
     }
     #[test]

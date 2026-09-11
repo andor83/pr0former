@@ -16,7 +16,7 @@ pr0former is a development alpha. Software validation does not establish physica
 | Dynamics and phrasing | Staff overrides preserve part defaults for other staves. Ramp conversion preserves authored holds and curve shapes. New hairpins own an identifiable dynamics event and retain any authored starting mark for restoration; gesture previews are transient, with one commit/undo on release. Moving/removing owned playback updates its wedge. | Value-level ramp and hairpin tests plus browser editing. Hairpins crossing existing ramps/interior points are rejected instead of overwriting them; older wedges without owned events remain independent notation. |
 | UI | Custom graph node theme, paper score, visible save/conflict status, keyboard-focusable ramp points, coarse-pointer touch targets and reduced-motion support. Save coordination, MIDI device lifetime and curve gesture transforms are separate modules. | Frontend tests/build and browser tests. Physical touch/Safari validation remains manual. |
 | Ensemble | Member browser with profile summaries, direct existing-user addition, invitation links and self-service square avatars. Owners can remove non-owners; assigned parts become unassigned in the same server transaction. | Rust crop/assignment tests and isolated HTTPS/API workflow. Role editing and the broader user profile editor remain future work. |
-| MIDI/OSC | System settings and receiving/sending paths exist. Typed channel-event cables currently cover part MIDI → MIDI output/decoder and graph boundaries; most note nodes retain scalar ports. | See architecture and tests. Universal MIDI cable coverage is **planned**, not implemented: [MIDI_CONNECTION_PLAN.md](MIDI_CONNECTION_PLAN.md). |
+| MIDI/OSC | System settings and receiving/sending paths exist. Typed channel-event cables cover Part MIDI, MIDI input, OSC-to-MIDI and Piano sources feeding synths, samplers, MIDI output, MIDI-to-OSC and decoders; Piano clicks emit channel-one note-on/off messages and fan out to multiple destinations. | Software routing tests cover typed fan-out; external delivery remains best effort and physical MIDI hardware is unverified. |
 | Deployment/assets | Local fonts/assets, native HTTP/HTTPS and desktop packaging, Bash 3.2-compatible launcher. | Existing launcher/desktop validation is historical evidence; startup services are never installed/enabled by automated tests. |
 
 ## Remaining performance work
@@ -29,6 +29,11 @@ pr0former is a development alpha. Software validation does not establish physica
 ## Validation
 
 Stabilization validation (2026-09-10):
+
+- Piano typed-MIDI correction (2026-09-11): all **94 pr0-dsp unit tests**
+  and both DSP allocation tests pass. The focused two-case FM-synth Chromium
+  file passes with its pointer-driven Piano case routed over a typed MIDI cable.
+  No physical MIDI or audio hardware was used.
 
 - Conducted-performance software pass (2026-09-11): `cargo test --workspace
   --quiet` passed **190 tests** with one opt-in test ignored; `npm --prefix web
