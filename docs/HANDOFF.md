@@ -1,5 +1,9 @@
 # Migration and development handoff
 
+> Current conducted-performance development is documented in
+> [CONDUCTED_PERFORMANCE_HANDOFF.md](CONDUCTED_PERFORMANCE_HANDOFF.md). Read that
+> file first when continuing the `codex/conducted-performance` branch.
+
 Checkpoint date: 2026-09-07. Read AGENTS.md, ARCHITECTURE.md and STATUS.md before continuing. This document transfers with Git; the Codex conversation itself does not. A new session can start with: “Read docs/HANDOFF.md and continue the MIDI/OSC settings work.”
 
 ## Moving the application

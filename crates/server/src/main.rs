@@ -242,6 +242,42 @@ fn can_edit(role: &str) -> Api<()> {
     }
     Ok(())
 }
+fn can_conduct(project: &Project, user: &str, role: &str) -> bool {
+    project
+        .conductor
+        .as_deref()
+        .map(|conductor| conductor == user || role == "owner")
+        .unwrap_or_else(|| matches!(role, "owner" | "conductor"))
+}
+
+fn validate_conductor(app: &App, project: &Project) -> Api<()> {
+    let Some(conductor) = project.conductor.as_deref() else {
+        return Ok(());
+    };
+    let member: bool = app
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM members WHERE project_id=?1 AND user_id=?2)",
+            params![project.id, conductor],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    if !member {
+        return Err(bad("The designated conductor must be an ensemble member"));
+    }
+    if project
+        .parts
+        .iter()
+        .any(|part| part.performer.as_deref() == Some(conductor))
+    {
+        return Err(bad(
+            "The designated conductor cannot be assigned performer parts",
+        ));
+    }
+    Ok(())
+}
 fn load(app: &App, id: &str) -> Api<Project> {
     let body: String = app
         .db
@@ -626,6 +662,7 @@ async fn update_project(
     let previous = load(&app, &id)?;
     sample_library::assign_roots(&app.db.lock().unwrap(), &previous, &mut p)?;
     p.validate().map_err(bad)?;
+    validate_conductor(&app, &p)?;
     let active = app.active.lock().unwrap().as_deref() == Some(&id);
     settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
     for node in &p.graph.nodes {
@@ -940,7 +977,7 @@ async fn piano_note(
     send(
         &app,
         audio::Command::Piano {
-            project: id,
+            project: id.clone(),
             node: note.node,
             pitch: note.pitch,
             velocity: note.velocity,
@@ -1033,7 +1070,8 @@ async fn transport(
     csrf(&headers)?;
     let u = user(&app, &headers)?;
     let r = role(&app, &id, &u)?;
-    if !matches!(r.as_str(), "owner" | "conductor") {
+    let authority = load(&app, &id)?;
+    if !can_conduct(&authority, &u, &r) {
         return Err(Failure(
             StatusCode::FORBIDDEN,
             "Transport authority required".into(),
@@ -1154,7 +1192,7 @@ async fn clip(
     if p.mode == Mode::Structured {
         return Err(bad("Structured projects use the shared transport"));
     }
-    if !matches!(r.as_str(), "owner" | "conductor")
+    if !can_conduct(&p, &u, &r)
         && !(p.mode == Mode::Freeform
             && p.parts
                 .iter()
@@ -1177,6 +1215,126 @@ async fn clip(
     )?;
     Ok(Json(json!({"ok":true})))
 }
+
+#[derive(Deserialize)]
+struct CueAction {
+    action: String,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    parts: Vec<String>,
+    #[serde(default)]
+    repeat: bool,
+    #[serde(default)]
+    count_in_pulses: Option<u8>,
+    #[serde(default)]
+    value: Option<u8>,
+}
+
+async fn cue(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(c): Json<CueAction>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    let r = role(&app, &id, &u)?;
+    let p = load(&app, &id)?;
+    if p.mode != Mode::Conducted {
+        return Err(bad("Cue groups are available in conducted projects"));
+    }
+    if !can_conduct(&p, &u, &r) {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "Conductor authority required".into(),
+        ));
+    }
+    if app.active.lock().unwrap().as_deref() != Some(&id) {
+        return Err(bad("Activate this project first"));
+    }
+    if c.parts.len() > 32
+        || c.request_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 128)
+        || c.parts
+            .iter()
+            .any(|part| !p.parts.iter().any(|candidate| &candidate.id == part))
+    {
+        return Err(bad("Cue contains an invalid part"));
+    }
+    let count_in = c.count_in_pulses.unwrap_or(p.conducted.count_in_pulses);
+    if count_in > 32 {
+        return Err(bad("Count-in must be 0–32 pulses"));
+    }
+    match c.action.as_str() {
+        "arm" | "unarm" => {
+            if c.parts.is_empty() {
+                return Err(bad("Select at least one part to arm"));
+            }
+            if c.action == "arm" {
+                let performers: std::collections::BTreeSet<_> = p
+                    .parts
+                    .iter()
+                    .filter(|part| c.parts.contains(&part.id))
+                    .filter_map(|part| part.performer.as_ref())
+                    .collect();
+                let conflicts = p
+                    .parts
+                    .iter()
+                    .filter(|part| !c.parts.contains(&part.id))
+                    .filter(|part| {
+                        part.performer
+                            .as_ref()
+                            .is_some_and(|id| performers.contains(id))
+                    })
+                    .map(|part| part.id.clone())
+                    .collect::<Vec<_>>();
+                if !conflicts.is_empty() {
+                    send(
+                        &app,
+                        audio::Command::Arm {
+                            parts: conflicts,
+                            armed: false,
+                        },
+                    )?;
+                }
+            }
+            send(
+                &app,
+                audio::Command::Arm {
+                    parts: c.parts,
+                    armed: c.action == "arm",
+                },
+            )?;
+        }
+        "start" | "stop" => send(
+            &app,
+            audio::Command::Cue {
+                request_id: c.request_id,
+                parts: c.parts,
+                playing: c.action == "start",
+                repeat: c.action == "start" && c.repeat,
+                count_in_pulses: if c.action == "start" { count_in } else { 0 },
+            },
+        )?,
+        "dynamic" => {
+            if c.value.is_some_and(|value| value > 127) {
+                return Err(bad("Dynamic value must be 0–127"));
+            }
+            send(
+                &app,
+                audio::Command::Dynamics {
+                    parts: c.parts,
+                    value: c.value,
+                },
+            )?;
+        }
+        _ => return Err(bad("Unknown cue action")),
+    }
+    Ok(Json(json!({"ok":true})))
+}
+
 #[derive(Deserialize)]
 struct Invite {
     role: String,
@@ -1356,7 +1514,12 @@ async fn remove_member(
     }
     let mut project = load(&app, &id)?;
     let changed = unassign_member_parts(&mut project, &target);
-    let prepared = if changed > 0 && app.graph.lock().unwrap().as_deref() == Some(&id) {
+    let conductor_changed = project.conductor.as_deref() == Some(&target);
+    if conductor_changed {
+        project.conductor = None;
+    }
+    let project_changed = changed > 0 || conductor_changed;
+    let prepared = if project_changed && app.graph.lock().unwrap().as_deref() == Some(&id) {
         let next = project.clone();
         Some(
             tokio::task::spawn_blocking(move || samples::prepare(&next))
@@ -1370,7 +1533,7 @@ async fn remove_member(
     {
         let mut db = app.db.lock().unwrap();
         let tx = db.transaction().map_err(internal)?;
-        if changed > 0 {
+        if project_changed {
             let previous = project.revision;
             project.revision += 1;
             let body = serde_json::to_string(&project).map_err(internal)?;
@@ -1409,7 +1572,7 @@ async fn remove_member(
             },
         )?;
     }
-    if changed > 0 {
+    if project_changed {
         publish(&app, &project);
     }
     app.media.close_project_user(&id, &target).await;
@@ -1844,6 +2007,47 @@ async fn send_project_snapshot(socket: &mut WebSocket, app: &App, id: &str, u: &
     socket_text(socket, status.to_string()).await.is_ok()
 }
 
+fn browser_midi_message(value: &Value) -> Option<pr0_core::midi::Message> {
+    let data = value.get("data")?.as_array()?;
+    if data.len() != 3 {
+        return None;
+    }
+    let status = u8::try_from(data[0].as_u64()?).ok()?;
+    let data1 = u8::try_from(data[1].as_u64()?).ok()?;
+    let data2 = u8::try_from(data[2].as_u64()?).ok()?;
+    ((0x80..=0xef).contains(&status) && data1 <= 127 && data2 <= 127).then_some(
+        pr0_core::midi::Message {
+            status,
+            data1,
+            data2,
+        },
+    )
+}
+
+#[cfg(test)]
+mod browser_midi_tests {
+    use super::*;
+
+    #[test]
+    fn browser_midi_accepts_only_bounded_channel_messages() {
+        let note = browser_midi_message(&json!({"data":[0x90,60,100]})).unwrap();
+        assert_eq!((note.status, note.data1, note.data2), (0x90, 60, 100));
+        assert!(browser_midi_message(&json!({"data":[0xf0,1,2]})).is_none());
+        assert!(browser_midi_message(&json!({"data":[0x90,128,2]})).is_none());
+        assert!(browser_midi_message(&json!({"data":[0x90,1]})).is_none());
+    }
+
+    #[test]
+    fn explicit_conductor_replaces_legacy_role_authority_but_owner_can_recover() {
+        let mut project =
+            pr0_core::demo_project("authority".into(), "Authority".into(), Mode::Conducted);
+        project.conductor = Some("alice".into());
+        assert!(can_conduct(&project, "alice", "performer"));
+        assert!(can_conduct(&project, "owner", "owner"));
+        assert!(!can_conduct(&project, "legacy", "conductor"));
+    }
+}
+
 async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers: HeaderMap) {
     let _presence = presence::Lease::join(&app, &id).await;
     // Subscribe before reading SQLite so concurrent commits are either in this
@@ -1856,10 +2060,54 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
     let mut last_received = tokio::time::Instant::now();
     let visualization_session = Uuid::new_v4().to_string();
     let mut visualizers = false;
+    let mut midi_window = tokio::time::Instant::now();
+    let mut midi_messages = 0_u16;
     loop {
         tokio::select! {
             event=events.recv()=>match event{Ok(mut v)=>{if v["type"]=="session_revoked" && v["user_id"]==u {let _=socket_text(&mut socket,v.to_string()).await;break;} if !visualizers{if let Some(o)=v.as_object_mut(){o.remove("visualizations");}}if (v["type"]=="hardware_levels" || v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || v.get("project_id").and_then(Value::as_str)==Some(&id))&&socket_text(&mut socket, v.to_string()).await.is_err(){break;}},Err(broadcast::error::RecvError::Lagged(_))=>{if !send_project_snapshot(&mut socket, &app, &id, &u).await {break;}},Err(_)=>break},
-            msg=socket.recv()=>match msg{Some(Ok(Message::Text(text)))=>{last_received=tokio::time::Instant::now();if let Ok(v)=serde_json::from_str::<Value>(&text){if v["type"]=="visualizers"{visualizers=v["enabled"]==true;let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:visualizers});}if v["type"]=="ping"{if visualizers{let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:true});}let _=socket_text(&mut socket, json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string()).await;}}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,Some(Ok(_))=>{last_received=tokio::time::Instant::now();}},
+            msg=socket.recv()=>match msg{
+                Some(Ok(Message::Text(text)))=>{
+                    last_received=tokio::time::Instant::now();
+                    if let Ok(v)=serde_json::from_str::<Value>(&text){
+                        if v["type"]=="visualizers"{
+                            visualizers=v["enabled"]==true;
+                            let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:visualizers});
+                        }
+                        if v["type"]=="ping"{
+                            if visualizers{let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:true});}
+                            let _=socket_text(&mut socket, json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string()).await;
+                        }
+                        if v["type"]=="performance_midi"{
+                            if midi_window.elapsed() >= Duration::from_secs(1) { midi_window=tokio::time::Instant::now();midi_messages=0; }
+                            midi_messages=midi_messages.saturating_add(1);
+                            let part=v["part"].as_str();
+                            let authorized=load(&app,&id).ok().is_some_and(|project| {
+                                project.mode != Mode::Structured && app.active.lock().unwrap().as_deref()==Some(&id)
+                                    && part.is_some_and(|part| project.parts.iter().any(|candidate| candidate.id==part && candidate.performer.as_deref()==Some(&u)))
+                            });
+                            if midi_messages<=2048 && authorized {
+                                if let (Some(part),Some(message))=(part,browser_midi_message(&v)) {
+                                    let _=send(&app,audio::Command::BrowserMidi{part:part.to_string(),message});
+                                }
+                            } else if !authorized {
+                                let _=socket_text(&mut socket,json!({"type":"midi_error","error":"MIDI target is not an active assigned performer part"}).to_string()).await;
+                            }
+                        }
+                        if v["type"]=="performance_midi_panic"{
+                            if let Ok(project)=load(&app,&id) {
+                                let parts=project.parts.iter().filter(|part| part.performer.as_deref()==Some(&u)).map(|part|part.id.clone()).collect();
+                                let _=send(&app,audio::Command::BrowserMidiPanic{parts});
+                            }
+                        }
+                        if v["type"]=="midi_devices" {
+                            let valid=v["devices"].as_array().is_some_and(|devices| devices.len()<=32 && devices.iter().all(|name|name.as_str().is_some_and(|name|name.len()<=120)));
+                            if valid { app.logs.push(&id,"info","Browser MIDI devices announced"); }
+                        }
+                    }
+                },
+                Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
+                Some(Ok(_))=>{last_received=tokio::time::Instant::now();}
+            },
             _=check.tick()=>{
                 if user(&app,&headers).is_err() || role(&app,&id,&u).is_err() || last_received.elapsed() >= Duration::from_secs(30) {break;}
                 if tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Ping(Vec::new().into()))).await.map_or(true, |r| r.is_err()) {break;}
@@ -1870,10 +2118,19 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
         &app,
         audio::Command::Visualizers {
             session: visualization_session,
-            project: id,
+            project: id.clone(),
             enabled: false,
         },
     );
+    if let Ok(project) = load(&app, &id) {
+        let parts = project
+            .parts
+            .iter()
+            .filter(|part| part.performer.as_deref() == Some(&u))
+            .map(|part| part.id.clone())
+            .collect();
+        let _ = send(&app, audio::Command::BrowserMidiPanic { parts });
+    }
 }
 
 #[tokio::main]
@@ -2057,6 +2314,7 @@ async fn main() {
             post(media::offer).delete(media::disconnect),
         )
         .route("/api/projects/{id}/clip", post(clip))
+        .route("/api/projects/{id}/cue", post(cue))
         .route(
             "/api/projects/{id}/samples",
             get(sample_library::list)

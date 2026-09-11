@@ -1,7 +1,7 @@
 //! Musical scheduling is driven by engine beats; external I/O runs on a separate worker.
 use pr0_core::Project;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::mpsc::{SyncSender, sync_channel},
 };
 
@@ -24,6 +24,15 @@ pub struct Lane {
     automation: Vec<crate::score_automation::Automation>,
     pub score_spans: Vec<pr0_core::score::Span>,
     pub looping: bool,
+    independent: bool,
+    pub armed: bool,
+    pub repeat_override: bool,
+    count_in_start: Option<f64>,
+    pending_repeat: bool,
+    meter_map: Vec<MeterScale>,
+    dynamic_override: Option<u8>,
+    browser_notes: [bool; 128],
+    performer: Option<String>,
     pub id: String,
     owner: u64,
     active: Vec<Option<(u8, u8)>>,
@@ -50,6 +59,75 @@ pub struct PartPlayback {
     start: f64,
     position: f64,
     pending: Option<(f64, bool)>,
+    armed: bool,
+    repeating: bool,
+    count_in_remaining: Option<u8>,
+    dynamic_override: Option<u8>,
+    queue_position: Option<u8>,
+    scheduled_start: Option<f64>,
+}
+#[derive(Clone, Copy, PartialEq)]
+struct MeterScale {
+    local_start: f64,
+    engine_start: f64,
+    scale: f64,
+}
+fn local_to_engine(map: &[MeterScale], beat: f64) -> f64 {
+    let segment = map
+        .iter()
+        .rev()
+        .find(|segment| segment.local_start <= beat + 1e-9)
+        .unwrap_or(&map[0]);
+    segment.engine_start + (beat - segment.local_start) * segment.scale
+}
+#[derive(Clone, Copy)]
+struct QueuedPart {
+    lane: usize,
+    repeat: bool,
+    at: f64,
+}
+struct PerformerQueue {
+    performer: String,
+    items: [Option<QueuedPart>; 32],
+    len: usize,
+}
+impl PerformerQueue {
+    fn push(&mut self, item: QueuedPart) {
+        if self.items[..self.len]
+            .iter()
+            .flatten()
+            .any(|queued| queued.lane == item.lane)
+        {
+            return;
+        }
+        if self.len < self.items.len() {
+            self.items[self.len] = Some(item);
+            self.len += 1;
+        }
+    }
+    fn pop(&mut self) -> Option<QueuedPart> {
+        let item = self.items[0].take();
+        self.items.copy_within(1..self.len, 0);
+        if self.len > 0 {
+            self.len -= 1;
+            self.items[self.len] = None;
+        }
+        item
+    }
+    fn peek(&self) -> Option<QueuedPart> {
+        self.items.first().copied().flatten()
+    }
+    fn remove(&mut self, lane: usize) {
+        let Some(index) = self.items[..self.len]
+            .iter()
+            .position(|item| item.is_some_and(|item| item.lane == lane))
+        else {
+            return;
+        };
+        self.items.copy_within(index + 1..self.len, index);
+        self.len -= 1;
+        self.items[self.len] = None;
+    }
 }
 pub struct Sequencer {
     autoplay: bool,
@@ -61,6 +139,9 @@ pub struct Sequencer {
     tempos: Vec<(f64, f64)>,
     meters: Vec<(f64, u8, u8)>,
     last_written: Option<f64>,
+    pulse_quarters: f64,
+    queues: Vec<PerformerQueue>,
+    recent_cues: VecDeque<String>,
 }
 pub enum External {
     Note {
@@ -70,6 +151,10 @@ pub enum External {
         address: String,
         pitch: u8,
         velocity: u8,
+    },
+    Message {
+        midi: String,
+        message: pr0_core::midi::Message,
     },
     Panic,
 }
@@ -209,6 +294,40 @@ impl Sequencer {
                             })
                     })
                     .collect();
+                if !autoplay && !part.performance_meters.is_empty() {
+                    let authored = part.performance_meters.clone();
+                    let fallback = pr0_core::score::MeterChange {
+                        beat: 0.,
+                        beats: p.beats_per_bar,
+                        unit: p.beat_unit,
+                    };
+                    let mut flattened = Vec::new();
+                    for span in &local_spans {
+                        let active = authored
+                            .iter()
+                            .filter(|meter| meter.beat <= span.start + 1e-9)
+                            .last()
+                            .unwrap_or(&fallback);
+                        flattened.push(pr0_core::score::MeterChange {
+                            beat: span.elapsed,
+                            beats: active.beats,
+                            unit: active.unit,
+                        });
+                        flattened.extend(
+                            authored
+                                .iter()
+                                .filter(|meter| {
+                                    meter.beat > span.start + 1e-9 && meter.beat < span.end - 1e-9
+                                })
+                                .map(|meter| pr0_core::score::MeterChange {
+                                    beat: span.elapsed + meter.beat - span.start,
+                                    beats: meter.beats,
+                                    unit: meter.unit,
+                                }),
+                        );
+                    }
+                    part.performance_meters = flattened;
+                }
                 part.loop_beats = elapsed.max(0.25);
                 part_spans.insert(part.id.clone(), local_spans);
             }
@@ -232,11 +351,64 @@ impl Sequencer {
             autoplay,
             tempos,
             last_written: None,
+            pulse_quarters: 4. / p.conducted.pulse_unit as f64,
+            queues: p
+                .parts
+                .iter()
+                .filter_map(|part| part.performer.as_ref())
+                .fold(Vec::<PerformerQueue>::new(), |mut queues, performer| {
+                    if !queues.iter().any(|queue| &queue.performer == performer) {
+                        queues.push(PerformerQueue {
+                            performer: performer.clone(),
+                            items: [None; 32],
+                            len: 0,
+                        });
+                    }
+                    queues
+                }),
+            recent_cues: VecDeque::with_capacity(64),
             lanes: prepared
                 .parts
                 .iter()
                 .enumerate()
                 .map(|(owner, p)| {
+                    let meter_map = if autoplay {
+                        vec![MeterScale {
+                            local_start: 0.,
+                            engine_start: 0.,
+                            scale: 1.,
+                        }]
+                    } else {
+                        let mut changes = p.performance_meters.clone();
+                        if changes.first().is_none_or(|meter| meter.beat != 0.) {
+                            changes.insert(
+                                0,
+                                pr0_core::score::MeterChange {
+                                    beat: 0.,
+                                    beats: prepared.initial_meter().0,
+                                    unit: prepared.initial_meter().1,
+                                },
+                            );
+                        }
+                        let mut engine_start = 0.;
+                        changes
+                            .iter()
+                            .enumerate()
+                            .map(|(index, meter)| {
+                                let scale = (4. / prepared.conducted.pulse_unit as f64)
+                                    / (4. / meter.unit as f64);
+                                let segment = MeterScale {
+                                    local_start: meter.beat,
+                                    engine_start,
+                                    scale,
+                                };
+                                if let Some(next) = changes.get(index + 1) {
+                                    engine_start += (next.beat - meter.beat) * scale;
+                                }
+                                segment
+                            })
+                            .collect()
+                    };
                     let mut events = Vec::new();
                     for (note_id, n) in p.notes.iter().enumerate() {
                         if n.rest || n.velocity == 0 || n.beat >= p.loop_beats {
@@ -244,13 +416,16 @@ impl Sequencer {
                         }
                         events.push(Event {
                             note_id: note_id as u32,
-                            beat: n.beat,
+                            beat: local_to_engine(&meter_map, n.beat),
                             pitch: n.pitch,
                             velocity: n.velocity,
                         });
                         events.push(Event {
                             note_id: note_id as u32,
-                            beat: (n.beat + n.duration).min(p.loop_beats),
+                            beat: local_to_engine(
+                                &meter_map,
+                                (n.beat + n.duration).min(p.loop_beats),
+                            ),
                             pitch: n.pitch,
                             velocity: 0,
                         });
@@ -258,6 +433,14 @@ impl Sequencer {
                     events.sort_by(|a, b| {
                         a.beat.total_cmp(&b.beat).then(a.velocity.cmp(&b.velocity))
                     });
+                    let ends = p
+                        .notes
+                        .iter()
+                        .map(|n| {
+                            local_to_engine(&meter_map, (n.beat + n.duration).min(p.loop_beats))
+                        })
+                        .collect();
+                    let lane_length = local_to_engine(&meter_map, p.loop_beats);
                     Lane {
                         routes: p
                             .notes
@@ -310,22 +493,27 @@ impl Sequencer {
                             }))
                             .collect(),
                         score_spans: part_spans.get(&p.id).cloned().unwrap_or_default(),
-                        looping: !autoplay || timeline.is_none_or(|s| s.loop_score),
+                        looping: autoplay && timeline.is_none_or(|s| s.loop_score),
+                        independent: !autoplay,
+                        armed: false,
+                        repeat_override: false,
+                        count_in_start: None,
+                        pending_repeat: false,
+                        meter_map,
+                        dynamic_override: None,
+                        browser_notes: [false; 128],
+                        performer: p.performer.clone(),
                         id: p.id.clone(),
                         owner: owner as u64 + 1,
                         active: vec![None; p.notes.len()],
                         suspended: vec![None; p.notes.len()],
-                        ends: p
-                            .notes
-                            .iter()
-                            .map(|n| (n.beat + n.duration).min(p.loop_beats))
-                            .collect(),
+                        ends,
                         node: p.instrument_node.clone(),
                         events,
                         next: 0,
                         cycle: 0,
                         start: 0.,
-                        length: p.loop_beats,
+                        length: lane_length,
                         playing: autoplay,
                         pending: None,
                         midi: p.midi_port.clone(),
@@ -426,11 +614,242 @@ impl Sequencer {
         engine: &mut pr0_dsp::Engine,
         io: &SyncSender<External>,
     ) {
-        if let Some(l) = self.lanes.iter_mut().find(|l| l.id == id) {
+        self.cue(&[id.to_string()], playing, false, 0, engine, io);
+    }
+    pub fn arm(&mut self, ids: &[String], armed: bool) {
+        for lane in &mut self.lanes {
+            if ids.contains(&lane.id) {
+                lane.armed = armed;
+            }
+        }
+    }
+    pub fn dynamics(
+        &mut self,
+        ids: &[String],
+        value: Option<u8>,
+        engine: &mut pr0_dsp::Engine,
+        io: &SyncSender<External>,
+    ) {
+        let use_group = ids.is_empty();
+        let has_armed = self.lanes.iter().any(|lane| lane.armed);
+        for lane in &mut self.lanes {
+            if !(ids.contains(&lane.id)
+                || (use_group && if has_armed { lane.armed } else { lane.playing }))
+            {
+                continue;
+            }
+            lane.dynamic_override = value;
+            let cc = value.unwrap_or(127);
+            let mut sent = std::collections::BTreeSet::new();
+            for route in &lane.routes {
+                if !sent.insert((route.staff, route.channel, route.midi.as_deref())) {
+                    continue;
+                }
+                let message = pr0_core::midi::Message {
+                    status: 0xb0 | (route.channel - 1),
+                    data1: 11,
+                    data2: cc,
+                };
+                engine.part_staff_message(&lane.id, route.staff, message);
+                if let Some(midi) = &route.midi {
+                    let _ = io.try_send(External::Message {
+                        midi: midi.clone(),
+                        message,
+                    });
+                }
+            }
+        }
+    }
+    pub fn browser_midi(
+        &mut self,
+        id: &str,
+        mut message: pr0_core::midi::Message,
+        engine: &mut pr0_dsp::Engine,
+        io: &SyncSender<External>,
+    ) {
+        let Some(lane) = self.lanes.iter_mut().find(|lane| lane.id == id) else {
+            return;
+        };
+        let kind = message.status & 0xf0;
+        if kind == 0x90 && message.data2 == 0 {
+            message.status = 0x80 | (message.status & 0x0f);
+        }
+        if message.status & 0xf0 == 0x90 {
+            let velocity = lane.dynamic_override.unwrap_or(message.data2);
+            message.data2 = velocity;
+            lane.browser_notes[message.data1 as usize] = true;
+            if let Some(node) = &lane.node {
+                engine.note_scoped(
+                    node,
+                    lane.owner,
+                    1_000_000 + message.data1 as u32,
+                    message.data1,
+                    velocity,
+                );
+            }
+        } else if message.status & 0xf0 == 0x80 {
+            lane.browser_notes[message.data1 as usize] = false;
+            if let Some(node) = &lane.node {
+                engine.note_scoped(
+                    node,
+                    lane.owner,
+                    1_000_000 + message.data1 as u32,
+                    message.data1,
+                    0,
+                );
+            }
+        }
+        engine.part_message(&lane.id, message);
+        if let Some(midi) = &lane.midi {
+            let _ = io.try_send(External::Message {
+                midi: midi.clone(),
+                message,
+            });
+        }
+    }
+    pub fn browser_midi_panic(
+        &mut self,
+        ids: &[String],
+        engine: &mut pr0_dsp::Engine,
+        io: &SyncSender<External>,
+    ) {
+        for lane in &mut self.lanes {
+            if !ids.contains(&lane.id) {
+                continue;
+            }
+            for pitch in 0..128 {
+                if !lane.browser_notes[pitch] {
+                    continue;
+                }
+                lane.browser_notes[pitch] = false;
+                if let Some(node) = &lane.node {
+                    engine.note_scoped(node, lane.owner, 1_000_000 + pitch as u32, pitch as u8, 0);
+                }
+                engine.part_message(
+                    &lane.id,
+                    pr0_core::midi::Message {
+                        status: 0x80 | (lane.midi_channel.saturating_sub(1)),
+                        data1: pitch as u8,
+                        data2: 0,
+                    },
+                );
+            }
+            if let Some(midi) = &lane.midi {
+                let _ = io.try_send(External::Message {
+                    midi: midi.clone(),
+                    message: pr0_core::midi::Message {
+                        status: 0xb0 | (lane.midi_channel.saturating_sub(1)),
+                        data1: 123,
+                        data2: 0,
+                    },
+                });
+            }
+        }
+    }
+    pub fn cue(
+        &mut self,
+        ids: &[String],
+        playing: bool,
+        repeat: bool,
+        count_in_pulses: u8,
+        engine: &mut pr0_dsp::Engine,
+        io: &SyncSender<External>,
+    ) {
+        self.cue_request(None, ids, playing, repeat, count_in_pulses, engine, io)
+    }
+    pub fn cue_request(
+        &mut self,
+        request_id: Option<String>,
+        ids: &[String],
+        playing: bool,
+        repeat: bool,
+        count_in_pulses: u8,
+        engine: &mut pr0_dsp::Engine,
+        io: &SyncSender<External>,
+    ) {
+        if let Some(request_id) = request_id {
+            if self.recent_cues.contains(&request_id) {
+                return;
+            }
+            if self.recent_cues.len() == 64 {
+                self.recent_cues.pop_front();
+            }
+            self.recent_cues.push_back(request_id);
+        }
+        let pulse = self.pulse_quarters;
+        let boundary = if engine.clock.running {
+            ((engine.clock.beat / pulse).floor() + 1.) * pulse
+        } else {
+            engine.clock.beat
+        };
+        let use_armed = ids.is_empty();
+        for index in 0..self.lanes.len() {
+            if !(ids.contains(&self.lanes[index].id) || (use_armed && self.lanes[index].armed)) {
+                continue;
+            }
+            self.lanes[index].armed = false;
+            if playing {
+                if let Some(performer) = self.lanes[index].performer.clone() {
+                    if let Some(active) = self.lanes.iter().position(|lane| {
+                        lane.id != self.lanes[index].id
+                            && lane.performer.as_deref() == Some(performer.as_str())
+                            && (lane.playing || lane.pending.is_some_and(|pending| pending.1))
+                    }) {
+                        let active_lane = &self.lanes[active];
+                        let active_end = if let Some((at, true)) = active_lane.pending {
+                            at + active_lane.length
+                        } else if active_lane.looping {
+                            let cycles = ((boundary - active_lane.start) / active_lane.length)
+                                .ceil()
+                                .max(1.);
+                            active_lane.start + cycles * active_lane.length
+                        } else {
+                            active_lane.start + active_lane.length
+                        };
+                        let queue_end = self
+                            .queues
+                            .iter()
+                            .find(|queue| queue.performer == performer)
+                            .and_then(|queue| queue.items[..queue.len].iter().flatten().last())
+                            .map(|queued| queued.at + self.lanes[queued.lane].length)
+                            .unwrap_or(active_end);
+                        let scheduled = boundary.max(active_end).max(queue_end);
+                        if self.lanes[active].repeat_override {
+                            self.lanes[active].repeat_override = false;
+                            self.lanes[active].pending = Some((scheduled, false));
+                        }
+                        if let Some(queue) =
+                            self.queues.iter_mut().find(|q| q.performer == performer)
+                        {
+                            queue.push(QueuedPart {
+                                lane: index,
+                                repeat,
+                                at: scheduled,
+                            });
+                        }
+                        continue;
+                    }
+                }
+            }
+            if !playing {
+                for queue in &mut self.queues {
+                    queue.remove(index);
+                }
+            }
+            let lane = &mut self.lanes[index];
             if engine.clock.running {
-                l.pending = Some((engine.clock.beat.floor() + 1., playing));
+                let start = boundary
+                    + if playing {
+                        count_in_pulses as f64 * pulse
+                    } else {
+                        0.
+                    };
+                lane.pending = Some((start, playing));
+                lane.pending_repeat = repeat;
+                lane.count_in_start = (playing && count_in_pulses > 0).then_some(boundary);
             } else {
-                l.apply(playing, engine.clock.beat, engine, io);
+                lane.pending_repeat = repeat;
+                lane.apply(playing, engine.clock.beat, engine, io);
             }
         }
     }
@@ -442,11 +861,11 @@ impl Sequencer {
         if lane.score_spans.is_empty() {
             return beat;
         }
-        let elapsed = if lane.looping {
+        let elapsed = lane.engine_to_local(if lane.looping {
             (beat - lane.start).rem_euclid(lane.length)
         } else {
             (beat - lane.start).min(lane.length)
-        };
+        });
         lane.score_spans
             .iter()
             .find(|s| elapsed < s.elapsed + s.end - s.start)
@@ -499,6 +918,17 @@ impl Sequencer {
         }
     }
     pub fn reset(&mut self, engine: &mut pr0_dsp::Engine, io: &SyncSender<External>) {
+        let browser_parts: Vec<_> = self
+            .lanes
+            .iter()
+            .filter(|lane| lane.browser_notes.iter().any(|held| *held))
+            .map(|lane| lane.id.clone())
+            .collect();
+        self.browser_midi_panic(&browser_parts, engine, io);
+        for queue in &mut self.queues {
+            queue.items.fill(None);
+            queue.len = 0;
+        }
         for lane in &mut self.lanes {
             lane.release(engine, io);
             lane.suspended.fill(None);
@@ -507,6 +937,10 @@ impl Sequencer {
             lane.start = 0.;
             lane.playing = self.autoplay;
             lane.pending = None;
+            lane.armed = false;
+            lane.repeat_override = false;
+            lane.count_in_start = None;
+            lane.pending_repeat = false;
         }
         self.last_beat = 0.;
         self.last_running = false;
@@ -523,13 +957,14 @@ impl Sequencer {
     pub fn playback(&self, beat: f64) -> Vec<PartPlayback> {
         self.lanes
             .iter()
-            .map(|l| PartPlayback {
+            .enumerate()
+            .map(|(lane_index, l)| PartPlayback {
                 position_end: {
-                    let elapsed = if l.looping {
+                    let elapsed = l.engine_to_local(if l.looping {
                         (beat - l.start).max(0.).rem_euclid(l.length)
                     } else {
                         (beat - l.start).max(0.).min(l.length)
-                    };
+                    });
                     l.score_spans
                         .iter()
                         .find(|s| elapsed < s.elapsed + s.end - s.start)
@@ -540,11 +975,11 @@ impl Sequencer {
                 playing: l.playing,
                 start: l.start,
                 position: if l.playing {
-                    let elapsed = if l.looping {
+                    let elapsed = l.engine_to_local(if l.looping {
                         (beat - l.start).max(0.).rem_euclid(l.length)
                     } else {
                         (beat - l.start).max(0.).min(l.length)
-                    };
+                    });
                     l.score_spans
                         .iter()
                         .find(|s| elapsed < s.elapsed + s.end - s.start)
@@ -554,8 +989,51 @@ impl Sequencer {
                     0.
                 },
                 pending: l.pending,
+                armed: l.armed,
+                repeating: l.repeat_override,
+                count_in_remaining: l.pending.and_then(|(at, playing)| {
+                    let start = l.count_in_start?;
+                    (playing && beat >= start && beat < at)
+                        .then(|| ((at - beat) / self.pulse_quarters).ceil().max(1.) as u8)
+                }),
+                dynamic_override: l.dynamic_override,
+                queue_position: self.queues.iter().find_map(|queue| {
+                    queue.items[..queue.len]
+                        .iter()
+                        .position(|item| item.is_some_and(|item| item.lane == lane_index))
+                        .map(|index| index as u8 + 1)
+                }),
+                scheduled_start: self.queues.iter().find_map(|queue| {
+                    queue.items[..queue.len]
+                        .iter()
+                        .flatten()
+                        .find(|item| item.lane == lane_index)
+                        .map(|item| item.at)
+                }),
             })
             .collect()
+    }
+    pub fn cue_count_in(&self, beat: f64) -> bool {
+        self.lanes.iter().any(|lane| {
+            lane.count_in_start.is_some_and(|start| {
+                lane.pending
+                    .is_some_and(|(at, playing)| playing && beat >= start && beat < at)
+            })
+        })
+    }
+    pub fn cue_count_in_for_part(&self, beat: f64, part: &str) -> bool {
+        let performer = self
+            .lanes
+            .iter()
+            .find(|lane| lane.id == part)
+            .and_then(|lane| lane.performer.as_deref());
+        self.lanes.iter().any(|lane| {
+            (lane.id == part || performer.is_some() && lane.performer.as_deref() == performer)
+                && lane.count_in_start.is_some_and(|start| {
+                    lane.pending
+                        .is_some_and(|(at, playing)| playing && beat >= start && beat < at)
+                })
+        })
     }
     pub fn tick(&mut self, engine: &mut pr0_dsp::Engine, io: &SyncSender<External>) {
         let mut beat = engine.clock.beat;
@@ -619,12 +1097,34 @@ impl Sequencer {
                     lane.apply(playing, boundary, engine, io);
                 }
             }
+            if lane.playing && !lane.looping && beat + 1e-9 >= lane.start + lane.length {
+                lane.release(engine, io);
+                lane.playing = false;
+                lane.repeat_override = false;
+                lane.next = 0;
+                lane.cycle = 0;
+            }
+        }
+        for queue in &mut self.queues {
+            let busy = self.lanes.iter().any(|lane| {
+                lane.performer.as_deref() == Some(queue.performer.as_str())
+                    && (lane.playing || lane.pending.is_some_and(|pending| pending.1))
+            });
+            if !busy && queue.peek().is_some_and(|next| beat + 1e-9 >= next.at) {
+                if let Some(next) = queue.pop() {
+                    let lane = &mut self.lanes[next.lane];
+                    lane.pending_repeat = next.repeat;
+                    lane.apply(true, next.at, engine, io);
+                }
+            }
+        }
+        for lane in &mut self.lanes {
             if lane.playing && beat >= lane.start {
-                let elapsed = if lane.looping {
+                let elapsed = lane.engine_to_local(if lane.looping {
                     (beat - lane.start).rem_euclid(lane.length)
                 } else {
                     (beat - lane.start).min(lane.length)
-                };
+                });
                 let position = lane
                     .score_spans
                     .iter()
@@ -660,21 +1160,26 @@ impl Sequencer {
                     continue;
                 }
                 let route = &lane.routes[e.note_id as usize];
+                let velocity = if e.velocity > 0 {
+                    lane.dynamic_override.unwrap_or(e.velocity)
+                } else {
+                    0
+                };
                 if let Some(node) = &route.node {
-                    engine.note_scoped(node, lane.owner, e.note_id, e.pitch, e.velocity);
+                    engine.note_scoped(node, lane.owner, e.note_id, e.pitch, velocity);
                 }
-                engine.part_staff_note(&lane.id, route.staff, e.pitch, e.velocity);
+                engine.part_staff_note(&lane.id, route.staff, e.pitch, velocity);
                 engine.part_staff_message(
                     &lane.id,
                     route.staff,
                     pr0_core::midi::Message {
-                        status: (if e.velocity == 0 { 0x80 } else { 0x90 }) | (route.channel - 1),
+                        status: (if velocity == 0 { 0x80 } else { 0x90 }) | (route.channel - 1),
                         data1: e.pitch,
-                        data2: e.velocity,
+                        data2: velocity,
                     },
                 );
-                lane.active[e.note_id as usize] = if e.velocity > 0 {
-                    Some((e.pitch, e.velocity))
+                lane.active[e.note_id as usize] = if velocity > 0 {
+                    Some((e.pitch, velocity))
                 } else {
                     None
                 };
@@ -685,7 +1190,7 @@ impl Sequencer {
                         osc: lane.osc.clone(),
                         address: lane.address.clone(),
                         pitch: e.pitch,
-                        velocity: e.velocity,
+                        velocity,
                     });
                 }
                 lane.next += 1;
@@ -694,6 +1199,16 @@ impl Sequencer {
     }
 }
 impl Lane {
+    fn engine_to_local(&self, elapsed: f64) -> f64 {
+        let segment = self
+            .meter_map
+            .iter()
+            .rev()
+            .find(|segment| segment.engine_start <= elapsed + 1e-9)
+            .unwrap_or(&self.meter_map[0]);
+        segment.local_start + (elapsed - segment.engine_start) / segment.scale
+    }
+
     fn automation_tick(&mut self, position: f64, engine: &mut pr0_dsp::Engine) {
         for index in 0..self.automation.len() {
             let a = &self.automation[index];
@@ -739,10 +1254,16 @@ impl Lane {
         self.release(engine, io);
         self.suspended.fill(None);
         self.playing = playing;
+        if self.independent {
+            self.looping = playing && self.pending_repeat;
+            self.repeat_override = self.looping;
+        }
         self.start = start;
         self.next = 0;
         self.cycle = 0;
         self.pending = None;
+        self.pending_repeat = false;
+        self.count_in_start = None;
     }
 
     fn resume(&mut self, beat: f64, engine: &mut pr0_dsp::Engine, io: &SyncSender<External>) {
@@ -915,6 +1436,27 @@ pub fn external_worker(socket: std::sync::Arc<crate::osc::Runtime>) -> SyncSende
                             ) {
                                 send_osc(&socket, destination, &address, pitch, velocity);
                             }
+                        }
+                    }
+                    External::Message {
+                        midi: port,
+                        message,
+                    } => {
+                        if !midi.contains_key(&port) {
+                            if let Ok(output) = midir::MidiOutput::new("pr0former") {
+                                if let Some(p) = output
+                                    .ports()
+                                    .iter()
+                                    .find(|p| output.port_name(p).ok().as_deref() == Some(&port))
+                                {
+                                    if let Ok(c) = output.connect(p, "pr0former performance") {
+                                        midi.insert(port.clone(), c);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(c) = midi.get_mut(&port) {
+                            let _ = c.send(&[message.status, message.data1, message.data2]);
                         }
                     }
                     External::Panic => {
@@ -1466,8 +2008,161 @@ mod score_tests {
         });
         let seq = Sequencer::new(&p);
         assert!(!seq.lanes[0].playing);
-        assert!(seq.lanes[0].looping);
+        assert!(!seq.lanes[0].looping);
         assert_eq!(seq.lanes[0].length, 8.);
+    }
+    #[test]
+    fn conducted_cues_use_the_global_pulse_count_in_and_finish_one_shot() {
+        let mut p = pr0_core::demo_project("cue".into(), "Cue".into(), pr0_core::Mode::Conducted);
+        p.conducted.pulse_unit = 8;
+        p.parts[0].loop_beats = 2.;
+        p.parts[0].performer = Some("player".into());
+        let mut sibling = p.parts[0].clone();
+        sibling.id = "same-performer".into();
+        p.parts.push(sibling);
+        let mut engine = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let (tx, _) = sync_channel(256);
+        let mut seq = Sequencer::new(&p);
+        engine.clock.running = true;
+        engine.clock.beat = 0.1;
+        seq.cue(&[p.parts[0].id.clone()], true, false, 2, &mut engine, &tx);
+        assert_eq!(seq.playback(0.5)[0].count_in_remaining, Some(2));
+        assert!(seq.cue_count_in_for_part(0.5, "same-performer"));
+        assert_eq!(seq.playback(1.0)[0].count_in_remaining, Some(1));
+        engine.clock.beat = 1.5;
+        seq.tick(&mut engine, &tx);
+        assert!(seq.playback(1.5)[0].playing);
+        assert!(!seq.playback(1.5)[0].repeating);
+        engine.clock.beat = 2.5;
+        seq.tick(&mut engine, &tx);
+        assert!(!seq.playback(2.5)[0].playing);
+    }
+    #[test]
+    fn busy_performer_gets_a_bounded_successor_queue() {
+        let mut p =
+            pr0_core::demo_project("queue".into(), "Queue".into(), pr0_core::Mode::Conducted);
+        p.parts[0].performer = Some("player".into());
+        p.parts[0].loop_beats = 1.;
+        let mut second = p.parts[0].clone();
+        second.id = "second".into();
+        p.parts.push(second);
+        let mut engine = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let (tx, _) = sync_channel(256);
+        let mut seq = Sequencer::new(&p);
+        engine.clock.running = true;
+        engine.clock.beat = 0.1;
+        seq.cue(&[p.parts[0].id.clone()], true, false, 0, &mut engine, &tx);
+        engine.clock.beat = 1.;
+        seq.tick(&mut engine, &tx);
+        seq.cue(&["second".into()], true, false, 0, &mut engine, &tx);
+        assert_eq!(seq.playback(1.)[1].queue_position, Some(1));
+        assert_eq!(seq.playback(1.)[1].scheduled_start, Some(2.));
+        // Stopping the current part early does not pull its successor off the
+        // already communicated boundary.
+        seq.cue(&[p.parts[0].id.clone()], false, false, 0, &mut engine, &tx);
+        engine.clock.beat = 1.5;
+        seq.tick(&mut engine, &tx);
+        assert!(!seq.playback(1.5)[1].playing);
+        engine.clock.beat = 2.;
+        seq.tick(&mut engine, &tx);
+        let state = seq.playback(2.);
+        assert!(!state[0].playing);
+        assert!(state[1].playing);
+    }
+    #[test]
+    fn repeating_part_exits_at_its_cycle_boundary_for_a_successor() {
+        let mut p = pr0_core::demo_project(
+            "repeat-queue".into(),
+            "Repeat queue".into(),
+            pr0_core::Mode::Conducted,
+        );
+        p.score = None;
+        p.parts[0].performer = Some("player".into());
+        p.parts[0].loop_beats = 1.;
+        let mut second = p.parts[0].clone();
+        second.id = "successor".into();
+        p.parts.push(second);
+        let mut engine = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let (tx, _) = sync_channel(256);
+        let mut seq = Sequencer::new(&p);
+        engine.clock.running = true;
+        engine.clock.beat = 0.1;
+        seq.cue(&[p.parts[0].id.clone()], true, true, 0, &mut engine, &tx);
+        engine.clock.beat = 1.;
+        seq.tick(&mut engine, &tx);
+        engine.clock.beat = 2.1;
+        seq.tick(&mut engine, &tx);
+        seq.cue(&["successor".into()], true, false, 0, &mut engine, &tx);
+        assert_eq!(seq.playback(2.1)[1].scheduled_start, Some(3.));
+        engine.clock.beat = 2.9;
+        seq.tick(&mut engine, &tx);
+        assert!(seq.playback(2.9)[0].playing);
+        engine.clock.beat = 3.;
+        seq.tick(&mut engine, &tx);
+        let state = seq.playback(3.);
+        assert!(!state[0].playing);
+        assert!(state[1].playing);
+    }
+    #[test]
+    fn conducted_meter_changes_map_each_local_beat_to_the_global_pulse() {
+        let mut p =
+            pr0_core::demo_project("meter".into(), "Meter".into(), pr0_core::Mode::Conducted);
+        p.conducted.pulse_unit = 4;
+        p.score = None;
+        p.parts[0].loop_beats = 4.;
+        p.parts[0].performance_meters = vec![
+            MeterChange {
+                beat: 0.,
+                beats: 2,
+                unit: 4,
+            },
+            MeterChange {
+                beat: 2.,
+                beats: 4,
+                unit: 8,
+            },
+        ];
+        let seq = Sequencer::new(&p);
+        assert_eq!(seq.lanes[0].length, 6.);
+        assert_eq!(seq.playback(4.)[0].position, 0.);
+
+        let mut engine = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let (tx, _) = sync_channel(256);
+        let mut seq = Sequencer::new(&p);
+        engine.clock.running = true;
+        seq.cue(&[p.parts[0].id.clone()], true, false, 0, &mut engine, &tx);
+        engine.clock.beat = 1.;
+        seq.tick(&mut engine, &tx);
+        assert_eq!(seq.playback(5.)[0].position, 3.);
+    }
+    #[test]
+    fn browser_midi_is_bounded_to_a_part_and_panics_held_notes() {
+        let mut p = pr0_core::demo_project(
+            "browser-midi".into(),
+            "Browser MIDI".into(),
+            pr0_core::Mode::Conducted,
+        );
+        p.parts[0].midi_port = Some("test-port".into());
+        let mut engine = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let (tx, rx) = sync_channel(256);
+        let mut seq = Sequencer::new(&p);
+        seq.browser_midi(
+            &p.parts[0].id,
+            pr0_core::midi::Message {
+                status: 0x90,
+                data1: 64,
+                data2: 110,
+            },
+            &mut engine,
+            &tx,
+        );
+        assert!(seq.lanes[0].browser_notes[64]);
+        assert!(
+            matches!(rx.try_recv(), Ok(External::Message { message, .. }) if message.data1 == 64 && message.data2 == 110)
+        );
+        seq.browser_midi_panic(&[p.parts[0].id.clone()], &mut engine, &tx);
+        assert!(!seq.lanes[0].browser_notes[64]);
+        assert!(rx.try_iter().any(|event| matches!(event, External::Message { message, .. } if message.status & 0xf0 == 0xb0 && message.data1 == 123)));
     }
     #[test]
     fn staff_dynamics_scale_only_that_staff_and_override_part_dynamics() {

@@ -428,6 +428,8 @@ const selected = ref(new Set<string>()),
 const performanceSelection = computed(() =>
   props.performance ? new Set<string>() : selected.value,
 )
+function performanceMeter(part:Part){return props.performance&&doc.value.mode==='conducted'?(part.performance_meters?.find(m=>m.beat===0)||{beat:0,beats:doc.value.beats_per_bar,unit:doc.value.beat_unit||4}):null}
+function displayTimeline(part:Part){const meter=performanceMeter(part);if(!meter)return doc.value.score;if(doc.value.score)return {...doc.value.score,meters:part.performance_meters?.length?part.performance_meters:[meter]};return {version:1 as const,length:part.loop_beats,loop_score:false,meters:part.performance_meters?.length?part.performance_meters:[meter],keys:[],repeats:[],tempos:[]}}
 watch(
   () => props.performance,
   (locked) => {
@@ -1115,6 +1117,7 @@ function deletePart() {
   if (!target || !canEdit.value) return
   const next = clone(doc.value)
   next.parts = next.parts.filter((p) => p.id !== target.id)
+  for (const set of next.conducted?.sets || []) set.parts = set.parts.filter(id => id !== target.id)
   for (const n of next.graph.nodes) if (n.part_id === target.id) n.part_id = null
   void commit(next).then((ok) => {
     if (!ok) return
@@ -3410,13 +3413,13 @@ watch(
                     :part="p"
                     :staff="s"
                     :length="length"
-                    :bar-length="barLength"
-                    :beats-per-bar="doc.beats_per_bar"
-                    :beat-unit="doc.beat_unit || 4"
+                    :bar-length="performanceMeter(p)?performanceMeter(p)!.beats*4/performanceMeter(p)!.unit:barLength"
+                    :beats-per-bar="performanceMeter(p)?.beats||doc.beats_per_bar"
+                    :beat-unit="performanceMeter(p)?.unit||doc.beat_unit||4"
                     :scale="scale"
                     :origin="origin"
                     :anchors="anchors"
-                    :timeline="doc.score"
+                    :timeline="displayTimeline(p)"
                     :view-start="viewportStart"
                     :view-end="viewportEnd"
                     :selected="performanceSelection"

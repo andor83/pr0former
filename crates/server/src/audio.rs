@@ -101,6 +101,28 @@ pub enum Command {
         part: String,
         playing: bool,
     },
+    Arm {
+        parts: Vec<String>,
+        armed: bool,
+    },
+    Cue {
+        request_id: Option<String>,
+        parts: Vec<String>,
+        playing: bool,
+        repeat: bool,
+        count_in_pulses: u8,
+    },
+    Dynamics {
+        parts: Vec<String>,
+        value: Option<u8>,
+    },
+    BrowserMidi {
+        part: String,
+        message: pr0_core::midi::Message,
+    },
+    BrowserMidiPanic {
+        parts: Vec<String>,
+    },
     BrowserInput {
         node: String,
         pcm: Vec<[f32; 2]>,
@@ -162,6 +184,7 @@ fn run(
     let mut count_in: Option<pr0_dsp::count_in::CountIn> = None;
     let mut metronome = false;
     let mut metro = pr0_dsp::count_in::Metronome::new();
+    let mut cue_metro = pr0_dsp::count_in::Metronome::new();
     let mut device_error = String::new();
     let mut browser: std::collections::BTreeMap<String, std::collections::VecDeque<[f32; 2]>> =
         std::collections::BTreeMap::new();
@@ -201,7 +224,11 @@ fn run(
                 Command::Parameter { .. } => Some("Parameter updated"),
                 Command::Transport { action, .. } => Some(action.as_str()),
                 Command::Tempo(_) => Some("Tempo change queued"),
-                Command::Clip { .. } => Some("Part cue queued"),
+                Command::Clip { .. } | Command::Cue { .. } => Some("Part cue queued"),
+                Command::Arm { .. } => Some("Part arm state changed"),
+                Command::Dynamics { .. } => Some("Live dynamics changed"),
+                Command::BrowserMidi { .. } => None,
+                Command::BrowserMidiPanic { .. } => Some("Browser MIDI notes released"),
                 Command::Hardware(_) => Some("Output state requested"),
                 Command::Test(_) => Some("Latency metronome state changed"),
                 _ => None,
@@ -347,6 +374,45 @@ fn run(
                 Command::Clip { part, playing } => {
                     if let (Some(seq), Some(e)) = (&mut sequencer, &mut engine) {
                         seq.launch(&part, playing, e, &io);
+                    }
+                }
+                Command::Arm { parts, armed } => {
+                    if let Some(seq) = &mut sequencer {
+                        seq.arm(&parts, armed);
+                    }
+                }
+                Command::Cue {
+                    request_id,
+                    parts,
+                    playing,
+                    repeat,
+                    count_in_pulses,
+                } => {
+                    if let (Some(seq), Some(e)) = (&mut sequencer, &mut engine) {
+                        seq.cue_request(
+                            request_id,
+                            &parts,
+                            playing,
+                            repeat,
+                            count_in_pulses,
+                            e,
+                            &io,
+                        );
+                    }
+                }
+                Command::Dynamics { parts, value } => {
+                    if let (Some(seq), Some(e)) = (&mut sequencer, &mut engine) {
+                        seq.dynamics(&parts, value, e, &io);
+                    }
+                }
+                Command::BrowserMidi { part, message } => {
+                    if let (Some(seq), Some(e)) = (&mut sequencer, &mut engine) {
+                        seq.browser_midi(&part, message, e, &io);
+                    }
+                }
+                Command::BrowserMidiPanic { parts } => {
+                    if let (Some(seq), Some(e)) = (&mut sequencer, &mut engine) {
+                        seq.browser_midi_panic(&parts, e, &io);
                     }
                 }
                 Command::BrowserInput { node, pcm } => {
@@ -781,6 +847,9 @@ fn run(
                 if let Some(seq) = &mut sequencer {
                     seq.tick(e, &io);
                 }
+                let cue_count_in = sequencer
+                    .as_ref()
+                    .is_some_and(|s| s.cue_count_in(e.clock.beat));
                 let metro_click = if metronome {
                     let (position, origin, beats, unit) = sequencer
                         .as_ref()
@@ -789,6 +858,16 @@ fn run(
                     metro.next_at(&e.clock, position, origin, beats, unit)
                 } else {
                     metro = pr0_dsp::count_in::Metronome::new();
+                    None
+                };
+                let cue_click = if cue_count_in {
+                    let unit = project
+                        .as_ref()
+                        .map(|p| p.conducted.pulse_unit)
+                        .unwrap_or(4);
+                    cue_metro.next_at(&e.clock, e.clock.beat, 0., 1, unit)
+                } else {
+                    cue_metro = pr0_dsp::count_in::Metronome::new();
                     None
                 };
                 let click = match (count_click, metro_click) {
@@ -860,9 +939,30 @@ fn run(
                             *ch += click;
                         }
                     }
+                    if let Some(cue_click) = cue_click {
+                        let receives_cue = project.as_ref().is_some_and(|project| {
+                            project
+                                .graph
+                                .nodes
+                                .iter()
+                                .find(|node| node.id == *id)
+                                .and_then(|node| node.part_id.as_deref())
+                                .is_some_and(|part| {
+                                    sequencer.as_ref().is_some_and(|seq| {
+                                        seq.cue_count_in_for_part(e.clock.beat, part)
+                                    })
+                                })
+                        });
+                        if receives_cue {
+                            for ch in &mut sample {
+                                *ch += cue_click;
+                            }
+                        }
+                    }
                     pcm.extend_from_slice(&sample);
                 }
-                // Count-in clicks join browser monitors; the development graph keeps running.
+                // Shared transport/metronome clicks join every browser monitor. Conducted
+                // cue clicks are added only to a part-associated dedicated feed above.
                 if let Some(click) = click {
                     for ch in frame {
                         *ch += click;

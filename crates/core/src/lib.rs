@@ -121,7 +121,7 @@ pub struct IoConfig {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
-    /// Source score part for a part_midi control node; absent means silent.
+    /// Source score part for part_midi, or performer association for monitor_output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,6 +193,10 @@ pub struct Part {
     pub show_time_signature: bool,
     pub notes: Vec<Note>,
     pub loop_beats: f64,
+    /// Part-local meter map used by conducted performer lanes. Written positions
+    /// remain quarter-note beats; an empty map inherits the project meter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub performance_meters: Vec<score::MeterChange>,
     pub instrument_node: Option<String>,
     #[serde(default)]
     pub midi_port: Option<String>,
@@ -202,6 +206,44 @@ pub struct Part {
     pub osc_destination: Option<String>,
     #[serde(default = "default_osc")]
     pub osc_address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConductedSet {
+    pub id: String,
+    pub name: String,
+    /// Canonical tile order. A part may appear in more than one set.
+    #[serde(default)]
+    pub parts: Vec<String>,
+}
+
+fn default_count_in_pulses() -> u8 {
+    4
+}
+
+fn default_pulse_unit() -> u8 {
+    4
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConductedLayout {
+    #[serde(default = "default_count_in_pulses")]
+    pub count_in_pulses: u8,
+    /// Denominator of the constant conducting pulse.
+    #[serde(default = "default_pulse_unit")]
+    pub pulse_unit: u8,
+    #[serde(default)]
+    pub sets: Vec<ConductedSet>,
+}
+
+impl Default for ConductedLayout {
+    fn default() -> Self {
+        Self {
+            count_in_pulses: default_count_in_pulses(),
+            pulse_unit: default_pulse_unit(),
+            sets: Vec::new(),
+        }
+    }
 }
 fn default_midi_channel() -> u8 {
     1
@@ -228,6 +270,12 @@ pub struct Project {
     pub beats_per_bar: u8,
     #[serde(default = "default_beat_unit")]
     pub beat_unit: u8,
+    /// The designated performance conductor. Membership and assignment rules
+    /// are validated by the server because they depend on ensemble records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductor: Option<String>,
+    #[serde(default)]
+    pub conducted: ConductedLayout,
     pub graph: Graph,
     pub parts: Vec<Part>,
 }
@@ -598,8 +646,14 @@ pub fn catalog() -> Vec<Descriptor> {
         vec![port("a", Audio)],
         vec![port("out", Audio)],
         vec![
-            Parameter { structural: true, ..param("asset", "Sample ID", "", 0., 1000000000., 0.) },
-            Parameter { structural: true, ..param("window", "Window size", "samples", 128., 2048., 256.) },
+            Parameter {
+                structural: true,
+                ..param("asset", "Sample ID", "", 0., 1000000000., 0.)
+            },
+            Parameter {
+                structural: true,
+                ..param("window", "Window size", "samples", 128., 2048., 256.)
+            },
             param("normalize", "Normalize response", "", 0., 1., 1.),
             param("mix", "Wet/dry", "", 0., 1., 1.),
         ],
@@ -1878,8 +1932,11 @@ impl Graph {
                 return Err("Piano octave must be a whole number".into());
             }
             if let Some(part) = &n.part_id {
-                if n.kind != "part_midi" || part.is_empty() || part.len() > 256 {
-                    return Err("A source part belongs only to a Part MIDI node and must be a valid part ID".into());
+                if !matches!(n.kind.as_str(), "part_midi" | "monitor_output")
+                    || part.is_empty()
+                    || part.len() > 256
+                {
+                    return Err("A part association belongs only to a Part MIDI or Monitor output node and must be a valid part ID".into());
                 }
             }
             if let Some(io) = &n.io {
@@ -2344,6 +2401,16 @@ impl Project {
         if self.parts.len() > 32 {
             return Err("At most 32 parts".into());
         }
+        if self
+            .conductor
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 128)
+            || self.conducted.count_in_pulses > 32
+            || ![1, 2, 4, 8, 16, 32].contains(&self.conducted.pulse_unit)
+            || self.conducted.sets.len() > 64
+        {
+            return Err("Invalid conducted performance settings".into());
+        }
         let mut ids = BTreeSet::new();
         for p in &self.parts {
             score::validate(p)?;
@@ -2368,7 +2435,9 @@ impl Project {
             }
             for s in &p.staves {
                 if let Some(d) = &s.dynamics {
-                    score::validate_automation(&[d.lane(s.midi_channel.unwrap_or(p.midi_channel))])?;
+                    score::validate_automation(
+                        &[d.lane(s.midi_channel.unwrap_or(p.midi_channel))],
+                    )?;
                 }
             }
             if p.name.trim().is_empty() || p.name.len() > 120 {
@@ -2421,6 +2490,19 @@ impl Project {
             {
                 return Err("Invalid part".into());
             }
+            let mut last_meter = -1.;
+            for meter in &p.performance_meters {
+                if !meter.beat.is_finite()
+                    || meter.beat < 0.
+                    || meter.beat >= p.loop_beats
+                    || meter.beat <= last_meter
+                    || !(1..=16).contains(&meter.beats)
+                    || ![1, 2, 4, 8, 16, 32].contains(&meter.unit)
+                {
+                    return Err("Invalid or unordered part meter change".into());
+                }
+                last_meter = meter.beat;
+            }
             for n in &p.notes {
                 if n.pitch > 127
                     || n.velocity > 127
@@ -2433,13 +2515,31 @@ impl Project {
                 }
             }
         }
+        let part_ids: BTreeSet<_> = self.parts.iter().map(|p| p.id.as_str()).collect();
+        let mut set_ids = BTreeSet::new();
+        for set in &self.conducted.sets {
+            let mut members = BTreeSet::new();
+            if !set_ids.insert(set.id.as_str())
+                || set.id.is_empty()
+                || set.id.len() > 128
+                || set.name.trim().is_empty()
+                || set.name.len() > 120
+                || set.parts.len() > 32
+                || set
+                    .parts
+                    .iter()
+                    .any(|id| !part_ids.contains(id.as_str()) || !members.insert(id.as_str()))
+            {
+                return Err("Invalid conducted set".into());
+            }
+        }
         for node in &self.graph.nodes {
             if node
                 .part_id
                 .as_ref()
                 .is_some_and(|id| !self.parts.iter().any(|p| &p.id == id))
             {
-                return Err("Part MIDI source must be a part in this project".into());
+                return Err("Node part association must reference a part in this project".into());
             }
         }
         self.graph.validate()?;
@@ -2511,11 +2611,24 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         schema_version: 1,
         id,
         name,
-        mode,
+        mode: mode.clone(),
         revision: 0,
         bpm: 120.,
         beats_per_bar: 4,
         beat_unit: 4,
+        conductor: None,
+        conducted: ConductedLayout {
+            sets: if matches!(mode, Mode::Conducted) {
+                vec![ConductedSet {
+                    id: "set-1".into(),
+                    name: "Set 1".into(),
+                    parts: vec!["part-1".into()],
+                }]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        },
         graph: Graph { nodes, edges },
         parts: vec![Part {
             muted: false,
@@ -2545,6 +2658,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
                 })
                 .collect(),
             loop_beats: 8.,
+            performance_meters: vec![],
             instrument_node: Some("tone".into()),
             midi_port: None,
             midi_channel: 1,
@@ -2571,6 +2685,12 @@ mod tests {
         assert!(p.validate().is_err());
         p.graph.nodes.last_mut().unwrap().part_id = None;
         assert!(p.validate().is_ok());
+        let mut monitor = p.graph.nodes[0].clone();
+        monitor.id = "performer-monitor".into();
+        monitor.kind = "monitor_output".into();
+        monitor.part_id = Some(p.parts[0].id.clone());
+        p.graph.nodes.push(monitor);
+        assert!(p.validate().is_ok());
         p.graph.nodes[0].part_id = Some(p.parts[0].id.clone());
         assert!(p.validate().is_err());
         let catalog = catalog();
@@ -2594,6 +2714,22 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn conducted_sets_and_part_meters_are_server_validated() {
+        let mut p = demo_project("p".into(), "p".into(), Mode::Conducted);
+        assert!(p.validate().is_ok());
+        p.conducted.sets[0].parts.push("missing".into());
+        assert!(p.validate().unwrap_err().contains("conducted set"));
+        p.conducted.sets[0].parts.pop();
+        p.parts[0].performance_meters = vec![score::MeterChange {
+            beat: 0.,
+            beats: 6,
+            unit: 8,
+        }];
+        assert!(p.validate().is_ok());
+        p.parts[0].performance_meters[0].unit = 3;
+        assert!(p.validate().unwrap_err().contains("part meter"));
     }
     #[test]
     fn control_text_contract_is_validated_through_visualizers() {

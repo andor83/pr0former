@@ -40,6 +40,26 @@ const clefGlyph = (c: string) =>
   ({ treble: '𝄞', bass: '𝄢', alto: '𝄡', tenor: '𝄡' })[c] ?? '𝄞'
 const value = (event: Event) => (event.target as HTMLInputElement).value
 const update = (patch: Partial<Part>) => emit('update', { ...props.part, ...patch })
+const performanceMeters = computed(() => {
+  const meters = [...(props.part.performance_meters || [])]
+  if (!meters.some(meter => meter.beat === 0)) meters.unshift({ beat:0, beats:props.project.beats_per_bar, unit:props.project.beat_unit || 4 })
+  return meters.sort((a,b) => a.beat-b.beat)
+})
+const performanceMeter = computed(() => performanceMeters.value[0]!)
+function setPerformanceMeter(index:number, patch:{beat?:number;beats?:number;unit?:number}) {
+  const meters = performanceMeters.value.map(meter => ({...meter}))
+  meters[index] = {...meters[index]!,...patch}
+  update({performance_meters:meters.sort((a,b)=>a.beat-b.beat)})
+}
+function updatePerformanceMeter(patch:{beats?:number;unit?:number}) { setPerformanceMeter(0,patch) }
+function addPerformanceMeter() {
+  const used = new Set(performanceMeters.value.map(meter=>meter.beat))
+  let beat = Math.min(props.part.loop_beats-0.25, Math.max(0.25, Math.floor(props.part.loop_beats/2)))
+  while (used.has(beat) && beat < props.part.loop_beats) beat += 0.25
+  if (beat >= props.part.loop_beats) return
+  update({performance_meters:[...performanceMeters.value,{beat,beats:performanceMeter.value.beats,unit:performanceMeter.value.unit}].sort((a,b)=>a.beat-b.beat)})
+}
+function removePerformanceMeter(index:number) { update({performance_meters:performanceMeters.value.filter((_,item)=>item!==index)}) }
 </script>
 <template>
   <div class="sd-dialog">
@@ -127,7 +147,7 @@ const update = (patch: Partial<Part>) => emit('update', { ...props.part, ...patc
                 @change="update({ performer: value($event) || null })"
               >
                 <option value="">Unassigned</option>
-                <option v-for="m in members" :key="m.id" :value="m.id">
+                <option v-for="m in members?.filter(member=>member.id!==project.conductor)" :key="m.id" :value="m.id">
                   {{ m.username }}
                 </option>
               </select></label
@@ -221,6 +241,12 @@ const update = (patch: Partial<Part>) => emit('update', { ...props.part, ...patc
           </p>
         </template>
         <template v-else-if="tab === 'meter'">
+          <template v-if="project.mode==='conducted'">
+            <div class="sd-meter-editor"><div class="sd-meter-preview"><span>{{performanceMeter.beats}}</span><span>{{performanceMeter.unit}}</span></div><div class="sd-steppers"><label>Part beats per bar<input type="number" min="1" max="16" :value="performanceMeter.beats" :disabled="!editable" @change="updatePerformanceMeter({beats:Number(value($event))})"></label><label>Part beat unit<select :value="performanceMeter.unit" :disabled="!editable" @change="updatePerformanceMeter({unit:Number(value($event))})"><option v-for="u in units" :key="u" :value="u">{{u}}</option></select></label></div></div>
+            <div class="performance-meter-changes"><header><strong>Meter changes</strong><button type="button" class="button small" :disabled="!editable||part.loop_beats<=.25" @click="addPerformanceMeter">Add change</button></header><div v-for="(meter,index) in performanceMeters.slice(1)" :key="`${meter.beat}:${index}`" class="performance-meter-row"><label>Beat<input type="number" min="0.25" :max="part.loop_beats-0.001" step="0.25" :value="meter.beat" :disabled="!editable" @change="setPerformanceMeter(index+1,{beat:Number(value($event))})"></label><label>Beats<input type="number" min="1" max="16" :value="meter.beats" :disabled="!editable" @change="setPerformanceMeter(index+1,{beats:Number(value($event))})"></label><label>Unit<select :value="meter.unit" :disabled="!editable" @change="setPerformanceMeter(index+1,{unit:Number(value($event))})"><option v-for="u in units" :key="u" :value="u">{{u}}</option></select></label><button type="button" class="icon-button" aria-label="Remove meter change" :disabled="!editable" @click="removePerformanceMeter(index+1)">×</button></div><p v-if="performanceMeters.length===1" class="feature-note">No later meter changes. Each denominator beat always maps to one global pulse.</p></div>
+            <p class="sd-note">This part’s denominator beat follows one global conducting pulse. Other parts may use different meters without changing pulse duration.</p>
+          </template>
+          <template v-else>
           <div class="sd-meter-editor">
             <div class="sd-meter-preview" aria-live="polite">
               <span>{{ project.beats_per_bar }}</span
@@ -303,6 +329,7 @@ const update = (patch: Partial<Part>) => emit('update', { ...props.part, ...patc
             count-in. Mid-score meter changes are made from the Measure dialog or
             the Shared score dialog.
           </p>
+          </template>
         </template>
         <template v-else-if="staff">
           <h3>{{ staff.name }}</h3>
@@ -518,3 +545,7 @@ const update = (patch: Partial<Part>) => emit('update', { ...props.part, ...patc
   </div>
 </template>
 <style src="./scoreDialogLayout.css"></style>
+<style scoped>
+.performance-meter-changes{display:grid;gap:10px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+.performance-meter-changes>header,.performance-meter-row{display:flex;align-items:end;gap:10px}.performance-meter-changes>header{justify-content:space-between;align-items:center}.performance-meter-row label{min-width:0;flex:1}.performance-meter-row input,.performance-meter-row select{width:100%}.performance-meter-row .icon-button{flex:0 0 40px}
+</style>
