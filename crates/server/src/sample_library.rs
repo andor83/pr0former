@@ -51,10 +51,218 @@ pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
     )?;
     Ok(())
 }
+fn library_dir() -> PathBuf {
+    PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into())).join("sample-library")
+}
 pub fn path(id: &str) -> PathBuf {
-    PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into()))
-        .join("sample-library")
-        .join(format!("{id}.wav"))
+    library_dir().join(format!("{id}.wav"))
+}
+/// Owner recorded for samples that ship with the server. It is not a user
+/// account: library rows join users loosely so the kit needs no login.
+pub const BUNDLED_OWNER: &str = "pr0former";
+/// Six CC0 one-shots (48 kHz stereo 16-bit) bundled with the server as
+/// global library samples; see docs/SAMPLE_CREDITS.md for their sources.
+pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
+    (
+        "bundled-kick",
+        "Kick",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/drums/kick.wav"
+        )),
+    ),
+    (
+        "bundled-snare",
+        "Snare",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/drums/snare.wav"
+        )),
+    ),
+    (
+        "bundled-tom-1",
+        "Tom 1",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/drums/tom-1.wav"
+        )),
+    ),
+    (
+        "bundled-tom-2",
+        "Tom 2",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/drums/tom-2.wav"
+        )),
+    ),
+    (
+        "bundled-hi-hat",
+        "Hi hat",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/drums/hi-hat.wav"
+        )),
+    ),
+    (
+        "bundled-cymbal",
+        "Cymbal",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/drums/cymbal.wav"
+        )),
+    ),
+];
+/// Seed the bundled kit as global library samples visible to every account.
+/// Idempotent: rows that already exist, including ones an administrator has
+/// deleted, are left alone, so the kit never comes back uninvited.
+pub fn seed_bundled(db: &Connection) -> Result<(), String> {
+    seed_bundled_into(db, &library_dir())
+}
+const BUNDLED_TAGS: &str = "drum, kit, cc0";
+fn seed_bundled_into(db: &Connection, dir: &std::path::Path) -> Result<(), String> {
+    // Earlier seeds tagged the kit "drums"; retag rows nobody has edited since.
+    db.execute(
+        "UPDATE sample_library SET tags=?1 WHERE origin='bundled' AND tags='drums, kit, cc0'",
+        [BUNDLED_TAGS],
+    )
+    .map_err(|e| e.to_string())?;
+    for (id, name, bytes) in BUNDLED_KIT {
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sample_library WHERE id=?1)",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if exists {
+            continue;
+        }
+        let reader =
+            hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+        let spec = reader.spec();
+        let frames = reader.duration();
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(format!("{id}.wav")), bytes).map_err(|e| e.to_string())?;
+        db.execute(
+            "INSERT INTO sample_library(id,owner,origin,name,description,tags,category,global,ever_global,channels,sample_rate,frames,root_note) VALUES(?1,?2,'bundled',?3,?4,?8,'Drums',1,1,?5,?6,?7,60)",
+            params![
+                id,
+                BUNDLED_OWNER,
+                format!("{name} (bundled kit)"),
+                "CC0 acoustic drum one-shot recorded by menegass (freesound.org), bundled with pr0former; see docs/SAMPLE_CREDITS.md.",
+                spec.channels,
+                spec.sample_rate,
+                frames,
+                BUNDLED_TAGS
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+/// Link a library sample into a project, reusing an existing link, and return
+/// the project asset id. The caller writes the project revision afterwards.
+pub fn attach(db: &Connection, project: &str, sample: &str) -> Result<u32, String> {
+    if let Ok(existing) = db.query_row(
+        "SELECT asset FROM project_samples WHERE project=?1 AND sample=?2",
+        params![project, sample],
+        |r| r.get::<_, u32>(0),
+    ) {
+        return Ok(existing);
+    }
+    let available: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sample_library WHERE id=?1 AND deleted=0)",
+            [sample],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !available {
+        return Err("Sample unavailable".into());
+    }
+    let local = asset(project);
+    let dir = crate::samples::directory(project);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::copy(path(sample), dir.join(format!("{local}.wav"))).map_err(|e| e.to_string())?;
+    db.execute(
+        "INSERT INTO project_samples(project,sample,asset) VALUES(?1,?2,?3)",
+        params![project, sample, local],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(local)
+}
+#[cfg(test)]
+mod bundled_tests {
+    use super::*;
+    #[test]
+    fn bundled_kit_seeds_once_as_global_and_respects_deletion() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let dir = std::env::temp_dir().join(format!("pr0-bundled-{}", crate::uid()));
+        seed_bundled_into(&db, &dir).unwrap();
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sample_library WHERE origin='bundled' AND global=1 AND ever_global=1 AND root_note=60"
+            ),
+            6
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sample_library WHERE owner='pr0former' AND channels=2 AND sample_rate=48000 AND frames>0"
+            ),
+            6
+        );
+        for (id, _, _) in BUNDLED_KIT {
+            assert!(dir.join(format!("{id}.wav")).exists(), "{id}");
+        }
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sample_library WHERE origin='bundled' AND tags='drum, kit, cc0'"
+            ),
+            6
+        );
+        // Rows seeded with the older "drums" tag are retagged unless edited since.
+        db.execute(
+            "UPDATE sample_library SET tags='drums, kit, cc0' WHERE id='bundled-snare'",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE sample_library SET tags='drums, brushed' WHERE id='bundled-tom-1'",
+            [],
+        )
+        .unwrap();
+        seed_bundled_into(&db, &dir).unwrap();
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sample_library WHERE id='bundled-snare' AND tags='drum, kit, cc0'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sample_library WHERE id='bundled-tom-1' AND tags='drums, brushed'"
+            ),
+            1
+        );
+        // A second start changes nothing, and an administrator's deletion sticks.
+        db.execute(
+            "UPDATE sample_library SET deleted=1 WHERE id='bundled-kick'",
+            [],
+        )
+        .unwrap();
+        seed_bundled_into(&db, &dir).unwrap();
+        assert_eq!(
+            count("SELECT count(*) FROM sample_library WHERE origin='bundled'"),
+            6
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM sample_library WHERE id='bundled-kick' AND deleted=1"),
+            1
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 fn asset(project: &str) -> u32 {
     loop {
@@ -68,7 +276,7 @@ fn asset(project: &str) -> u32 {
     }
 }
 fn entry(db: &Connection, id: &str, project: &str, u: &str) -> Api<Value> {
-    let mut v: Value=db.query_row("SELECT s.id,s.owner,s.origin,s.name,s.description,s.tags,s.category,s.musical_key,s.bpm,s.global,s.channels,s.sample_rate,s.frames,s.revision,u.username,(SELECT asset FROM project_samples WHERE project=?2 AND sample=s.id),s.root_note,s.ever_global FROM sample_library s JOIN users u ON u.id=s.owner WHERE s.id=?1 AND s.deleted=0",params![id,project],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner":r.get::<_,String>(1)?,"origin":r.get::<_,String>(2)?,"name":r.get::<_,String>(3)?,"description":r.get::<_,String>(4)?,"tags":r.get::<_,String>(5)?,"category":r.get::<_,String>(6)?,"musical_key":r.get::<_,String>(7)?,"bpm":r.get::<_,Option<f64>>(8)?,"global":r.get::<_,bool>(9)?,"channels":r.get::<_,u32>(10)?,"sample_rate":r.get::<_,u32>(11)?,"frames":r.get::<_,u64>(12)?,"revision":r.get::<_,u64>(13)?,"author":r.get::<_,String>(14)?,"asset":r.get::<_,Option<u32>>(15)?,"root_note":r.get::<_,Option<u8>>(16)?,"requires_admin_delete":r.get::<_,bool>(17)?}))).map_err(|_|bad("Sample unavailable"))?;
+    let mut v: Value=db.query_row("SELECT s.id,s.owner,s.origin,s.name,s.description,s.tags,s.category,s.musical_key,s.bpm,s.global,s.channels,s.sample_rate,s.frames,s.revision,u.username,(SELECT asset FROM project_samples WHERE project=?2 AND sample=s.id),s.root_note,s.ever_global FROM sample_library s LEFT JOIN users u ON u.id=s.owner WHERE s.id=?1 AND s.deleted=0",params![id,project],|r|Ok(json!({"id":r.get::<_,String>(0)?,"owner":r.get::<_,String>(1)?,"origin":r.get::<_,String>(2)?,"name":r.get::<_,String>(3)?,"description":r.get::<_,String>(4)?,"tags":r.get::<_,String>(5)?,"category":r.get::<_,String>(6)?,"musical_key":r.get::<_,String>(7)?,"bpm":r.get::<_,Option<f64>>(8)?,"global":r.get::<_,bool>(9)?,"channels":r.get::<_,u32>(10)?,"sample_rate":r.get::<_,u32>(11)?,"frames":r.get::<_,u64>(12)?,"revision":r.get::<_,u64>(13)?,"author":r.get::<_,Option<String>>(14)?.unwrap_or_else(|| BUNDLED_OWNER.to_string()),"asset":r.get::<_,Option<u32>>(15)?,"root_note":r.get::<_,Option<u8>>(16)?,"requires_admin_delete":r.get::<_,bool>(17)?}))).map_err(|_|bad("Sample unavailable"))?;
     let owned = v["owner"] == u;
     let admin = crate::accounts::is_admin(db, u);
     v["can_delete"] = json!(if v["requires_admin_delete"] == true {

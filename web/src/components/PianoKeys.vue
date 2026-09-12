@@ -23,7 +23,7 @@ onBeforeUnmount(() => { clear(); window.removeEventListener('blur',clear); docum
   </div>
 </template>
 <style scoped>
-.piano-keys{position:absolute;left:12px;right:12px;top:211px;height:70px;touch-action:none;user-select:none}
-.piano-key{position:absolute;top:0;width:14.2857%;height:70px;background:#d5dfdc;color:#293332;border:1px solid #121819;border-radius:0 0 4px 4px;touch-action:none;padding:0;opacity:1}
-.piano-key span{position:absolute;bottom:5px;left:0;right:0;font-size:10px}.piano-key.black{width:10%;height:44px;background:#202829;color:#c2ceca;z-index:1}.piano-key.lit{background:#202829;color:#e7f5f1;box-shadow:inset 0 0 0 2px var(--cyan)}.piano-key.black.lit{background:#e7f5f1;color:#202829;box-shadow:inset 0 0 0 2px var(--amber)}.piano-key:disabled{cursor:default}.piano-key:focus-visible{outline:2px solid var(--violet);outline-offset:-3px}
+.piano-keys{position:absolute;left:80px;right:80px;top:66px;height:152px;touch-action:none;user-select:none}
+.piano-key{position:absolute;top:0;width:14.2857%;height:152px;background:#d5dfdc;color:#293332;border:1px solid #121819;border-radius:0 0 4px 4px;touch-action:none;padding:0;opacity:1}
+.piano-key span{position:absolute;bottom:5px;left:0;right:0;font-size:10px}.piano-key.black{width:10%;height:94px;background:#202829;color:#c2ceca;z-index:1}.piano-key.lit{background:#202829;color:#e7f5f1;box-shadow:inset 0 0 0 2px var(--cyan)}.piano-key.black.lit{background:#e7f5f1;color:#202829;box-shadow:inset 0 0 0 2px var(--amber)}.piano-key:disabled{cursor:default}.piano-key:focus-visible{outline:2px solid var(--violet);outline-offset:-3px}
 </style>

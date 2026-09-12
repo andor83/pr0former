@@ -1029,9 +1029,9 @@ async fn piano_note(
         .graph
         .nodes
         .iter()
-        .any(|n| n.id == note.node && n.kind == "piano")
+        .any(|n| n.id == note.node && matches!(n.kind.as_str(), "piano" | "drum_pads"))
     {
-        return Err(bad("Piano node missing"));
+        return Err(bad("Piano or drum pad node missing"));
     }
     if app.graph.lock().unwrap().as_deref() != Some(&id) {
         return Err(bad(
@@ -2265,6 +2265,7 @@ async fn main() {
     db.execute("UPDATE login_titles SET first='Insert pithy title here',second='Put something funny here too' WHERE first='Compose the System' OR (first='Insert pithy title here' AND second='Also something funny here')", []).expect("Login title migration");
     accounts::migrate(&db).expect("Account migration");
     sample_library::migrate(&db).expect("Sample library migration");
+    sample_library::seed_bundled(&db).expect("Bundled sample library");
     subgraphs::migrate(&db).expect("Subgraph library migration");
     revisions::migrate(&db).expect("Revision save migration");
     let desktop_session = desktop_mode

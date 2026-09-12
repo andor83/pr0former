@@ -1,20 +1,24 @@
 <script setup lang="ts">
 import {nextTick,onBeforeUnmount,onMounted,ref} from 'vue'
 import {api} from '../api'
-import {midiNoteLabel,type SampleEntry} from '../samples'
+import {formatTags,midiNoteLabel,parseTags,tagCloud,type SampleEntry,type TagCount} from '../samples'
+import TagEditor from './TagEditor.vue'
 const props=defineProps<{projectId?:string;sample:SampleEntry}>()
 const emit=defineEmits<{close:[];saved:[]}>()
 const dialog=ref<HTMLDialogElement>(),canvas=ref<HTMLCanvasElement>(),audio=ref<HTMLAudioElement>()
 const endpoint=()=>props.projectId ? `/api/projects/${props.projectId}/samples/${props.sample.id}` : `/api/samples/${props.sample.id}`
 const draft=ref({...props.sample}),busy=ref(false),error=ref(''),url=ref(''),position=ref(0),playing=ref(false)
+// Every tag the user can see across the library feeds the tag cloud editor.
+const cloud=ref<TagCount[]>([])
 const controller=new AbortController();let context:AudioContext|undefined
-async function save(){busy.value=true;try{await api(endpoint().slice(4),'PUT',draft.value);emit('saved');emit('close')}catch(e){error.value=String(e)}finally{busy.value=false}}
+async function save(){busy.value=true;try{await api(endpoint().slice(4),'PUT',{...draft.value,tags:formatTags(parseTags(draft.value.tags))});emit('saved');emit('close')}catch(e){error.value=String(e)}finally{busy.value=false}}
 function seek(value:number){position.value=Math.max(0,Math.min(props.sample.duration,value));if(audio.value)audio.value.currentTime=position.value}
 function scrub(e:PointerEvent){const target=e.currentTarget as HTMLElement;target.setPointerCapture(e.pointerId);seekAt(e,target)}
 function seekAt(e:PointerEvent,target:HTMLElement){const box=target.getBoundingClientRect();seek((e.clientX-box.left)/box.width*props.sample.duration)}
 async function play(){try{if(!audio.value)return;if(playing.value)audio.value.pause();else await audio.value.play()}catch(e){error.value=String(e)}}
 onMounted(async()=>{
   dialog.value?.showModal()
+  void api<SampleEntry[]>('/samples').then(samples=>{cloud.value=tagCloud(samples)}).catch(()=>{})
   try{
     const response=await fetch(`${endpoint()}/audio`,{signal:controller.signal});if(!response.ok)throw new Error('Sample audio unavailable')
     const bytes=await response.arrayBuffer();if(controller.signal.aborted)return
@@ -39,7 +43,7 @@ onBeforeUnmount(()=>{controller.abort();audio.value?.pause();if(context)void con
   <audio ref="audio" :src="url||undefined" @timeupdate="position=audio?.currentTime||0" @play="playing=true" @pause="playing=false" @ended="playing=false"></audio>
   <label>Name<input v-model="draft.name" maxlength="256" :disabled="!sample.can_edit||busy"></label>
   <label>Category<input v-model="draft.category" maxlength="128" :disabled="!sample.can_edit||busy"></label>
-  <label>Tags<input v-model="draft.tags" placeholder="piano, soft, loop…" maxlength="1024" :disabled="!sample.can_edit||busy"></label>
+  <div class="sample-tags"><span>Tags</span><TagEditor v-model="draft.tags" :cloud="cloud" :disabled="!sample.can_edit||busy" /></div>
   <label>Description<textarea v-model="draft.description" maxlength="4096" :disabled="!sample.can_edit||busy"></textarea></label>
   <div class="sample-musical"><label>BPM<input v-model.number="draft.bpm" type="number" min="1" max="400" :disabled="!sample.can_edit||busy" @change="draft.bpm=draft.bpm||null"></label><label>Musical key<input v-model="draft.musical_key" maxlength="64" placeholder="C minor" :disabled="!sample.can_edit||busy"></label></div>
   <label>Root pitch<select aria-label="Root pitch" :value="draft.root_note??''" :disabled="!sample.can_edit||busy" @change="draft.root_note=($event.target as HTMLSelectElement).value===''?null:Number(($event.target as HTMLSelectElement).value)"><option value="">Not set</option><option v-for="note in 128" :key="note-1" :value="note-1">{{midiNoteLabel(note-1)}}</option></select></label>
@@ -53,5 +57,5 @@ onBeforeUnmount(()=>{controller.abort();audio.value?.pause();if(context)void con
 </template>
 <style scoped>
 .modal-header{display:flex;align-items:center;justify-content:space-between}.sample-editor input[type="range"]{width:100%;accent-color:var(--cyan)}
-.sample-editor{width:min(800px,95vw)}.sample-editor label{display:flex;flex-direction:column;gap:7px;margin:14px 0}.sample-editor .check-label{flex-direction:row}.sample-editor textarea{min-height:90px;background:#121819;color:var(--white);border:1px solid var(--line);padding:10px}.sample-waveform{position:relative;touch-action:none;cursor:crosshair}.sample-waveform canvas{display:block;width:100%;min-height:60px}.sample-waveform i{position:absolute;top:0;bottom:0;width:2px;background:var(--white);pointer-events:none}.sample-musical,.sample-playback{display:flex;gap:16px;align-items:center}.sample-musical label{flex:1;min-width:0}
+.sample-editor{width:min(800px,95vw)}.sample-editor label,.sample-tags{display:flex;flex-direction:column;gap:7px;margin:14px 0}.sample-editor .check-label{flex-direction:row}.sample-editor textarea{min-height:90px;background:#121819;color:var(--white);border:1px solid var(--line);padding:10px}.sample-waveform{position:relative;touch-action:none;cursor:crosshair}.sample-waveform canvas{display:block;width:100%;min-height:60px}.sample-waveform i{position:absolute;top:0;bottom:0;width:2px;background:var(--white);pointer-events:none}.sample-musical,.sample-playback{display:flex;gap:16px;align-items:center}.sample-musical label{flex:1;min-width:0}
 </style>

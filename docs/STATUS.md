@@ -6,7 +6,7 @@ pr0former is a development alpha. Software validation does not establish physica
 
 | Area | Current behavior | Evidence / limitations |
 | --- | --- | --- |
-| Graph engine | Server-validated audio (1–8 channels), control, spectral and typed MIDI contracts; nested graphs; prepared DSP storage and live compatible-state transfer. | Rust render allocation/deallocation guards and routing tests. Incompatible replacements have no crossfade. |
+| Graph engine | Server-validated audio (1–8 channels), control, spectral and typed MIDI contracts; nested graphs; feedback loops through audio/control wires (one-sample feedback edges); prepared DSP storage and live compatible-state transfer. | Rust render allocation/deallocation guards and routing tests. Incompatible replacements have no crossfade. |
 | Native audio | Bounded callback rings, driver-consumption pacing, device/channel routing and meters. | Synthetic callback-size tests. Multiple independent hardware clocks are not synchronized; physical latency and endurance remain manual. |
 | Persistence during playback | Ordered bounded queue sends archive data, loop chunks and retired engines to a persistence worker. Queue pressure delays command admission while rendering continues. Loop collection copies at most 4,096 samples per block; assembly, writer barriers and retired-engine destruction run off the audio-producing worker. Disable, clear and shutdown acknowledgments wait for preceding writes. | `persistence::tests` holds storage blocked while rendering advances; bounded snapshot reconstruction test; looper/recording browser tests. Real disk stalls and hardware refill deadlines remain unverified. |
 | Browser monitoring | WebRTC/Opus master and selected cue feeds; only subscribed dedicated feeds are collected. Feed leases expire after eight seconds without refresh. | Count-in tests receive actual master/cue audio. Conversion and telemetry still share the orchestration worker. |
@@ -29,6 +29,31 @@ pr0former is a development alpha. Software validation does not establish physica
 ## Validation
 
 Stabilization validation (2026-09-10):
+
+- Graph workflow pass (2026-09-11): Auto-space (right-click, L) lays out a
+  selection in crossing-reduced signal-flow columns and A selects all nodes;
+  feedback loops are scheduled with one-sample feedback edges (audio/control
+  only, drawn dashed); new `drum_pads` node with General MIDI notes and per-pad
+  trigger outlets; the FM Drum Machine preset decodes those notes per voice,
+  its trigger inlets accept a velocity value, and its voices are one-shots via
+  the new synth/FM synth `decay` parameter; `midi_to_control` gained
+  `note_on`/`note_off` outlets; new `overdrive` effect and `control_delay`
+  node (drivable millisecond delay for numeric controls); a Drum Sampler
+  library subgraph with six one-shot sample voices preloaded with a bundled
+  CC0 kit that is also seeded as global library samples for every account
+  (docs/SAMPLE_CREDITS.md); sample tags shown as clickable filter chips in
+  the sample list, browser and organizer with a tag-cloud editor in the
+  metadata dialog; an on-node ADSR envelope
+  graph with a draggable editor in the modal (stepped time axis, release
+  handle at the start of the release ramp) and a `note_off` ADSR input so
+  trigger/note-off pulse sources attack and release; the Meter node draws
+  per-channel dBFS meters on the canvas and exposes one Level control output
+  per channel; the footer monitor
+  button is a VU meter of the received browser stream; the output node modal
+  shows its interface above the channel selector. `cargo test --workspace`
+  passed **215 tests** (one opt-in ignored); `npm --prefix web test` passed
+  **67** (five new layout tests); the production build passed. Hardware MIDI
+  and physical monitoring remain manual.
 
 - Review sweep (2026-09-11): unified the graph MIDI raw-message path (MIDI
   input and OSC-to-MIDI typed outlets now carry messages, Piano decodes typed

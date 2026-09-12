@@ -12,6 +12,8 @@ const telemetryStale=inject<ComputedRef<boolean>>('telemetryStale')
 const graphActive=inject<Ref<boolean>>('graphActive')
 const active=computed(()=>!!graphActive?.value&&!(telemetryStale?.value??true))
 const values=computed(()=>telemetry?.value?.values?.[props.source])
+// Wires that close a feedback loop are read one sample late by the engine.
+const feedback=computed(()=>!!telemetry?.value?.feedback_edges?.includes(props.id))
 const path = computed(() => getBezierPath(props))
 const anchor=ref({x:0,y:0})
 const popupStyle=computed(()=>({left:`${Math.max(12,Math.min(window.innerWidth-276,anchor.value.x-126))}px`,top:`${Math.max(12,Math.min(window.innerHeight-(84+(props.data?.channels||1)*50)-12,anchor.value.y+16))}px`}))
@@ -36,7 +38,8 @@ onBeforeUnmount(stop)
 </script>
 <template>
   <g tabindex="0" :aria-label="`Preview ${data?.signal || 'signal'} connection`" @mouseenter="start" @mouseleave="stop" @focusin="start" @focusout="stop" @keydown.esc="stop">
-    <BaseEdge :id="id" :path="path[0]" :class="['signal-edge', data?.signal, { flowing: active, selected }]" :interaction-width="24" />
+    <BaseEdge :id="id" :path="path[0]" :class="['signal-edge', data?.signal, { flowing: active, selected, feedback }]" :interaction-width="24" />
+    <title v-if="feedback">Feedback connection · one sample delay</title>
   </g>
   <EdgeLabelRenderer v-if="data?.signal === 'audio'">
     <span v-if="data.channels > 1" class="channel-badge" :style="{ transform: `translate(-50%, -50%) translate(${path[1]}px, ${path[2]}px)` }">{{ data.channels }} ch</span>

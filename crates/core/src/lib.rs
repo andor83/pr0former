@@ -579,8 +579,8 @@ pub fn catalog() -> Vec<Descriptor> {
         "ADSR envelope",
         "⏢",
         "Control",
-        "Sample-timed linear ADSR. Positive gate attacks; gate release ramps from the current level. Rising retrigger restarts attack while gated. Stage times latch at entry; sustain edits are smoothed.",
-        vec![port("retrigger", Control)],
+        "Sample-timed linear ADSR, edge triggered: a rising gate or retrigger pulse starts or restarts the attack from the current level; a falling gate or rising note_off pulse releases from the current level, even if the gate parameter is left high. Pulse sources (Piano, Part MIDI, MIDI to control) wire trigger to retrigger and note_off to note_off. Attacks normally ramp from the current level; Retrigger from zero drops to 0 first and ramps the full attack every time. Stage times latch at entry; sustain edits are smoothed.",
+        vec![port("retrigger", Control), port("note_off", Control)],
         vec![port("out", Control)],
         vec![
             param("gate", "Gate", "", 0., 1., 0.),
@@ -588,6 +588,10 @@ pub fn catalog() -> Vec<Descriptor> {
             param("decay", "Decay", "ms", 0., 10000., 100.),
             param("sustain", "Sustain", "", 0., 1., 0.7),
             param("release", "Release", "ms", 0., 10000., 200.),
+            Parameter {
+                structural: true,
+                ..param("reset", "Retrigger from zero", "", 0., 1., 0.)
+            },
         ],
         &["adsr", "vline", "envelope"],
     );
@@ -758,6 +762,51 @@ pub fn catalog() -> Vec<Descriptor> {
             },
         ],
         &["keyboard", "midi test"],
+    );
+    let pad_names = [
+        ("bass_drum", "Bass drum", 36.),
+        ("snare", "Snare", 38.),
+        ("tom_1", "Tom 1", 45.),
+        ("tom_2", "Tom 2", 50.),
+        ("hi_hat", "Hi hat", 42.),
+        ("cymbal", "Cymbal", 49.),
+    ];
+    let mut pad_parameters: Vec<Parameter> = pad_names
+        .iter()
+        .enumerate()
+        .map(|(i, (_, label, note))| Parameter {
+            structural: true,
+            ..param(
+                &format!("note_{}", i + 1),
+                &format!("{label} note"),
+                "",
+                0.,
+                127.,
+                *note,
+            )
+        })
+        .collect();
+    pad_parameters.push(Parameter {
+        structural: true,
+        ..param("channel", "MIDI channel", "", 1., 16., 10.)
+    });
+    add(
+        "drum_pads",
+        "Drum pads",
+        "◍",
+        "Control",
+        "Six clickable pads for testing drum patches. Each pad sends note-on/off for its MIDI note on the configured channel (General MIDI defaults: bass drum 36, snare 38, tom 1 45, tom 2 50, hi-hat 42, cymbal 49 on channel 10), forwards received typed MIDI, lights pads for matching received notes, and pulses the matching trigger output with the note velocity for one engine sample. Set pad notes and the channel in the modal.",
+        vec![],
+        pad_names
+            .iter()
+            .map(|(id, label, _)| {
+                let mut p = port(id, Control);
+                p.label = label.to_string();
+                p
+            })
+            .collect(),
+        pad_parameters,
+        &["drums", "pads", "percussion", "midi test"],
     );
     for input in [true, false] {
         let structural = |mut p: Parameter| {
@@ -1170,6 +1219,14 @@ pub fn catalog() -> Vec<Descriptor> {
         vec![port("out", Audio)],
         vec![
             param("amplitude", "Amplitude", "", 0., 1., 0.2),
+            param(
+                "decay",
+                "Decay (0 holds until release)",
+                "ms",
+                0.,
+                5000.,
+                0.,
+            ),
             param("release", "Release", "ms", 1., 2000., 80.),
         ],
         &["poly"],
@@ -1206,6 +1263,14 @@ pub fn catalog() -> Vec<Descriptor> {
             param("modulator_waveform", "Modulator waveform", "", 0., 4., 0.),
             param("fm_depth", "FM depth", "Hz at A4", 0., 20000., 220.),
             param("amplitude", "Amplitude", "", 0., 1., 0.2),
+            param(
+                "decay",
+                "Decay (0 holds until release)",
+                "ms",
+                0.,
+                5000.,
+                0.,
+            ),
             param("release", "Release", "ms", 1., 2000., 80.),
         ],
         &["poly", "FM", "frequency modulation", "two oscillator"],
@@ -1291,11 +1356,17 @@ pub fn catalog() -> Vec<Descriptor> {
         "Meter",
         "▥",
         "Audio",
-        "Pass-through audio with peak telemetry.",
+        "Pass-through audio with a per-channel level meter drawn on the node (dBFS, like the monitor tab). Each channel also has a Level control output carrying its amplitude (0–1 peak, instant rise, falling over the fall time); outputs above the channel width read 0. The first control readout is the loudest channel.",
         vec![port("in", Audio)],
-        vec![port("out", Audio)],
-        vec![],
-        &["env~"],
+        std::iter::once(port("out", Audio))
+            .chain((1..=MAX_CHANNELS).map(|i| {
+                let mut p = port(&format!("level_{i}"), Control);
+                p.label = format!("Level {i}");
+                p
+            }))
+            .collect(),
+        vec![param("release", "Fall time", "ms", 10., 2000., 300.)],
+        &["env~", "vu", "level", "peak"],
     );
     for (kind, label) in [("eq3", "3-band EQ"), ("eq5", "5-band EQ")] {
         let mut parameters = Vec::new();
@@ -1420,6 +1491,23 @@ pub fn catalog() -> Vec<Descriptor> {
         ],
         &[],
     );
+    add(
+        "overdrive",
+        "Overdrive",
+        "⌇",
+        "Effect",
+        "Guitar-pedal style distortion. Drive boosts the signal into a waveshaper; Shape morphs the clipper from smooth tube-like saturation (0) to hard fuzz clipping (1); Tone is a low-pass after the clipper; Level trims the output and Mix blends with the dry signal. A DC blocker ahead of the clipper keeps input offsets from biasing the distortion, so the wet path never exceeds Level.",
+        vec![port("in", Audio)],
+        vec![port("out", Audio)],
+        vec![
+            param("drive", "Drive", "dB", 0., 60., 18.),
+            param("shape", "Shape", "", 0., 1., 0.35),
+            param("tone", "Tone", "Hz", 300., 20000., 3500.),
+            param("level", "Level", "dB", -24., 12., -6.),
+            param("mix", "Mix", "", 0., 1., 1.),
+        ],
+        &["distortion", "fuzz", "drive", "saturation", "clip~"],
+    );
     for (suffix, signal) in [
         ("control", Control),
         ("audio", Audio),
@@ -1533,6 +1621,17 @@ pub fn catalog() -> Vec<Descriptor> {
             param("time", "Time", "ms", 1., 10000., 100.),
         ],
         &["line"],
+    );
+    add(
+        "control_delay",
+        "Control delay",
+        "↶#",
+        "Control",
+        "Delay a numeric control signal by a time in milliseconds, sample-accurately, including one-sample trigger pulses. Time may be driven from the graph; changes take effect immediately. Up to 5 seconds. Text control data is not delayed.",
+        vec![port("in", Control)],
+        vec![port("out", Control)],
+        vec![param("time", "Delay time", "ms", 0., 5000., 100.)],
+        &["delay", "pipe", "control line delay"],
     );
     for (kind, label, input, output) in [
         ("fft", "FFT", Audio, Spectral),
@@ -1724,7 +1823,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "MIDI to control",
         "♪→",
         "Control",
-        "Decode typed MIDI channel messages. Type is the status high nibble (8 note off, 9 note on, 11 CC, 12 program, 13 pressure, 14 bend). Number identifies a note/controller; value decodes 7-bit values or full 14-bit pitch bend. Channel is 1–16. Trigger marks an event. Filter type/number in the modal; zero type or -1 number accepts all.",
+        "Decode typed MIDI channel messages. Type is the status high nibble (8 note off, 9 note on, 11 CC, 12 program, 13 pressure, 14 bend). Number identifies a note/controller; value decodes 7-bit values or full 14-bit pitch bend. Channel is 1–16. Trigger marks any matching event; note_on and note_off pulse for matching note attacks and releases (a velocity-zero note-on releases), so one decoder with a number filter drives an instrument's trigger and note_off. Filter type/number in the modal; zero type or -1 number accepts all.",
         vec![midi_port()],
         vec![
             port("type", Control),
@@ -1732,6 +1831,8 @@ pub fn catalog() -> Vec<Descriptor> {
             port("value", Control),
             port("channel", Control),
             port("trigger", Control),
+            port("note_on", Control),
+            port("note_off", Control),
         ],
         vec![
             param("message_type", "Message type (0 all)", "", 0., 14., 0.),
@@ -1750,10 +1851,11 @@ pub fn catalog() -> Vec<Descriptor> {
                 | "poly_sampler"
                 | "granular_synth"
                 | "piano"
+                | "drum_pads"
         );
         let midi_output = matches!(
             descriptor.kind.as_str(),
-            "part_midi" | "midi_input" | "osc_to_midi" | "piano"
+            "part_midi" | "midi_input" | "osc_to_midi" | "piano" | "drum_pads"
         );
         if midi_input {
             descriptor.inputs.retain(|p| p.signal != Midi);
@@ -1864,9 +1966,14 @@ impl Graph {
         Ok(flat)
     }
     pub fn validate_flat(&self) -> Result<Vec<usize>, String> {
+        Ok(self.validate_flat_inner(true)?.order)
+    }
+    /// Validate a flat graph and return its render order together with the
+    /// connections that close feedback loops (read one sample late).
+    pub fn schedule(&self) -> Result<Schedule, String> {
         self.validate_flat_inner(true)
     }
-    fn validate_flat_inner(&self, check_routes: bool) -> Result<Vec<usize>, String> {
+    fn validate_flat_inner(&self, check_routes: bool) -> Result<Schedule, String> {
         if self.nodes.iter().filter(|n| n.kind == "record").count() > 16 {
             return Err("At most 16 record nodes are supported".into());
         }
@@ -1930,6 +2037,9 @@ impl Graph {
                     .any(|key| n.parameters.get(*key).is_some_and(|v| v.fract() != 0.))
             {
                 return Err("Piano octave must be a whole number".into());
+            }
+            if n.kind == "drum_pads" && n.parameters.values().any(|v| v.fract() != 0.) {
+                return Err("Drum pad notes and channel must be whole numbers".into());
             }
             if let Some(part) = &n.part_id {
                 if !matches!(n.kind.as_str(), "part_midi" | "monitor_output")
@@ -2113,10 +2223,10 @@ impl Graph {
             return Err("Only one global clock tempo input may be connected".into());
         }
         let mut indegree = vec![0; self.nodes.len()];
-        let mut outgoing = vec![vec![]; self.nodes.len()];
+        let mut outgoing: Vec<Vec<(usize, usize)>> = vec![vec![]; self.nodes.len()];
         let mut occupied = BTreeSet::new();
         let mut edge_ids = BTreeSet::new();
-        for edge in &self.edges {
+        for (edge_index, edge) in self.edges.iter().enumerate() {
             if !edge_ids.insert(&edge.id) {
                 return Err("Duplicate edge ID".into());
             }
@@ -2208,26 +2318,66 @@ impl Graph {
             {
                 return Err("Input already has a driver; use a mixer or math node".into());
             }
-            outgoing[s].push(t);
+            outgoing[s].push((t, edge_index));
             indegree[t] += 1;
         }
+        // Topological order with deterministic feedback breaking. When nothing
+        // is ready, the loop that depends on no other unscheduled loop starts at
+        // its node drawn furthest left (then highest, then by id); the wires
+        // still feeding that node from inside the loop become feedback edges,
+        // which the engine reads one sample late. Only audio and control wires
+        // may close a loop.
         let mut ready: BTreeSet<usize> = indegree
             .iter()
             .enumerate()
             .filter_map(|(i, n)| (*n == 0).then_some(i))
             .collect();
         let mut order = Vec::new();
-        while let Some(i) = ready.pop_first() {
-            order.push(i);
-            for &t in &outgoing[i] {
-                indegree[t] -= 1;
-                if indegree[t] == 0 {
-                    ready.insert(t);
+        let mut scheduled = vec![false; self.nodes.len()];
+        let mut feedback_edge = vec![false; self.edges.len()];
+        let mut feedback = Vec::new();
+        loop {
+            while let Some(i) = ready.pop_first() {
+                order.push(i);
+                scheduled[i] = true;
+                for &(t, edge) in &outgoing[i] {
+                    if feedback_edge[edge] {
+                        continue;
+                    }
+                    indegree[t] -= 1;
+                    if indegree[t] == 0 {
+                        ready.insert(t);
+                    }
                 }
             }
-        }
-        if order.len() != self.nodes.len() {
-            return Err("Cycles require an explicit feedback scheduler; this engine currently accepts acyclic graphs".into());
+            if order.len() == self.nodes.len() {
+                break;
+            }
+            let start = loop_start(&self.nodes, &outgoing, &scheduled, &feedback_edge);
+            for (edge_index, edge) in self.edges.iter().enumerate() {
+                let s = ids[&edge.source];
+                if ids[&edge.target] != start || feedback_edge[edge_index] || scheduled[s] {
+                    continue;
+                }
+                let signal = descriptors
+                    .iter()
+                    .find(|d| d.kind == self.nodes[s].kind)
+                    .unwrap()
+                    .outputs
+                    .iter()
+                    .find(|p| p.id == edge.source_port)
+                    .unwrap()
+                    .signal;
+                if !matches!(signal, Signal::Audio | Signal::Control) {
+                    return Err(
+                        "Feedback loops may only close through audio or control connections".into(),
+                    );
+                }
+                feedback_edge[edge_index] = true;
+                feedback.push(edge_index);
+            }
+            indegree[start] = 0;
+            ready.insert(start);
         }
         if self
             .nodes
@@ -2355,8 +2505,108 @@ impl Graph {
                 );
             }
         }
-        Ok(order)
+        Ok(Schedule { order, feedback })
     }
+}
+
+/// Render order plus the indices of connections that close feedback loops.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Schedule {
+    pub order: Vec<usize>,
+    pub feedback: Vec<usize>,
+}
+
+/// Among unscheduled nodes, find the strongly connected components that no
+/// other unscheduled component feeds, and return the leftmost node in them.
+fn loop_start(
+    nodes: &[Node],
+    outgoing: &[Vec<(usize, usize)>],
+    scheduled: &[bool],
+    feedback_edge: &[bool],
+) -> usize {
+    struct Tarjan<'a> {
+        outgoing: &'a [Vec<(usize, usize)>],
+        scheduled: &'a [bool],
+        feedback_edge: &'a [bool],
+        index: Vec<Option<usize>>,
+        low: Vec<usize>,
+        on_stack: Vec<bool>,
+        stack: Vec<usize>,
+        component: Vec<usize>,
+        next_index: usize,
+        next_component: usize,
+    }
+    impl Tarjan<'_> {
+        fn visit(&mut self, v: usize) {
+            self.index[v] = Some(self.next_index);
+            self.low[v] = self.next_index;
+            self.next_index += 1;
+            self.stack.push(v);
+            self.on_stack[v] = true;
+            for k in 0..self.outgoing[v].len() {
+                let (w, edge) = self.outgoing[v][k];
+                if self.scheduled[w] || self.feedback_edge[edge] {
+                    continue;
+                }
+                match self.index[w] {
+                    None => {
+                        self.visit(w);
+                        self.low[v] = self.low[v].min(self.low[w]);
+                    }
+                    Some(index) if self.on_stack[w] => self.low[v] = self.low[v].min(index),
+                    _ => {}
+                }
+            }
+            if self.low[v] == self.index[v].unwrap() {
+                while let Some(w) = self.stack.pop() {
+                    self.on_stack[w] = false;
+                    self.component[w] = self.next_component;
+                    if w == v {
+                        break;
+                    }
+                }
+                self.next_component += 1;
+            }
+        }
+    }
+    let mut tarjan = Tarjan {
+        outgoing,
+        scheduled,
+        feedback_edge,
+        index: vec![None; nodes.len()],
+        low: vec![0; nodes.len()],
+        on_stack: vec![false; nodes.len()],
+        stack: Vec::new(),
+        component: vec![usize::MAX; nodes.len()],
+        next_index: 0,
+        next_component: 0,
+    };
+    for v in 0..nodes.len() {
+        if !scheduled[v] && tarjan.index[v].is_none() {
+            tarjan.visit(v);
+        }
+    }
+    let mut source_component = vec![true; tarjan.next_component];
+    for v in 0..nodes.len() {
+        if scheduled[v] {
+            continue;
+        }
+        for &(w, edge) in &outgoing[v] {
+            if !scheduled[w] && !feedback_edge[edge] && tarjan.component[v] != tarjan.component[w] {
+                source_component[tarjan.component[w]] = false;
+            }
+        }
+    }
+    (0..nodes.len())
+        .filter(|v| !scheduled[*v] && source_component[tarjan.component[*v]])
+        .min_by(|a, b| {
+            nodes[*a]
+                .x
+                .total_cmp(&nodes[*b].x)
+                .then_with(|| nodes[*a].y.total_cmp(&nodes[*b].y))
+                .then_with(|| nodes[*a].id.cmp(&nodes[*b].id))
+        })
+        .expect("an unscheduled node exists")
 }
 
 impl Project {
@@ -2839,6 +3089,75 @@ mod tests {
             .unwrap();
     }
     #[test]
+    fn feedback_loops_start_at_the_leftmost_node_and_reject_midi_cycles() {
+        let p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        let make = |id: &str, kind: &str, x: f64| {
+            let mut n = p.graph.nodes[0].clone();
+            n.id = id.into();
+            n.kind = kind.into();
+            n.channels = 2;
+            n.x = x;
+            n.y = 0.;
+            n.parameters.clear();
+            n
+        };
+        let edge = |source: &str, sp: &str, target: &str, tp: &str| Edge {
+            id: format!("{source}->{target}.{tp}"),
+            source: source.into(),
+            source_port: sp.into(),
+            target: target.into(),
+            target_port: tp.into(),
+        };
+        let g = Graph {
+            nodes: vec![
+                make("osc", "oscillator", -300.),
+                make("mix", "mixer", 0.),
+                make("delay", "delay", 300.),
+                make("gain", "gain", 600.),
+            ],
+            edges: vec![
+                edge("osc", "out", "mix", "a"),
+                edge("mix", "out", "delay", "in"),
+                edge("delay", "out", "gain", "in"),
+                edge("gain", "out", "mix", "b"),
+            ],
+        };
+        let schedule = g.schedule().unwrap();
+        assert_eq!(schedule.feedback, vec![3]);
+        let names = |order: &[usize]| {
+            order
+                .iter()
+                .map(|i| g.nodes[*i].id.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&schedule.order), ["osc", "mix", "delay", "gain"]);
+        assert!(g.validate().is_ok());
+        // Drawing the delay furthest left makes it the loop start instead.
+        let mut left = g.clone();
+        left.nodes[2].x = -600.;
+        let schedule = left.schedule().unwrap();
+        assert_eq!(schedule.feedback, vec![1]);
+        assert_eq!(schedule.order[1], 2);
+        // A self-loop is the smallest cycle.
+        let looped = Graph {
+            nodes: vec![make("sum", "add", 0.)],
+            edges: vec![edge("sum", "out", "sum", "b")],
+        };
+        assert_eq!(looped.schedule().unwrap().feedback, vec![0]);
+        let midi = Graph {
+            nodes: vec![make("a", "piano", 0.), make("b", "piano", 300.)],
+            edges: vec![
+                edge("a", "midi", "b", "midi"),
+                edge("b", "midi", "a", "midi"),
+            ],
+        };
+        assert!(
+            midi.validate()
+                .unwrap_err()
+                .contains("Feedback loops may only close")
+        );
+    }
+    #[test]
     fn midi_inputs_accept_multiple_sources_audio_inputs_do_not() {
         let p = demo_project("x".into(), "x".into(), Mode::Freeform);
         let make = |id: &str, kind: &str| {
@@ -2880,16 +3199,20 @@ mod tests {
         );
     }
     #[test]
-    fn graph_rejects_cycle_and_duplicate_driver() {
+    fn control_cycles_schedule_as_feedback_edges() {
         let mut p = demo_project("x".into(), "x".into(), Mode::Freeform);
         p.graph.edges.push(Edge {
-            id: "bad".into(),
+            id: "loop".into(),
             source: "mod".into(),
             source_port: "out".into(),
             target: "count".into(),
             target_port: "trigger".into(),
         });
-        assert!(p.validate().is_err());
+        assert!(p.validate().is_ok());
+        let flat = p.graph.flatten().unwrap();
+        let schedule = flat.schedule().unwrap();
+        assert_eq!(schedule.feedback.len(), 1);
+        assert_eq!(schedule.order.len(), flat.nodes.len());
     }
     #[test]
     fn graph_rejects_audio_to_control() {

@@ -9,7 +9,8 @@ const props = defineProps<{projectId:string;nodes:GraphNode[];active:boolean;sta
 const monitorPanel = ref<InstanceType<typeof MonitorPanel>>()
 const monitorState = computed(() => monitorPanel.value?.state ?? 'disconnected')
 const monitorError = computed(() => monitorPanel.value?.error ?? '')
-defineExpose({ toggleMonitor: () => monitorPanel.value?.toggle(), monitorState, monitorError })
+const monitorLevel = computed(() => monitorPanel.value?.meter ?? 0)
+defineExpose({ toggleMonitor: () => monitorPanel.value?.toggle(), monitorState, monitorError, monitorLevel })
 const inventory = ref<{input_interfaces:{id:number;name:string;channels:number|null}[]}>()
 const deviceError = ref('')
 const inputs = computed(() => {

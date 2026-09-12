@@ -117,6 +117,9 @@ impl Biquad {
 struct Binding {
     source: usize,
     edge: usize,
+    /// Closes a feedback loop: the source renders after this node, so the value
+    /// read here is the previous sample's output.
+    feedback: bool,
     merge: Option<usize>,
     midi_lane: Option<usize>,
     source_port: usize,
@@ -182,7 +185,7 @@ struct RuntimeNode {
     latency: usize,
     input: [[f64; MAX_CHANNELS]; 8],
     output: [f64; MAX_CHANNELS],
-    control: [f64; 8],
+    control: [f64; MAX_CHANNELS + 1],
     part_id: Option<String>,
     io: Option<pr0_core::IoConfig>,
     note_inputs: note_inputs::NoteInputs,
@@ -219,6 +222,7 @@ struct RuntimeNode {
     first: [(f64, f64); MAX_CHANNELS],
     filter_cutoff: f64,
     delay: Vec<[f32; MAX_CHANNELS]>,
+    control_delay: Vec<f64>,
     cursor: usize,
     eq: [[effects::Section; 5]; 8],
     vocoder: Option<Box<effects::Vocoder>>,
@@ -462,8 +466,31 @@ impl RuntimeNode {
                 self.control[..5].copy_from_slice(&midi.tick());
                 scalar = self.control[0];
             }
+            "drum_pads" => {
+                // Pad clicks and typed input share one raw frame: pads light for
+                // held notes and each matching note-on pulses that pad's trigger
+                // with the note velocity for one sample.
+                let midi = self.midi_controls.as_mut().unwrap();
+                midi.feed(&self.midi_frame.events[..self.midi_frame.len], false);
+                let _ = midi.tick();
+                self.control = [0.; MAX_CHANNELS + 1];
+                for index in 0..self.midi_frame.len {
+                    let event = self.midi_frame.events[index];
+                    if event.status >> 4 != 9 || event.data2 == 0 {
+                        continue;
+                    }
+                    for pad in 0..6 {
+                        if self.values[pad] == f64::from(event.data1) {
+                            self.control[pad] = f64::from(event.data2);
+                        }
+                    }
+                }
+                scalar = self.control[0];
+            }
             "midi_to_control" => {
                 self.control[4] = 0.;
+                self.control[5] = 0.;
+                self.control[6] = 0.;
                 for index in 0..self.midi_frame.len {
                     let event = self.midi_frame.events[index];
                     if (self.p("message_type") == 0.
@@ -471,6 +498,11 @@ impl RuntimeNode {
                         && (self.p("number_filter") < 0.
                             || self.p("number_filter") == f64::from(event.data1))
                     {
+                        match event.status >> 4 {
+                            9 if event.data2 > 0 => self.control[5] = 1.,
+                            8 | 9 => self.control[6] = 1.,
+                            _ => {}
+                        }
                         self.control[..5].copy_from_slice(&[
                             f64::from(event.status >> 4),
                             f64::from(event.data1),
@@ -637,10 +669,15 @@ impl RuntimeNode {
                     decay: self.p("decay"),
                     sustain: self.p("sustain"),
                     release: self.p("release"),
+                    reset: self.p("reset") > 0.,
                 };
-                scalar = self
-                    .adsr
-                    .tick(self.p("gate") > 0., input[0] > 0., settings, sr);
+                scalar = self.adsr.tick(
+                    self.p("gate") > 0.,
+                    input[0] > 0.,
+                    self.input[1][0] > 0.,
+                    settings,
+                    sr,
+                );
             }
             "gate" => scalar = if self.p("open") > 0. { input[0] } else { 0. },
             "osc_input" => match self.fallback {
@@ -813,6 +850,15 @@ impl RuntimeNode {
                 self.graph_synth_notes();
                 let mut sum = 0.;
                 let release = (-1. / (self.p("release") * 0.001 * sr)).exp();
+                // A positive decay makes every voice a one-shot: its level falls
+                // exponentially from the attack whether or not a release arrives,
+                // which is what percussive patches need.
+                let decay = self.p("decay");
+                let decay_coefficient = if decay > 0. {
+                    (-1. / (decay * 0.001 * sr)).exp()
+                } else {
+                    1.
+                };
                 let fm = self.kind == "fm_synth";
                 let (carrier, modulator, depth, carrier_shape, modulator_shape) = if fm {
                     (
@@ -846,9 +892,11 @@ impl RuntimeNode {
                     let carrier_noise = (self.seed >> 32) as f64 / u32::MAX as f64 * 2. - 1.;
                     sum += oscillator::wave(v.phase, step.abs(), carrier_shape, carrier_noise)
                         * v.level;
-                    if v.releasing {
-                        v.level *= release;
-                    }
+                    v.level *= if v.releasing {
+                        release.min(decay_coefficient)
+                    } else {
+                        decay_coefficient
+                    };
                 }
                 let amplitude = self.p("amplitude");
                 self.output[..self.channels].fill(sum * amplitude);
@@ -875,9 +923,20 @@ impl RuntimeNode {
             }
             "meter" => {
                 self.output = input;
-                scalar = input[..self.channels]
-                    .iter()
-                    .fold(0_f64, |m, x| m.max(x.abs()));
+                // Per-channel peak followers live in the level outputs: instant
+                // rise, exponential fall over the fall time. Channels above the
+                // width read 0 and the scalar readout is the loudest channel.
+                let fall = (-1. / (self.p("release").max(1.) * 0.001 * sr)).exp();
+                for ch in 0..MAX_CHANNELS {
+                    let level = if ch < self.channels {
+                        input[ch].abs().max(self.control[ch + 1] * fall)
+                    } else {
+                        0.
+                    };
+                    let level = if level.is_finite() && level > 1e-6 { level } else { 0. };
+                    self.control[ch + 1] = level;
+                    scalar = scalar.max(level);
+                }
             }
             "envelope" => {
                 let peak = input[..self.channels]
@@ -1146,6 +1205,32 @@ impl RuntimeNode {
                     self.output[ch] = input[ch] * (1. - mix) + wet[ch] * mix;
                 }
             }
+            "overdrive" => {
+                let gain = 10_f64.powf(self.p("drive") / 20.);
+                let shape = self.p("shape");
+                let level = 10_f64.powf(self.p("level") / 20.);
+                let mix = self.p("mix");
+                let alpha = 1. - (-TAU * self.p("tone") / sr).exp();
+                for ch in 0..self.channels {
+                    // Block input DC ahead of the clipper so offsets do not bias
+                    // the distortion, and the clipped output stays within ±1.
+                    let (previous_in, previous_out) = self.first[ch];
+                    let blocked = input[ch] - previous_in + 0.995 * previous_out;
+                    self.first[ch] = (input[ch], blocked);
+                    let driven = blocked * gain;
+                    // Smooth saturation morphing toward a hard clip.
+                    let soft = driven.tanh();
+                    let hard = driven.clamp(-1., 1.);
+                    let clipped = soft + (hard - soft) * shape;
+                    // Tone low-pass after the clipper.
+                    self.eq_previous[ch] = if self.eq_previous[ch].is_finite() {
+                        self.eq_previous[ch] + (clipped - self.eq_previous[ch]) * alpha
+                    } else {
+                        clipped
+                    };
+                    self.output[ch] = input[ch] * (1. - mix) + self.eq_previous[ch] * level * mix;
+                }
+            }
             "reverb" => {
                 let mix = self.p("mix");
                 let decay = self.p("decay");
@@ -1161,6 +1246,13 @@ impl RuntimeNode {
                     self.output[ch] = input[ch] * (1. - mix) + sum * mix;
                 }
                 self.cursor += 1;
+            }
+            "control_delay" => {
+                let capacity = self.control_delay.len();
+                let samples = ((self.p("time") * 0.001 * sr).round() as usize).min(capacity - 1);
+                self.control_delay[self.cursor] = input[0];
+                scalar = self.control_delay[(self.cursor + capacity - samples) % capacity];
+                self.cursor = (self.cursor + 1) % capacity;
             }
             "delay" => {
                 let len = (self.p("time") * 0.001 * sr) as usize;
@@ -1200,7 +1292,10 @@ impl Engine {
     pub fn prepare(graph: Graph, sample_rate: f64) -> Result<Self, String> {
         let authored = graph;
         let graph = authored.flatten()?;
-        let order = graph.validate_flat()?;
+        let schedule = graph.schedule()?;
+        let feedback_edges: std::collections::BTreeSet<usize> =
+            schedule.feedback.iter().copied().collect();
+        let order = schedule.order;
         if !sample_rate.is_finite() || sample_rate <= 0. {
             return Err("Invalid engine sample rate".into());
         }
@@ -1296,7 +1391,7 @@ impl Engine {
                 latency: 0,
                 input: [[0.; MAX_CHANNELS]; 8],
                 output: [0.; MAX_CHANNELS],
-                control: [0.; 8],
+                control: [0.; MAX_CHANNELS + 1],
                 part_id: n.part_id.clone(),
                 io: n.io.clone(),
                 note_inputs: note_inputs::NoteInputs::default(),
@@ -1372,6 +1467,7 @@ impl Engine {
                         | "granular_synth"
                         | "midi_output"
                         | "midi_to_osc"
+                        | "drum_pads"
                 ))
                 .then(|| Box::new(midi_controls::MidiControls::new())),
                 control_text: None,
@@ -1428,6 +1524,11 @@ impl Engine {
                 } else {
                     vec![]
                 },
+                control_delay: if n.kind == "control_delay" {
+                    vec![0.; (sample_rate * 5.) as usize + 1]
+                } else {
+                    vec![]
+                },
                 cursor: 0,
                 eq: [[effects::Section::default(); 5]; 8],
                 vocoder: if n.kind == "vocoder" {
@@ -1477,6 +1578,7 @@ impl Engine {
             nodes[t].bindings.push(Binding {
                 source: s,
                 edge: edge_index,
+                feedback: feedback_edges.contains(&edge_index),
                 merge: None,
                 midi_lane: None,
                 source_port,
@@ -1598,16 +1700,17 @@ impl Engine {
             }
         }
         for &idx in &order {
+            // Feedback edges read the previous sample and are never compensated.
             let input_latency = nodes[idx]
                 .bindings
                 .iter()
-                .filter(|b| b.signal != pr0_core::Signal::Control)
+                .filter(|b| b.signal != pr0_core::Signal::Control && !b.feedback)
                 .map(|b| nodes[b.source].latency)
                 .max()
                 .unwrap_or(0);
             for j in 0..nodes[idx].bindings.len() {
                 let binding = &nodes[idx].bindings[j];
-                let delay = if binding.signal == pr0_core::Signal::Audio {
+                let delay = if binding.signal == pr0_core::Signal::Audio && !binding.feedback {
                     input_latency.saturating_sub(nodes[binding.source].latency)
                 } else {
                     0
@@ -1962,11 +2065,31 @@ impl Engine {
     /// node decodes them for its keys and scalar outlets and forwards them on
     /// its typed output at the next render boundary.
     pub fn piano_note(&mut self, id: &str, pitch: u8, velocity: u8) {
-        if (self.graph_clock.running || velocity == 0)
-            && self.nodes.iter().any(|n| n.id == id && n.kind == "piano")
-        {
-            self.node_midi_note(id, pitch, velocity);
+        if !(self.graph_clock.running || velocity == 0) {
+            return;
         }
+        let Some(channel) = self
+            .nodes
+            .iter()
+            .find(|n| n.id == id && matches!(n.kind.as_str(), "piano" | "drum_pads"))
+            .map(|n| {
+                if n.kind == "drum_pads" {
+                    (n.p("channel") as u8).clamp(1, 16) - 1
+                } else {
+                    0
+                }
+            })
+        else {
+            return;
+        };
+        self.node_midi_message(
+            id,
+            pr0_core::midi::Message {
+                status: (if velocity == 0 { 0x80 } else { 0x90 }) | channel,
+                data1: pitch,
+                data2: velocity,
+            },
+        );
     }
     /// Channel-one convenience over `node_midi_message`; use the message form
     /// when the channel matters.
@@ -2665,6 +2788,14 @@ impl Engine {
             })
             .collect()
     }
+    /// Connection ids that close feedback loops; read one sample late.
+    pub fn feedback_edges(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .flat_map(|n| n.bindings.iter().filter(|b| b.feedback))
+            .map(|b| self.graph.edges[b.edge].id.clone())
+            .collect()
+    }
     pub fn route_targets(&self) -> BTreeMap<String, String> {
         self.nodes
             .iter()
@@ -2764,6 +2895,19 @@ impl Engine {
                     }
                 }
 
+                if n.kind == "drum_pads" {
+                    for pad in 0..6 {
+                        let note = n.values[pad].clamp(0., 127.) as usize;
+                        values.insert(
+                            format!("_pad{}", pad + 1),
+                            if n.midi_controls.as_ref().unwrap().held(note) {
+                                1.
+                            } else {
+                                0.
+                            },
+                        );
+                    }
+                }
                 values.insert(
                     "_midi_event_dropped".into(),
                     (n.midi_pending.dropped + n.midi_frame.dropped) as f64,
@@ -2785,6 +2929,11 @@ impl Engine {
                 }
                 if n.kind == "clock" {
                     values.insert("tempo".into(), self.clock.bpm);
+                }
+                if n.kind == "meter" {
+                    for ch in 0..n.channels {
+                        values.insert(format!("_level{}", ch + 1), n.control[ch + 1]);
+                    }
                 }
                 values.insert("_latency".into(), n.latency as f64);
                 values.insert(
@@ -3604,6 +3753,114 @@ mod tests {
         engine.parameter("gate", "value", 0.).unwrap();
         engine.render(&[], &mut [[0.; 8]; 2]);
         assert_eq!(engine.telemetry()["readout"]["value"], 0.);
+    }
+    #[test]
+    fn piano_trigger_and_note_off_pulses_drive_the_adsr_without_a_gate() {
+        let p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        let template = &p.graph.nodes[0];
+        let node = |id: &str, kind: &str, parameters: BTreeMap<String, f64>| {
+            let mut n = template.clone();
+            n.id = id.into();
+            n.kind = kind.into();
+            n.parameters = parameters;
+            n
+        };
+        let edge = |source: &str, source_port: &str, target: &str, target_port: &str| {
+            pr0_core::Edge {
+                id: format!("{source}-{source_port}-{target}-{target_port}"),
+                source: source.into(),
+                source_port: source_port.into(),
+                target: target.into(),
+                target_port: target_port.into(),
+            }
+        };
+        let graph = Graph {
+            nodes: vec![
+                node("keys", "piano", BTreeMap::new()),
+                node(
+                    "envelope",
+                    "adsr",
+                    [
+                        ("attack".into(), 0.),
+                        ("decay".into(), 0.),
+                        ("sustain".into(), 0.5),
+                        ("release".into(), 0.),
+                    ]
+                    .into(),
+                ),
+                node("readout", "value", BTreeMap::new()),
+            ],
+            edges: vec![
+                edge("keys", "trigger", "envelope", "retrigger"),
+                edge("keys", "note_off", "envelope", "note_off"),
+                edge("envelope", "out", "readout", "value"),
+            ],
+        };
+        let mut engine = Engine::prepare(graph, 1000.).unwrap();
+        engine.render(&[], &mut [[0.; 8]; 4]);
+        assert_eq!(engine.telemetry()["readout"]["value"], 0.);
+        engine.piano_note("keys", 60, 100);
+        engine.render(&[], &mut [[0.; 8]; 8]);
+        assert_eq!(engine.telemetry()["readout"]["value"], 0.5);
+        engine.piano_note("keys", 60, 0);
+        engine.render(&[], &mut [[0.; 8]; 8]);
+        assert_eq!(engine.telemetry()["readout"]["value"], 0.);
+    }
+    #[test]
+    fn meter_publishes_per_channel_levels_that_fall_over_the_fall_time() {
+        let p = demo_project("x".into(), "x".into(), Mode::Freeform);
+        let template = &p.graph.nodes[0];
+        let node = |id: &str, kind: &str, channels: usize, parameters: BTreeMap<String, f64>| {
+            let mut n = template.clone();
+            n.id = id.into();
+            n.kind = kind.into();
+            n.channels = channels;
+            n.parameters = parameters;
+            n
+        };
+        let edge = |source: &str, source_port: &str, target: &str, target_port: &str| {
+            pr0_core::Edge {
+                id: format!("{source}-{source_port}-{target}-{target_port}"),
+                source: source.into(),
+                source_port: source_port.into(),
+                target: target.into(),
+                target_port: target_port.into(),
+            }
+        };
+        let graph = Graph {
+            nodes: vec![
+                node("src", "input", 2, BTreeMap::new()),
+                node("vu", "meter", 2, [("release".into(), 1000.)].into()),
+                node("left", "value", 1, BTreeMap::new()),
+                node("right", "value", 1, BTreeMap::new()),
+                node("third", "value", 1, BTreeMap::new()),
+            ],
+            edges: vec![
+                edge("src", "out", "vu", "in"),
+                edge("vu", "level_1", "left", "value"),
+                edge("vu", "level_2", "right", "value"),
+                edge("vu", "level_3", "third", "value"),
+            ],
+        };
+        let mut engine = Engine::prepare(graph, 1000.).unwrap();
+        let mut hardware = [0_f32; MAX_CHANNELS];
+        hardware[0] = 0.5;
+        hardware[1] = -0.25;
+        engine.render(&[hardware; 4], &mut [[0.; 8]; 4]);
+        let t = engine.telemetry();
+        assert_eq!(t["vu"]["_level1"], 0.5);
+        assert_eq!(t["vu"]["_level2"], 0.25);
+        assert_eq!(t["vu"]["_out"], 0.5);
+        assert!(t["vu"].get("_level3").is_none());
+        assert_eq!(t["left"]["value"], 0.5);
+        assert_eq!(t["right"]["value"], 0.25);
+        assert_eq!(t["third"]["value"], 0.);
+        // Silence: levels fall exponentially (about 63% per fall time).
+        engine.render(&[[0.; MAX_CHANNELS]; 1000], &mut [[0.; 8]; 1000]);
+        let t = engine.telemetry();
+        assert!(t["vu"]["_level1"] > 0.17 && t["vu"]["_level1"] < 0.2, "{}", t["vu"]["_level1"]);
+        assert!(t["vu"]["_level2"] > 0.08 && t["vu"]["_level2"] < 0.1);
+        assert!(t["left"]["value"] > 0.17 && t["left"]["value"] < 0.2);
     }
     #[test]
     fn unchanged_delay_and_control_state_survive_reordered_graph() {
@@ -4887,6 +5144,299 @@ mod typed_midi_tests {
         engine.part_staff_message("p", 2, message);
         engine.render(&[], &mut [[0.; 8]]);
         assert_eq!(engine.take_midi_message("sink"), Some(message));
+    }
+}
+
+#[cfg(test)]
+mod feedback_and_pad_tests {
+    use super::*;
+    use pr0_core::midi::Message;
+    fn node(id: &str, kind: &str, x: f64) -> pr0_core::Node {
+        let mut n = pr0_core::demo_project("f".into(), "f".into(), pr0_core::Mode::Freeform)
+            .graph
+            .nodes[0]
+            .clone();
+        n.id = id.into();
+        n.kind = kind.into();
+        n.label = id.into();
+        n.channels = 1;
+        n.x = x;
+        n.y = 0.;
+        n.parameters.clear();
+        n.control_value = None;
+        n
+    }
+    fn edge(source: &str, sp: &str, target: &str, tp: &str) -> pr0_core::Edge {
+        pr0_core::Edge {
+            id: format!("{source}.{sp}->{target}.{tp}"),
+            source: source.into(),
+            source_port: sp.into(),
+            target: target.into(),
+            target_port: tp.into(),
+        }
+    }
+    #[test]
+    fn control_feedback_reads_the_previous_sample() {
+        let mut one = node("one", "value", 0.);
+        one.parameters.insert("value".into(), 1.);
+        let g = Graph {
+            nodes: vec![one, node("sum", "add", 300.)],
+            edges: vec![
+                edge("one", "out", "sum", "a"),
+                edge("sum", "out", "sum", "b"),
+            ],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        assert_eq!(e.feedback_edges(), vec!["sum.out->sum.b".to_string()]);
+        e.render(&[], &mut [[0.; 8]; 10]);
+        assert_eq!(e.telemetry()["sum"]["_out"], 10.);
+    }
+    #[test]
+    fn audio_delay_feedback_loop_renders_finite_echoes() {
+        let mut tone = node("tone", "oscillator", -300.);
+        tone.parameters
+            .extend([("frequency".into(), 440.), ("amplitude".into(), 0.2)]);
+        let mut delay = node("delay", "delay", 300.);
+        delay.parameters.extend([
+            ("time".into(), 5.),
+            ("mix".into(), 1.),
+            ("feedback".into(), 0.),
+        ]);
+        let mut back = node("back", "gain", 600.);
+        back.parameters.insert("gain".into(), -6.);
+        let g = Graph {
+            nodes: vec![tone, node("mix", "mixer", 0.), delay, back],
+            edges: vec![
+                edge("tone", "out", "mix", "a"),
+                edge("mix", "out", "delay", "in"),
+                edge("delay", "out", "back", "in"),
+                edge("back", "out", "mix", "b"),
+            ],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        assert_eq!(e.feedback_edges(), vec!["back.out->mix.b".to_string()]);
+        let mut peak: f64 = 0.;
+        for _ in 0..4800 {
+            e.render(&[], &mut [[0.; 8]]);
+            let value = e.nodes.iter().find(|n| n.id == "mix").unwrap().output[0];
+            assert!(value.is_finite());
+            peak = peak.max(value.abs());
+        }
+        // Echoes add to the direct tone (mixer gain -6 dB halves the sum).
+        assert!(peak > 0.11, "{peak}");
+        assert!(peak < 0.3, "{peak}");
+    }
+    #[test]
+    fn drum_pads_light_pulse_triggers_and_forward_channel_ten_notes() {
+        let g = Graph {
+            nodes: vec![
+                node("pads", "drum_pads", 0.),
+                node("hits", "counter", 300.),
+                node("tone", "synth", 300.),
+                node("sink", "midi_output", 300.),
+            ],
+            edges: vec![
+                edge("pads", "snare", "hits", "trigger"),
+                edge("pads", "midi", "tone", "midi"),
+                edge("pads", "midi", "sink", "midi"),
+            ],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.piano_note("pads", 38, 100);
+        e.render(&[], &mut [[0.; 8]]);
+        let t = e.telemetry();
+        assert_eq!(t["pads"]["_pad2"], 1.);
+        assert_eq!(t["pads"]["_pad1"], 0.);
+        assert_eq!(t["hits"]["_out"], 1.);
+        assert_eq!(
+            e.take_midi_message("sink"),
+            Some(Message {
+                status: 0x99,
+                data1: 38,
+                data2: 100
+            })
+        );
+        e.render(&[], &mut [[0.; 8]; 8]);
+        assert!(
+            e.nodes
+                .iter()
+                .find(|n| n.id == "tone")
+                .unwrap()
+                .voices
+                .iter()
+                .any(|v| v.pitch == 38 && v.level > 0. && !v.releasing)
+        );
+        e.piano_note("pads", 38, 0);
+        e.render(&[], &mut [[0.; 8]; 2]);
+        assert_eq!(e.telemetry()["pads"]["_pad2"], 0.);
+        assert_eq!(e.telemetry()["hits"]["_out"], 1.);
+        // Received typed MIDI lights pads too.
+        e.node_midi_message(
+            "pads",
+            Message {
+                status: 0x90,
+                data1: 36,
+                data2: 64,
+            },
+        );
+        e.render(&[], &mut [[0.; 8]]);
+        assert_eq!(e.telemetry()["pads"]["_pad1"], 1.);
+    }
+    #[test]
+    fn midi_to_control_pulses_note_on_and_note_off() {
+        let mut decoder = node("dec", "midi_to_control", 300.);
+        decoder.parameters.insert("number_filter".into(), 38.);
+        let g = Graph {
+            nodes: vec![
+                node("keys", "midi_input", 0.),
+                decoder,
+                node("on", "counter", 600.),
+                node("off", "counter", 600.),
+            ],
+            edges: vec![
+                edge("keys", "midi", "dec", "midi"),
+                edge("dec", "note_on", "on", "trigger"),
+                edge("dec", "note_off", "off", "trigger"),
+            ],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        let send = |e: &mut Engine, status, data1, data2| {
+            e.node_midi_message(
+                "keys",
+                Message {
+                    status,
+                    data1,
+                    data2,
+                },
+            );
+            e.render(&[], &mut [[0.; 8]; 2]);
+        };
+        send(&mut e, 0x90, 38, 100);
+        assert_eq!(e.telemetry()["on"]["_out"], 1.);
+        assert_eq!(e.telemetry()["off"]["_out"], 0.);
+        send(&mut e, 0x90, 36, 100);
+        assert_eq!(e.telemetry()["on"]["_out"], 1.);
+        send(&mut e, 0x80, 38, 0);
+        assert_eq!(e.telemetry()["off"]["_out"], 1.);
+        send(&mut e, 0x90, 38, 0);
+        assert_eq!(e.telemetry()["off"]["_out"], 2.);
+        assert_eq!(e.telemetry()["on"]["_out"], 1.);
+    }
+    #[test]
+    fn synth_decay_makes_one_shot_voices_that_fade_without_note_off() {
+        for kind in ["synth", "fm_synth"] {
+            let mut tone = node("tone", kind, 300.);
+            tone.parameters.insert("decay".into(), 10.);
+            let g = Graph {
+                nodes: vec![node("keys", "piano", 0.), tone],
+                edges: vec![edge("keys", "midi", "tone", "midi")],
+            };
+            let mut e = Engine::prepare(g, 48000.).unwrap();
+            e.piano_note("keys", 60, 100);
+            e.render(&[], &mut [[0.; 8]; 4]);
+            let level = |e: &Engine| {
+                e.nodes
+                    .iter()
+                    .find(|n| n.id == "tone")
+                    .unwrap()
+                    .voices
+                    .iter()
+                    .map(|v| v.level)
+                    .fold(0., f64::max)
+            };
+            let early = level(&e);
+            assert!(early > 0.5, "{kind}: {early}");
+            e.render(&[], &mut [[0.; 8]; 480]);
+            let later = level(&e);
+            assert!(
+                later < early * 0.5 && later > 0.,
+                "{kind}: {early} -> {later}"
+            );
+            e.render(&[], &mut [[0.; 8]; 9600]);
+            assert_eq!(level(&e), 0., "{kind}: the voice frees itself");
+            // Without decay a held voice keeps its level.
+            let mut held = node("tone", kind, 300.);
+            held.parameters.insert("decay".into(), 0.);
+            let g = Graph {
+                nodes: vec![node("keys", "piano", 0.), held],
+                edges: vec![edge("keys", "midi", "tone", "midi")],
+            };
+            let mut e = Engine::prepare(g, 48000.).unwrap();
+            e.piano_note("keys", 60, 100);
+            e.render(&[], &mut [[0.; 8]; 4800]);
+            assert!((level(&e) - 100. / 127.).abs() < 1e-9);
+        }
+    }
+    #[test]
+    fn control_delay_shifts_values_and_pulses_by_the_driven_time() {
+        let mut source = node("v", "value", 0.);
+        source.parameters.insert("value".into(), 0.);
+        let mut late = node("late", "control_delay", 300.);
+        late.parameters.insert("time".into(), 1.);
+        let g = Graph {
+            nodes: vec![source, late, node("count", "counter", 600.)],
+            edges: vec![
+                edge("v", "out", "late", "in"),
+                edge("late", "out", "count", "trigger"),
+            ],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 4]);
+        e.parameter("v", "value", 5.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 48]);
+        assert_eq!(
+            e.telemetry()["late"]["_out"],
+            0.,
+            "47 samples of delay remain"
+        );
+        e.render(&[], &mut [[0.; 8]]);
+        assert_eq!(e.telemetry()["late"]["_out"], 5.);
+        assert_eq!(e.telemetry()["count"]["_out"], 1.);
+        // The time is live: a longer delay re-reads older history.
+        e.parameter("late", "time", 2.).unwrap();
+        e.render(&[], &mut [[0.; 8]]);
+        assert_eq!(e.telemetry()["late"]["_out"], 0.);
+        e.render(&[], &mut [[0.; 8]; 48]);
+        assert_eq!(e.telemetry()["late"]["_out"], 5.);
+        e.parameter("late", "time", 0.).unwrap();
+        e.parameter("v", "value", 7.).unwrap();
+        e.render(&[], &mut [[0.; 8]]);
+        assert_eq!(e.telemetry()["late"]["_out"], 7.);
+    }
+    #[test]
+    fn overdrive_clips_toward_full_scale_and_passes_dry_at_zero_mix() {
+        let mut tone = node("tone", "oscillator", 0.);
+        tone.parameters
+            .extend([("frequency".into(), 440.), ("amplitude".into(), 0.2)]);
+        let mut hot = node("hot", "overdrive", 300.);
+        hot.parameters.extend([
+            ("drive".into(), 40.),
+            ("shape".into(), 1.),
+            ("tone".into(), 20000.),
+            ("level".into(), 0.),
+            ("mix".into(), 1.),
+        ]);
+        let mut dry = node("dry", "overdrive", 300.);
+        dry.parameters.insert("mix".into(), 0.);
+        let g = Graph {
+            nodes: vec![tone, hot, dry],
+            edges: vec![
+                edge("tone", "out", "hot", "in"),
+                edge("tone", "out", "dry", "in"),
+            ],
+        };
+        let mut e = Engine::prepare(g, 48000.).unwrap();
+        let mut peak: f64 = 0.;
+        for _ in 0..4800 {
+            e.render(&[], &mut [[0.; 8]]);
+            let tone = e.nodes.iter().find(|n| n.id == "tone").unwrap().output[0];
+            let hot = e.nodes.iter().find(|n| n.id == "hot").unwrap().output[0];
+            let dry = e.nodes.iter().find(|n| n.id == "dry").unwrap().output[0];
+            assert!(hot.is_finite());
+            assert!((dry - tone).abs() < 1e-12);
+            peak = peak.max(hot.abs());
+        }
+        assert!(peak > 0.9 && peak < 1.1, "{peak}");
     }
 }
 

@@ -10,10 +10,41 @@ const error = ref(''), state = ref('disconnected'), microphone = ref(false), inp
 const monitor = ref<HTMLAudioElement>(), settings = ref(''), stats = ref({ lost: 0, jitter: 0, buffer: 0, rtt: 0 })
 type Attempt = { inputKey?: string; peer: RTCPeerConnection; abort: AbortController; stream?: MediaStream; offer?: Promise<RTCSessionDescriptionInit>; timer?: ReturnType<typeof setInterval> }
 let current: Attempt | null = null
+// Peak level of the received monitor stream, 0–1 on a 60 dB scale, measured
+// with an analyser so the footer button can double as a VU meter.
+const meter = ref(0)
+let context: AudioContext | undefined, source: MediaStreamAudioSourceNode | undefined, analyser: AnalyserNode | undefined, meterFrame = 0
+let samples = new Float32Array(0)
+function tickMeter() {
+  if (!analyser) return
+  analyser.getFloatTimeDomainData(samples)
+  let peak = 0
+  for (const value of samples) peak = Math.max(peak, Math.abs(value))
+  const target = Math.max(0, Math.min(1, (20 * Math.log10(Math.max(peak, 1e-5)) + 60) / 60))
+  meter.value = target > meter.value ? target : meter.value * 0.9 + target * 0.1
+  meterFrame = requestAnimationFrame(tickMeter)
+}
+function startMeter(stream: MediaStream) {
+  stopMeter()
+  try {
+    context ??= new AudioContext()
+    source = context.createMediaStreamSource(stream)
+    analyser = context.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0
+    samples = new Float32Array(analyser.fftSize)
+    source.connect(analyser)
+    void context.resume()
+    tickMeter()
+  } catch { meter.value = 0 }
+}
+function stopMeter() {
+  cancelAnimationFrame(meterFrame)
+  source?.disconnect(); analyser?.disconnect(); source = undefined; analyser = undefined; meter.value = 0
+}
 async function disconnect() {
   const attempt = current
   if (!attempt) return
   current = null
+  stopMeter()
   if (attempt.inputKey) delete browserInputBusy[attempt.inputKey]
   attempt.abort.abort(); clearInterval(attempt.timer)
   attempt.stream?.getTracks().forEach(track => track.stop())
@@ -45,6 +76,7 @@ function gather(attempt: Attempt): Promise<void> {
   })
 }
 async function resume() {
+  void context?.resume()
   try { await monitor.value?.play(); error.value = '' }
   catch { error.value = 'Browser playback is blocked. Tap Resume audio to try again.' }
 }
@@ -64,7 +96,9 @@ async function connect() {
     }
     pc.ontrack = async event => {
       if (current !== owned || !monitor.value) return
-      monitor.value.srcObject = event.streams[0] || new MediaStream([event.track]); monitor.value.volume = volume.value
+      const stream = event.streams[0] || new MediaStream([event.track])
+      monitor.value.srcObject = stream; monitor.value.volume = volume.value
+      startMeter(stream)
       try { await monitor.value.play() } catch { if (current === owned) error.value = 'Tap Resume audio to permit monitor playback.' }
     }
     if (microphone.value) {
@@ -110,7 +144,7 @@ async function toggle() {
   if (current) await disconnect()
   else await connect()
 }
-defineExpose({ toggle, state, error })
+defineExpose({ toggle, state, error, meter })
 function level() { if (monitor.value) monitor.value.volume = volume.value }
 watch(() => props.active, active => { if (!active && current) void disconnect() })
 onBeforeUnmount(() => { void disconnect() })

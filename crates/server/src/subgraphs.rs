@@ -12,11 +12,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const BUILTIN_EPIANO: &str = "builtin-electric-piano";
 const BUILTIN_DRUMS: &str = "builtin-fm-drum-machine";
+const BUILTIN_SAMPLER: &str = "builtin-drum-sampler";
+/// Placeholder asset ids used inside the bundled Drum Sampler graph; insertion
+/// rewrites them to the project's links to the global bundled kit (or to fresh
+/// copies of the bundled bytes if an administrator removed those samples).
+const BUNDLED_KIT_BASE: u32 = 900_001;
+fn bundled_placeholder(index: usize) -> u32 {
+    BUNDLED_KIT_BASE + index as u32
+}
 
 fn builtin_graph(id: &str) -> Option<Graph> {
-    let (name, drum) = match id {
-        BUILTIN_EPIANO => ("Electric Piano", false),
-        BUILTIN_DRUMS => ("FM Drum Machine", true),
+    let (name, drum, sampler) = match id {
+        BUILTIN_EPIANO => ("Electric Piano", false, false),
+        BUILTIN_DRUMS => ("FM Drum Machine", true, false),
+        BUILTIN_SAMPLER => ("Drum Sampler", true, true),
         _ => return None,
     };
     let mut nodes = vec![
@@ -32,34 +41,78 @@ fn builtin_graph(id: &str) -> Option<Graph> {
         ]);
         edges.extend([json!({"id":"e1","source":"midi","source_port":"out","target":"fm","target_port":"midi"}),json!({"id":"e2","source":"fm","source_port":"out","target":"verb","target_port":"in"}),json!({"id":"e3","source":"verb","source_port":"out","target":"out","target_port":"in"})]);
     } else {
-        nodes.push(json!({"id":"midi","kind":"subgraph_input_midi","label":"MIDI In","parent":"root","x":0,"y":20,"channels":1,"parameters":{}}));
-        let names = ["Bass Drum", "Snare", "Tom 1", "Tom 2", "Hi Hat", "Cymbal"];
-        for (i, name) in names.iter().enumerate() {
-            let id = format!("voice{i}");
-            let trigger = format!("trigger{i}");
-            nodes.push(json!({"id":trigger,"kind":"subgraph_input_control","label":format!("{name} Trigger"),"parent":"root","x":0,"y":100.0+i as f64*95.0,"channels":1,"parameters":{}}));
-            nodes.push(json!({"id":id,"kind":"fm_synth","label":name,"parent":"root","x":230,"y":80.0+i as f64*95.0,"channels":2,"parameters":{"carrier_frequency":220.0*(i as f64+1.0),"modulator_frequency":440.0*(i as f64+1.0),"fm_depth":300.0,"amplitude":0.16,"release":90.0,"carrier_waveform":if i==1 {1.0} else {0.0},"modulator_waveform":1.0}}));
-            edges.push(json!({"id":format!("m{i}"),"source":"midi","source_port":"out","target":id,"target_port":"midi"}));
-            edges.push(json!({"id":format!("t{i}"),"source":trigger,"source_port":"out","target":id,"target_port":"trigger"}));
+        // One MIDI inlet fans out to six note decoders (General MIDI drum
+        // numbers, matching the Drum pads node). Each voice takes pitch from a
+        // shared constant so carrier/modulator frequencies are literal Hz,
+        // velocity from the decoder or the pad's trigger inlet (send velocity
+        // 1–127, return to 0 to rearm), and note_off from the decoder or the
+        // trigger inlet falling back to 0.
+        nodes.push(json!({"id":"midi","kind":"subgraph_input_midi","label":"MIDI In","parent":"root","x":0,"y":0,"channels":1,"parameters":{}}));
+        // The sampler variant plays six one-shot project samples at their root
+        // pitch; load a sample into each voice from its modal.
+        nodes.push(json!({"id":"pitch","kind":"value","label":"Pad pitch","parent":"root","x":260,"y":0,"channels":1,"parameters":{"value":if sampler { 60.0 } else { 69.0 }}}));
+        // Every voice is a one-shot: its decay envelope runs from the hit, so a
+        // held pad or a missing note-off never leaves a drum ringing.
+        let voices: [(&str, f64, f64, f64, f64, f64, f64, f64, f64); 6] = [
+            // name, note, carrier Hz, modulator Hz, depth, amplitude, decay ms, release ms, modulator waveform
+            ("Bass drum", 36., 55., 30., 120., 0.3, 350., 120., 0.),
+            ("Snare", 38., 180., 700., 900., 0.22, 180., 80., 4.),
+            ("Tom 1", 45., 120., 60., 150., 0.24, 420., 120., 0.),
+            ("Tom 2", 50., 170., 85., 150., 0.24, 360., 120., 0.),
+            ("Hi hat", 42., 800., 3000., 3000., 0.12, 80., 40., 4.),
+            ("Cymbal", 49., 600., 2400., 2500., 0.12, 1200., 300., 4.),
+        ];
+        for (
+            i,
+            (name, note, carrier, modulator, depth, amplitude, decay, release, modulator_wave),
+        ) in voices.iter().enumerate()
+        {
+            let y = 120.0 + i as f64 * 130.0;
+            let (voice, trigger, decoder, velocity) = (
+                format!("voice{i}"),
+                format!("trigger{i}"),
+                format!("notes{i}"),
+                format!("velocity{i}"),
+            );
+            nodes.push(json!({"id":trigger,"kind":"subgraph_input_control","label":name,"parent":"root","x":0,"y":y,"channels":1,"parameters":{}}));
+            nodes.push(json!({"id":decoder,"kind":"midi_to_control","label":format!("{name} notes"),"parent":"root","x":260,"y":y,"channels":1,"parameters":{"message_type":0.0,"number_filter":note}}));
+            nodes.push(json!({"id":velocity,"kind":"max","label":format!("{name} velocity"),"parent":"root","x":520,"y":y,"channels":1,"parameters":{"a":0.0,"b":0.0}}));
+            if sampler {
+                nodes.push(json!({"id":voice,"kind":"poly_sampler","label":format!("{name} sample"),"parent":"root","x":780,"y":y,"channels":2,"parameters":{"asset":f64::from(bundled_placeholder(i)),"root_note":60.0,"amplitude":0.8,"loop":0.0,"release":80.0}}));
+            } else {
+                nodes.push(json!({"id":voice,"kind":"fm_synth","label":name,"parent":"root","x":780,"y":y,"channels":2,"parameters":{"carrier_frequency":carrier,"modulator_frequency":modulator,"fm_depth":depth,"amplitude":amplitude,"decay":decay,"release":release,"carrier_waveform":0.0,"modulator_waveform":modulator_wave}}));
+            }
+            edges.push(json!({"id":format!("m{i}"),"source":"midi","source_port":"out","target":decoder,"target_port":"midi"}));
+            edges.push(json!({"id":format!("p{i}"),"source":"pitch","source_port":"out","target":voice,"target_port":"pitch"}));
+            edges.push(json!({"id":format!("v{i}a"),"source":decoder,"source_port":"value","target":velocity,"target_port":"a"}));
+            edges.push(json!({"id":format!("v{i}b"),"source":trigger,"source_port":"out","target":velocity,"target_port":"b"}));
+            edges.push(json!({"id":format!("v{i}"),"source":velocity,"source_port":"out","target":voice,"target_port":"velocity"}));
+            edges.push(json!({"id":format!("t{i}"),"source":decoder,"source_port":"note_on","target":voice,"target_port":"trigger"}));
+            edges.push(json!({"id":format!("t{i}pad"),"source":trigger,"source_port":"out","target":voice,"target_port":"trigger"}));
+            // Samples play to their end as one-shots, so only the FM voices
+            // take a release from the decoder.
+            if !sampler {
+                edges.push(json!({"id":format!("o{i}"),"source":decoder,"source_port":"note_off","target":voice,"target_port":"note_off"}));
+            }
             let pair = i / 2;
-            edges.push(json!({"id":format!("a{i}"),"source":id,"source_port":"out","target":format!("mix{pair}"),"target_port":if i % 2 == 0 { "a" } else { "b" }}));
+            edges.push(json!({"id":format!("a{i}"),"source":voice,"source_port":"out","target":format!("mix{pair}"),"target_port":if i % 2 == 0 { "a" } else { "b" }}));
         }
-        for (id, a, b) in [
-            ("mix0", "voice0", "voice1"),
-            ("mix1", "voice2", "voice3"),
-            ("mix2", "voice4", "voice5"),
-            ("mix3", "mix0", "mix1"),
-            ("mix4", "mix3", "mix2"),
+        for (id, a, b, x, y, gain) in [
+            ("mix0", "voice0", "voice1", 1040., 185., -3.),
+            ("mix1", "voice2", "voice3", 1040., 445., -3.),
+            ("mix2", "voice4", "voice5", 1040., 705., -3.),
+            ("mix3", "mix0", "mix1", 1300., 315., 0.),
+            ("mix4", "mix3", "mix2", 1560., 510., 0.),
         ] {
-            nodes.push(json!({"id":id,"kind":"crossfade","label":"Drum mix","parent":"root","x":400,"y":100,"channels":2,"parameters":{"mix":0.5}}));
+            nodes.push(json!({"id":id,"kind":"mixer","label":"Drum mix","parent":"root","x":x,"y":y,"channels":2,"parameters":{"gain":gain}}));
             if id == "mix3" || id == "mix4" {
                 edges.push(json!({"id":format!("{id}a"),"source":a,"source_port":"out","target":id,"target_port":"a"}));
                 edges.push(json!({"id":format!("{id}b"),"source":b,"source_port":"out","target":id,"target_port":"b"}));
             }
         }
         edges.push(json!({"id":"mixverb","source":"mix4","source_port":"out","target":"verb","target_port":"in"}));
-        nodes.push(json!({"id":"verb","kind":"reverb","label":"Drum Room","parent":"root","x":500,"y":260,"channels":2,"parameters":{"decay":0.35,"mix":0.08}}));
-        nodes.push(json!({"id":"out","kind":"subgraph_output_audio","label":"Stereo Out","parent":"root","x":740,"y":260,"channels":2,"parameters":{}}));
+        nodes.push(json!({"id":"verb","kind":"reverb","label":"Drum Room","parent":"root","x":1820,"y":510,"channels":2,"parameters":{"decay":0.35,"mix":0.08}}));
+        nodes.push(json!({"id":"out","kind":"subgraph_output_audio","label":"Stereo Out","parent":"root","x":2080,"y":510,"channels":2,"parameters":{}}));
         edges.push(json!({"id":"vo","source":"verb","source_port":"out","target":"out","target_port":"in"}));
     }
     serde_json::from_value(json!({"nodes":nodes,"edges":edges})).ok()
@@ -70,8 +123,34 @@ mod builtin_tests {
     use super::*;
     #[test]
     fn builtins_have_valid_graphs() {
-        for id in [BUILTIN_EPIANO, BUILTIN_DRUMS] {
+        for id in [BUILTIN_EPIANO, BUILTIN_DRUMS, BUILTIN_SAMPLER] {
             builtin_graph(id).unwrap().validate().unwrap();
+        }
+    }
+    #[test]
+    fn bundled_drum_kit_matches_the_sampler_preset_and_decodes() {
+        let kit = crate::sample_library::BUNDLED_KIT;
+        assert_eq!(kit.len(), 6);
+        let graph = builtin_graph(BUILTIN_SAMPLER).unwrap();
+        let referenced: BTreeSet<u32> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "poly_sampler")
+            .map(|n| n.parameters["asset"] as u32)
+            .collect();
+        assert_eq!(
+            referenced,
+            (0..kit.len()).map(bundled_placeholder).collect()
+        );
+        for (id, _, bytes) in kit {
+            let reader = hound::WavReader::new(std::io::Cursor::new(bytes)).unwrap();
+            let spec = reader.spec();
+            assert_eq!(
+                (spec.channels, spec.sample_rate, spec.bits_per_sample),
+                (2, 48000, 16),
+                "{id}"
+            );
+            assert!(reader.duration() > 4800, "{id} is shorter than 100 ms");
         }
     }
 }
@@ -111,6 +190,7 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>
     }
     entries.insert(BUILTIN_EPIANO.into(), json!({"id":BUILTIN_EPIANO,"name":"Electric Piano","owned":false,"public":true,"owner":"pr0former","builtin":true,"versions":[{"version":1,"name":"FM electric piano","public":true}]}));
     entries.insert(BUILTIN_DRUMS.into(), json!({"id":BUILTIN_DRUMS,"name":"FM Drum Machine","owned":false,"public":true,"owner":"pr0former","builtin":true,"versions":[{"version":1,"name":"Six-trigger FM drums","public":true}]}));
+    entries.insert(BUILTIN_SAMPLER.into(), json!({"id":BUILTIN_SAMPLER,"name":"Drum Sampler","owned":false,"public":true,"owner":"pr0former","builtin":true,"versions":[{"version":1,"name":"Six one-shot sample voices","public":true}]}));
     Ok(Json(json!(entries.into_values().collect::<Vec<_>>())))
 }
 fn read_version(db: &Connection, id: &str, version: u64, u: &str) -> Api<Graph> {
@@ -320,21 +400,48 @@ pub async fn insert(
             "Project changed; try inserting again".into(),
         ));
     }
-    let (mut graph, assets) = {
+    // Library assets are copied into the project; the bundled Drum Sampler
+    // instead links the project to the global bundled kit so the samples keep
+    // their names and are not duplicated, falling back to the embedded bytes
+    // only when an administrator has removed a bundled sample.
+    let (mut graph, assets, linked) = {
         let db = app.db.lock().unwrap();
         let graph = read_version(&db, &c.library_id, c.version, &u)?;
-        let mut query = db
-            .prepare("SELECT asset,body FROM subgraph_assets WHERE library_id=?1 AND version=?2")
-            .map_err(internal)?;
-        let assets = query
-            .query_map(params![c.library_id, c.version], |r| {
-                Ok((r.get::<_, u32>(0)?, r.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(internal)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(internal)?;
-        (graph, assets)
+        if c.library_id == BUILTIN_SAMPLER && c.version == 1 {
+            let mut linked = Vec::new();
+            let mut fallback = Vec::new();
+            for (i, (sample, _, bytes)) in crate::sample_library::BUNDLED_KIT.iter().enumerate() {
+                match crate::sample_library::attach(&db, &project, sample) {
+                    Ok(asset) => linked.push((bundled_placeholder(i), asset)),
+                    Err(_) => fallback.push((bundled_placeholder(i), bytes.to_vec())),
+                }
+            }
+            (graph, fallback, linked)
+        } else {
+            let mut query = db
+                .prepare(
+                    "SELECT asset,body FROM subgraph_assets WHERE library_id=?1 AND version=?2",
+                )
+                .map_err(internal)?;
+            let assets = query
+                .query_map(params![c.library_id, c.version], |r| {
+                    Ok((r.get::<_, u32>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(internal)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(internal)?;
+            (graph, assets, Vec::new())
+        }
     };
+    for n in &mut graph.nodes {
+        if let Some(asset) = n.parameters.get("asset").copied() {
+            if let Some((_, linked_asset)) = linked.iter().find(|(old, _)| f64::from(*old) == asset)
+            {
+                n.parameters
+                    .insert("asset".into(), f64::from(*linked_asset));
+            }
+        }
+    }
     let root = graph
         .nodes
         .iter()
