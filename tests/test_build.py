@@ -27,7 +27,11 @@ class BuildTests(unittest.TestCase):
         self.bin.mkdir()
         self.stub('uname', 'echo "${TEST_OS:-Darwin}"')
         self.stub('npm', 'echo "NPM identity=${APPLE_SIGNING_IDENTITY:-none} password=${APPLE_PASSWORD:-none}"; exit 79')
-        for name in ['cargo', 'rustc', 'curl', 'make', 'cc', 'tar']:
+        self.stub('node', 'exit 0')
+        self.stub('xcode-select', 'exit 0')
+        self.stub('pkg-config', 'exit 0')
+        for name in ['cargo', 'rustc', 'curl', 'make', 'cc', 'tar', 'cmake', 'patchelf',
+                     'file', 'wget', 'gst-inspect-1.0']:
             self.stub(name, 'exit 0')
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('APPLE_', 'PR0_'))}
         self.env['PATH'] = str(self.bin) + ':' + os.environ['PATH']
@@ -76,6 +80,34 @@ class BuildTests(unittest.TestCase):
         self.env['TEST_OS'] = 'Linux'
         self.assertEqual(self.run_build().returncode, 79)
         self.assertEqual(self.run_build('--notarize').returncode, 2)
+
+    def test_windows_git_bash_routes_to_powershell(self):
+        self.env['TEST_OS'] = 'MINGW64_NT-10.0'
+        self.stub('powershell.exe', 'printf "POWERSHELL <%s>\\n" "$@"; exit 78')
+        result = self.run_build('--bundles', 'nsis', '--jobs', '6', '--install-deps')
+        self.assertEqual(result.returncode, 78)
+        self.assertIn('<-File>', result.stdout)
+        self.assertIn('<--bundles>', result.stdout)
+        self.assertIn('<nsis>', result.stdout)
+        self.assertIn('<--install-deps>', result.stdout)
+
+    def test_windows_native_script_has_pinned_sidecars_and_prerequisite_help(self):
+        source = (ROOT / 'build.ps1').read_text()
+        self.assertIn('pr0-server-$Target.exe', source)
+        self.assertIn('ffmpeg-$Target.exe', source)
+        self.assertIn('Microsoft.VisualStudio.2022.BuildTools', source)
+        self.assertIn('python mingw-w64-ucrt-x86_64-gcc', source)
+
+    def test_release_workflow_uses_windows_runner_and_bounded_artifacts(self):
+        source = (ROOT / '.github/workflows/desktop-release.yml').read_text()
+        self.assertIn('runs-on: windows-2022', source)
+        self.assertNotIn('runs-on: ubuntu-', source)
+        self.assertNotIn('runs-on: macos-', source)
+        self.assertIn('workflow_dispatch:', source)
+        self.assertIn('- "v*"', source)
+        self.assertIn(r'.\build.ps1 --install-deps --bundles nsis', source)
+        self.assertEqual(source.count('retention-days: 7'), 1)
+        self.assertIn('--draft --verify-tag', source)
 
     def test_interactive_choices(self):
         for answers, expected in [('y\ny\n', 'ROUTE <--bundles>'),

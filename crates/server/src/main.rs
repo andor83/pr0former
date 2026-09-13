@@ -7,6 +7,7 @@ mod discovery;
 mod hardware_meter;
 mod hosting;
 mod local_midi;
+mod conductor_midi;
 mod loops;
 mod media;
 mod monitor_packets;
@@ -78,6 +79,7 @@ impl From<Value> for Event {
 }
 #[derive(Clone)]
 struct App {
+    conductor_midi: std::sync::mpsc::SyncSender<conductor_midi::Message>,
     presence: Arc<Mutex<presence::Presence>>,
     resources: Arc<Mutex<resources::Stats>>,
     osc: Arc<osc::Runtime>,
@@ -1411,7 +1413,7 @@ async fn cue(
     if p.mode != Mode::Conducted {
         return Err(bad("Cue groups are available in conducted projects"));
     }
-    if !can_conduct(&p, &u, &r) {
+    if !can_conduct(&p, &u, &r) && !(r == "editor" && app.performance.lock().unwrap().as_deref() != Some(&id)) {
         return Err(Failure(
             StatusCode::FORBIDDEN,
             "Conductor authority required".into(),
@@ -2265,6 +2267,8 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
             event=events.recv()=>match event{Ok(event)=>{
                 let v=&event.value;
                 if v["type"]=="session_revoked" && v["user_id"]==u && user(&app, &headers).is_err() {let _=socket_text(&mut socket,event.text.to_string()).await;break;}
+                if v["type"].as_str().is_some_and(|s|s.starts_with("conductor_midi_")) && v.get("user_id").is_some_and(|target|target!=&u) { continue; }
+                if v.get("session_id").is_some_and(|session|session!=&visualization_session) && v["type"].as_str().is_some_and(|s|s.starts_with("conductor_midi_")) {continue;}
                 let mine=v.get("project_id").and_then(Value::as_str)==Some(&id);
                 if mine && (v["type"]=="project" || v["type"]=="members_changed") {performer=None;local_midi.invalidate();}
                 // Serialized once by the producer; non-subscribers take the variant without visualizations.
@@ -2275,6 +2279,15 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                 Some(Ok(Message::Text(text)))=>{
                     last_received=tokio::time::Instant::now();
                     if let Ok(v)=serde_json::from_str::<Value>(&text){
+                        if v["type"].as_str().is_some_and(|t| t.starts_with("conductor_midi_")) && v["type"] != "conductor_midi_disconnect" {
+                            if midi_window.elapsed() >= Duration::from_secs(1) { midi_window=tokio::time::Instant::now();midi_messages=0; }
+                            midi_messages=midi_messages.saturating_add(1);
+                            if (v["type"] != "conductor_midi_data" || midi_messages <= 512) && text.len() <= 32768 {
+                                if let Err(error)=conductor_midi::enqueue(&app.conductor_midi,&id,&u,&visualization_session,v.clone()) {
+                                    let _=socket_text(&mut socket,json!({"type":"conductor_midi_error","error":error}).to_string()).await;
+                                }
+                            }
+                        }
                         if v["type"]=="visualizers"{
                             visualizers=v["enabled"]==true;
                             let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:visualizers});
@@ -2326,11 +2339,13 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
             },
             _=check.tick()=>{
                 performer=None;local_midi.invalidate();
+                let _=conductor_midi::enqueue(&app.conductor_midi,&id,&u,&visualization_session,json!({"type":"conductor_midi_heartbeat"}));
                 if user(&app,&headers).is_err() || role(&app,&id,&u).is_err() || last_received.elapsed() >= Duration::from_secs(30) {break;}
                 if tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Ping(Vec::new().into()))).await.map_or(true, |r| r.is_err()) {break;}
             }
         }
     }
+    let _ = conductor_midi::enqueue(&app.conductor_midi,&id,&u,&visualization_session,json!({"type":"conductor_midi_disconnect"}));
     let _ = send(
         &app,
         audio::Command::Visualizers {
@@ -2413,7 +2428,9 @@ async fn main() {
     } else {
         tls::Config::load()
     };
+    let (conductor_midi, conductor_rx) = std::sync::mpsc::sync_channel(1024);
     let app = App {
+        conductor_midi,
         presence: Arc::new(Mutex::new(presence::Presence::default())),
         resources: resources::start(),
         osc,
@@ -2429,6 +2446,7 @@ async fn main() {
         desktop_session: desktop_session.clone(),
         media,
     };
+    conductor_midi::start(app.clone(), conductor_rx);
     app.osc.listen(&app);
     start_autosave(app.clone());
     let desktop_app = app.clone();

@@ -231,11 +231,13 @@ All settings are in node modals and nonstructural controls accept graph connecti
 
 ## Desktop app
 
-Run `./build.sh` to build the Tauri desktop version for macOS or Linux. It bundles
-the server, Vue interface and FFmpeg, opens a private local server, and signs in
-as the local `admin` project owner. The standalone `init.sh` workflow remains
-available. Build requirements, output paths, data storage and verification limits
-are in [docs/DESKTOP.md](docs/DESKTOP.md).
+Run `./build.sh` on macOS/Linux or `.\build.ps1` on Windows to build the native
+Tauri desktop version for the current machine. It bundles the server, Vue interface
+and FFmpeg, opens a private local server, and signs in as the local `admin` project
+owner. Both entry points report missing prerequisites and support `--install-deps`.
+The standalone `init.sh` workflow remains available. Build requirements, output
+paths, the GitHub Actions Windows release build, signing setup, data storage and verification
+limits are in [docs/DESKTOP.md](docs/DESKTOP.md).
 
 The server automatically stops a project’s performance and disables its audio
 engine five seconds after its last project connection leaves. Refreshing or

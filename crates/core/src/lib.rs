@@ -268,6 +268,35 @@ fn default_pulse_unit() -> u8 {
     4
 }
 
+/// One concrete MIDI device/channel/control mapped to a conducted UI target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConductedMidiBinding {
+    pub action: String,
+    #[serde(default)]
+    pub target: String,
+    pub source: String,
+    pub device: String,
+    pub status: u8,
+    pub control: u8,
+}
+impl ConductedMidiBinding {
+    pub fn validate(&self, project: &Project) -> Result<(), String> {
+        let target_ok = match self.action.as_str() {
+            "part" | "arm" => project.parts.iter().any(|p| p.id == self.target),
+            "set" => project.conducted.sets.iter().any(|s| s.id == self.target),
+            "select_set" | "next_set" | "play" | "repeat" | "stop" | "dynamic" => self.target.is_empty(),
+            _ => false,
+        };
+        if !target_ok || !matches!(self.source.as_str(), "local" | "server")
+            || self.device.is_empty() || self.device.len() > 256
+            || !matches!(self.status >> 4, 9 | 10 | 11 | 12 | 13 | 14) || self.control > 127
+            || (matches!(self.status >> 4, 13 | 14) && self.control != 0)
+            || (matches!(self.action.as_str(), "select_set" | "dynamic") && !matches!(self.status >> 4, 10 | 11 | 13 | 14))
+        { return Err("Invalid conducted MIDI binding".into()); }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConductedLayout {
     #[serde(default = "default_count_in_pulses")]
@@ -277,6 +306,8 @@ pub struct ConductedLayout {
     pub pulse_unit: u8,
     #[serde(default)]
     pub sets: Vec<ConductedSet>,
+    #[serde(default)]
+    pub midi_bindings: Vec<ConductedMidiBinding>,
 }
 
 impl Default for ConductedLayout {
@@ -285,6 +316,7 @@ impl Default for ConductedLayout {
             count_in_pulses: default_count_in_pulses(),
             pulse_unit: default_pulse_unit(),
             sets: Vec::new(),
+            midi_bindings: Vec::new(),
         }
     }
 }
@@ -2950,6 +2982,15 @@ impl Project {
         {
             return Err("Invalid conducted performance settings".into());
         }
+        if self.conducted.midi_bindings.len() > 128 { return Err("At most 128 conducted MIDI bindings".into()); }
+        let mut midi_targets = BTreeSet::new();
+        let mut midi_controls = BTreeSet::new();
+        for binding in &self.conducted.midi_bindings {
+            binding.validate(self)?;
+            if !midi_targets.insert((&binding.action, &binding.target))
+                || !midi_controls.insert((&binding.source, &binding.device, binding.status, binding.control))
+            { return Err("Duplicate conducted MIDI binding".into()); }
+        }
         let mut ids = BTreeSet::new();
         for p in &self.parts {
             score::validate(p)?;
@@ -3283,6 +3324,29 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn conducted_midi_bindings_validate_targets_devices_channels_and_uniqueness() {
+        let mut p = demo_project("id".into(), "test".into(), Mode::Conducted);
+        let b = ConductedMidiBinding {action:"part".into(),target:p.parts[0].id.clone(),source:"server".into(),device:"Keys".into(),status:0x92,control:60};
+        p.conducted.midi_bindings.push(b.clone());
+        assert!(p.validate().is_ok());
+        let encoded=serde_json::to_value(&p).unwrap();
+        assert_eq!(serde_json::from_value::<Project>(encoded).unwrap().conducted.midi_bindings[0], b);
+        p.conducted.midi_bindings.push(b.clone());assert!(p.validate().is_err());p.conducted.midi_bindings.pop();
+        for invalid in [
+            ConductedMidiBinding {target:"missing".into(),..b.clone()},
+            ConductedMidiBinding {source:"remote-user".into(),..b.clone()},
+            ConductedMidiBinding {device:"".into(),..b.clone()},
+            ConductedMidiBinding {status:0xf8,..b.clone()},
+            ConductedMidiBinding {control:128,..b.clone()},
+            ConductedMidiBinding {action:"select_set".into(),target:"".into(),..b.clone()},
+        ] {p.conducted.midi_bindings[0]=invalid;assert!(p.validate().is_err());}
+        p.conducted.midi_bindings[0]=ConductedMidiBinding {action:"select_set".into(),target:"".into(),status:0xb7,..b};
+        assert!(p.validate().is_ok());
+        let mut legacy=serde_json::to_value(&p).unwrap();legacy["conducted"].as_object_mut().unwrap().remove("midi_bindings");
+        assert!(serde_json::from_value::<Project>(legacy).unwrap().conducted.midi_bindings.is_empty());
+    }
+
     #[test]
     fn conducted_sets_and_part_meters_are_server_validated() {
         let mut p = demo_project("p".into(), "p".into(), Mode::Conducted);

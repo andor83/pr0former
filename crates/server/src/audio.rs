@@ -124,6 +124,8 @@ pub enum Command {
         repeat: bool,
         count_in_pulses: u8,
     },
+    ConductedConfig { project: String, layout: pr0_core::ConductedLayout, revision: u64 },
+    ConductedToggle { project: String, part: String, arm: bool },
     Dynamics {
         parts: Vec<String>,
         value: Option<u8>,
@@ -435,6 +437,34 @@ fn run(
                             e,
                             &io,
                         );
+                    }
+                }
+                Command::ConductedConfig { project: id, layout, revision } => {
+                    if let Some(p) = &mut project {
+                        if p.id == id && p.revision <= revision { p.conducted = layout; p.revision = revision; }
+                    }
+                }
+                Command::ConductedToggle { project: id, part, arm } => {
+                    if project.as_ref().is_some_and(|p| p.id == id) {
+                        if let (Some(seq), Some(e)) = (&mut sequencer, &mut engine) {
+                            if let Some(state) = seq.playback(e.clock.beat).into_iter().find(|s| s.id == part) {
+                                if arm {
+                                    if !state.armed {
+                                        let p=project.as_ref().unwrap();
+                                        if let Some(performer)=p.parts.iter().find(|p|p.id==part).and_then(|p|p.performer.as_ref()) {
+                                            let conflicts=p.parts.iter().filter(|p|p.id!=part&&p.performer.as_ref()==Some(performer)).map(|p|p.id.clone()).collect::<Vec<_>>();
+                                            seq.arm(&conflicts,false);
+                                        }
+                                    }
+                                    seq.arm(&[part], !state.armed);
+                                }
+                                else {
+                                    let playing = !state.pending.map(|(_, on)| on).unwrap_or(state.playing || state.queue_position.is_some());
+                                    let count = project.as_ref().unwrap().conducted.count_in_pulses;
+                                    seq.cue_request(None, &[part], playing, false, if playing {count} else {0}, e, &io);
+                                }
+                            }
+                        }
                     }
                 }
                 Command::Dynamics { parts, value } => {

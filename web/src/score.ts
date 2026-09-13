@@ -423,11 +423,14 @@ export function scoreAnchors(
       if (n.beat + n.duration <= length) beats.add(n.beat + n.duration)
     }
   const sorted = [...beats].sort((a, b) => a - b)
+  const barEnds = new Set(measures.map(m => m.end))
   let x = origin
   return sorted.map((beat, i) => {
     if (i)
       x +=
-        Math.max(24, (beat - sorted[i - 1]!) * scale) +
+        // Barline strokes sit 12px before their beat anchor. Leave additional
+        // room for the preceding notehead/flag instead of using onset spacing.
+        Math.max(barEnds.has(beat) ? 48 : 24, (beat - sorted[i - 1]!) * scale) +
         (changes.includes(beat) ? 180 : 0)
     return { beat, x }
   })

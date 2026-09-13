@@ -405,9 +405,13 @@ new orchestration Shutdown command; outside render/device callbacks, it closes
 devices, releases notes, finalizes loops/recordings and waits for disk barriers.
 The launcher bounds its exit wait at 30 seconds. No DSP scheduling or device
 callback work moves into the webview. Profile data and recordings live outside
-the application bundle. `build.sh` builds the native host target, pins and builds
-FFmpeg without GPL/nonfree additions, stages local assets/licenses, and invokes
-Tauri packaging. See DESKTOP for packaging constraints and manual validation.
+the application bundle. `build.sh` builds the native macOS/Linux host target and
+forwards Git Bash on Windows to `build.ps1`; the PowerShell entry point builds the
+native x86-64 MSVC target. Both paths pin and build FFmpeg without GPL/nonfree
+additions, stage local assets/licenses, and invoke Tauri packaging. They report
+missing native prerequisites and can invoke supported platform package managers.
+Cross-OS packaging is not implemented. See DESKTOP for packaging constraints and
+manual validation.
 
 ## Project presence and idle shutdown
 
@@ -696,3 +700,35 @@ Polyphonic sampler voices each own the same fixed-size `envelope::Adsr` used by 
 `granular_cloud` derives its descriptor from `granular_synth`, removes the typed MIDI inlet, retains numeric/sample controls, and relabels the existing `position` parameter as Cloud center (0–1). It reuses `Granular` and its bounded Hann-window grain pool. With no gate/trigger/note-off wires, one continuously held voice follows optional numeric pitch/velocity; otherwise the normal numeric note decoder controls voices. Position and spray affect newly launched grains; grain start and playback wrap at the sample edges. Loading, sample switching, root metadata, validation and reusable sample packaging share the other sample instruments’ server paths.
 
 Part player telemetry includes `_written_position` from the same traversal mapping used by its MIDI automation. The read-only playback dialog reuses `ScoreStaff` and `ScorePianoRoll`, renders only its selected part with all staves, and follows that node’s telemetry instead of show transport. Local view toggles and scrolling never update the project. Stale telemetry hides the playhead.
+
+## Conducted MIDI controls
+
+`ConductedLayout.midi_bindings` holds up to 128 validated source/device/channel/
+control-to-target mappings. Targets reference existing parts/sets; each target
+and physical control has one assignment. A server control worker receives bounded
+WebSocket commands and polls native MIDI rings through the same callback adapter
+as graph MIDI inputs. It performs authorization, learn capture, device discovery,
+persistence and edge detection outside device callbacks and `Engine::render`.
+There is one exclusive bind-mode session; bind mode suppresses MIDI cue actions.
+The first eligible message commits a binding, while cancellation discards only a
+pending capture. Source filters never erase channel identity. Native ports are
+opened when bind mode starts and remain open for active server bindings.
+
+Local MIDI has a single authenticated browser source lease automatically tied to
+`Project.conductor` (owner fallback only when undesignated). Editors and the
+conductor can learn from that source and assign concrete devices. Device lists,
+selected set and learn results are WebSocket events, not project telemetry or undo
+data. Disconnect releases the source; bounded leases recover missed cleanup.
+Every data/configuration message rechecks project membership and authority.
+MIDI configuration updates use the setup mutex and revision-checked working-copy
+save, then update engine project metadata without rebuilding DSP or moving clocks.
+The performance edit lock permits only these dedicated MIDI configuration edits;
+ordinary project edits remain locked.
+
+Part toggles inspect the sequencer's current/pending state on the audio worker,
+so rapid retriggers do not depend on browser telemetry. Existing cue commands
+retain engine-time pulse/count-in/queue behavior. Set selection only updates
+shared presentation state. Preparation permits editors to rehearse ordinary cues;
+locked performances preserve conductor cue authority. The native control worker's
+poll and external transport are best effort, not a physical timing guarantee.
+See [conducted MIDI usage](CONDUCTED_MIDI.md) and STATUS for validation limits.

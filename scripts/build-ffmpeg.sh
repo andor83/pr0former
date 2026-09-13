@@ -7,12 +7,16 @@ version=8.1.1
 sha=b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3
 archive="$build_root/ffmpeg-$version.tar.xz"
 source_dir="$build_root/ffmpeg-$version"
+executable="$source_dir/ffmpeg"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) executable="$executable.exe" ;; esac
+python_command=python3
+command -v "$python_command" >/dev/null 2>&1 || python_command=python
 mkdir -p "$build_root"
 if [[ ! -f "$archive" ]]; then
   curl --fail --location --retry 3 "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz" -o "$archive.tmp"
   mv "$archive.tmp" "$archive"
 fi
-python3 - "$archive" "$sha" <<'PY'
+"$python_command" - "$archive" "$sha" <<'PY'
 import hashlib,sys
 with open(sys.argv[1], 'rb') as f: actual=hashlib.file_digest(f,'sha256').hexdigest() if hasattr(hashlib,'file_digest') else hashlib.sha256(f.read()).hexdigest()
 if actual != sys.argv[2]: raise SystemExit('FFmpeg source checksum mismatch; remove the cached archive and retry')
@@ -29,4 +33,4 @@ if [[ ! -f "$source_dir/.pr0-built-v1" ]]; then
     touch .pr0-built-v1
   )
 fi
-"$source_dir/ffmpeg" -protocols 2>/dev/null | python3 -c 'import sys; assert "fd" in sys.stdin.read().split(), "FFmpeg fd protocol is required"'
+"$executable" -protocols 2>/dev/null | "$python_command" -c 'import sys; assert "fd" in sys.stdin.read().split(), "FFmpeg fd protocol is required"'

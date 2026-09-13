@@ -3,8 +3,8 @@
 The in-app guide is available from Settings → Help & documentation, the desktop
 Help menu, and `/?help=1` (including before account sign-in). Setup instructions
 live in `web/src/components/SetupGuide.vue`. They cover first sound, the server/client
-model, desktop local/remote/LAN operation, `init.sh`, and `build.sh`. Keep script
-flags and native menu labels aligned with their source implementations.
+model, desktop local/remote/LAN operation, `init.sh`, `build.sh`, and `build.ps1`.
+Keep script flags and native menu labels aligned with their source implementations.
 
 ## Node authors
 

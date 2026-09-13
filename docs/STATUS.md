@@ -2,6 +2,57 @@
 
 pr0former is a development alpha. Software validation does not establish physical audio latency, deadline reliability, iPad compatibility, or readiness for a 32-player performance.
 
+## Conducted editor controls and MIDI bindings (2026-09-13)
+
+The Conductor editor now exposes the same arm/play/repeat/stop and live-dynamic
+controls as the performance view. Editors may rehearse cues during preparation;
+locked performances retain conductor authority. Playing tiles fill green from
+left to right, and names, performer labels, arming and dynamics use separate rows.
+Blank space beside ARM remains part of the tile's click target; dragging in the
+editor does not accidentally launch a part.
+
+Bind MIDI highlights on-screen targets and captures the first supported message
+from a selected local/server source or the first available device. Device,
+channel and note/controller identity are saved as validated project settings.
+Escape, End bind mode and outside clicks cancel pending capture and leave bind
+mode. MIDI cues are suppressed throughout bind mode. Part/arm toggles, individual
+sets, continuous set selection, next-set advance/wrap, global play/repeat/stop
+and group dynamics are supported. Bindings can be changed during performance
+without unlocking score/graph edits. Help → Performance modes and
+[conducted MIDI usage](CONDUCTED_MIDI.md) describe these controls.
+
+Local input automatically belongs to the designated conductor (owner fallback
+when undesignated), with one browser source lease and a server acknowledgment.
+The conductor and editors can learn from that source and change device choices;
+other members cannot spoof source data or assign bindings. The App retains local
+MIDI across editor/stage changes and reconnects previously enabled inputs after
+reload. Server-connected inputs reuse bounded native MIDI rings, with discovery,
+authorization, persistence and routing on a separate control worker. Cues still
+use engine pulse/count-in scheduling; toggle decisions use current sequencer
+state. Selected sets, device presence and learn/playback state are transient.
+
+Validation: 266 Rust checks passed across the workspace (one manual throughput
+benchmark ignored); the final core/server pass also passed all 114 tests. All
+111 frontend tests, the production build, and 10 affected browser cases passed.
+Browser coverage includes editor rehearsal, queue/count-in/repeat behavior,
+progress direction/layout, first-message capture, cancellation, held-button
+suppression, wrong device/channel rejection, set selection and advance, learning
+under the performance lock, reload, shared conductor/editor device assignment,
+unauthorized source/binding rejection, reduced-motion reorder, existing graph
+local MIDI and Help. The rendered editor was visually reviewed. Native devices
+were disabled for browser tests; physical local/server MIDI, driver hotplug and
+hardware latency remain manual and are not verified performance claims.
+
+## Bar-ending notation spacing (2026-09-13)
+
+The shared notation layout reserves extra room before barlines so a final
+sixteenth-note head/flag no longer overlaps the barline at compact spacing.
+Musical onsets and durations are unchanged. The browser regression reproduced
+an overlap before the fix and now verifies clearance at minimum, default and
+maximum spacing, note selection and unchanged saved timing. All 108 frontend
+tests, three affected browser cases and the production build passed; the
+rendered score was visually reviewed.
+
 ## Arrow-key bar creation and jazz chord symbols (2026-09-13)
 
 Quick-entry Right/Shift-Right now offers to append one bar when navigation would
@@ -549,5 +600,35 @@ Stabilization validation (2026-09-10):
 - `npx playwright test` in `web`: the **68-case full Chromium/API suite passed**. Twelve focused score cases then passed after final keyboard/dynamics changes. The final five-case phrasing/save run passed, including the newly added keyboard-only ramp test (69 distinct standard cases now exist).
 - [Score save/browser regressions](../web/e2e/score-save.spec.ts) delay/fail requests while editing, verify export/revision barriers and draft recovery across tabs, and navigate/nudge ramp points by keyboard. [Phrasing regression](../web/e2e/score-phrasing.spec.ts) verifies multi-frame drag, playback endpoint and single-step undo. [Metronome regression](../web/e2e/metronome.spec.ts) receives actual WebRTC audio energy with score instruments silent.
 - The generated score screenshot was inspected. Original documentation artwork was preserved. All browser servers used isolated test data with native devices disabled; no startup services, production server restart or hardware test was performed.
+
+- Native desktop build entry points (2026-09-13): `build.sh` now selects the
+  current macOS/Linux host and forwards Windows Git Bash to the new `build.ps1`.
+  Native x86-64 Windows builds stage target-suffixed `.exe` server/FFmpeg
+  sidecars and request NSIS/MSI bundles. All platforms preflight required tool
+  versions and native libraries, print exact package-manager commands, and can
+  install supported missing prerequisites after an interactive confirmation or
+  `--install-deps`. Eleven isolated build-routing/dependency tests pass, along
+  with Bash syntax/help checks, the desktop Cargo check, all 111 frontend tests,
+  the production frontend build (with the existing large-chunk warning), and a
+  check of the cached pinned FFmpeg helper. No Windows or Linux package was
+  produced or launched in this validation; native WebView, installer, FFmpeg
+  import, and physical audio/MIDI behavior on those systems remain manual and
+  unverified.
+
+- Native Windows release automation (2026-09-13): the GitHub Actions workflow
+  builds an NSIS installer on Windows x86-64 using the native PowerShell entry
+  point; macOS and Linux remain local builds. It runs manually or for `v*` tags,
+  retains the run artifact for seven days, and turns a tag result into a draft
+  release. Windows signing remains unconfigured. The workflow was syntax-parsed
+  and its static routing/retention/release contract is included in the **12
+  passing** build tests. The hosted workflow and installer have not yet been run,
+  installed, or hardware-tested.
+
+- GitHub visibility (2026-09-13): `andor83/pr0former` is public and the tracked
+  root MIT license permits open-source redistribution. Before the visibility
+  change, tracked filenames, current tracked contents, and Git history were
+  checked for common private-key/token patterns with no matches. Ignored local
+  data, certificates, recordings, dependencies, build outputs, and the dirty
+  working tree were not uploaded by the visibility change.
 
 See [VALIDATION_HISTORY.md](VALIDATION_HISTORY.md) for dated prior runs, [AUDIO_ENGINE_AUDIT.md](AUDIO_ENGINE_AUDIT.md) for the September 8 audit, and [ARCHITECTURE.md](ARCHITECTURE.md) / [SCORE_EDITOR.md](SCORE_EDITOR.md) for current contracts and usage.

@@ -1,0 +1,114 @@
+name: Windows desktop release build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: Windows x86-64
+    runs-on: windows-2022
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: Use stable Rust
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Set bundle version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tags must look like v1.2.3 or v1.2.3-beta.1" >&2
+            exit 1
+          fi
+          node - "$version" <<'NODE'
+          const fs = require('fs')
+          const file = 'desktop/src-tauri/tauri.conf.json'
+          const config = JSON.parse(fs.readFileSync(file, 'utf8'))
+          config.version = process.argv[2]
+          fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n')
+          NODE
+
+      - name: Cache Cargo downloads and compiled FFmpeg
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/.build
+          key: desktop-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock', 'scripts/build-ffmpeg.sh') }}
+          restore-keys: |
+            desktop-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install MSYS2 FFmpeg toolchain
+        shell: pwsh
+        run: |
+          $roots = @('C:\msys64', 'C:\tools\msys64')
+          $root = $roots | Where-Object { Test-Path (Join-Path $_ 'usr\bin\bash.exe') } | Select-Object -First 1
+          if (-not $root) {
+            choco install msys2 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Chocolatey could not install MSYS2 ($LASTEXITCODE)" }
+            $root = $roots | Where-Object { Test-Path (Join-Path $_ 'usr\bin\bash.exe') } | Select-Object -First 1
+          }
+          if (-not $root) { throw 'MSYS2 was installed but its bash executable was not found.' }
+          "MSYS2_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $bash = Join-Path $root 'usr\bin\bash.exe'
+          & $bash -lc 'pacman -Sy --needed --noconfirm make diffutils curl tar xz python mingw-w64-ucrt-x86_64-gcc'
+          if ($LASTEXITCODE -ne 0) { throw "MSYS2 package installation failed ($LASTEXITCODE)" }
+
+      - name: Build Windows bundle
+        shell: pwsh
+        run: .\build.ps1 --install-deps --bundles nsis --jobs 2
+
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr0former-windows-x86_64
+          path: desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Create or refresh draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = @(Get-ChildItem 'desktop\src-tauri\target\release\bundle\nsis\*-setup.exe' | ForEach-Object FullName)
+          if ($files.Count -eq 0) { throw 'No Windows installer was built.' }
+          & gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            & gh release upload $env:GITHUB_REF_NAME @files --clobber
+          else
+            & gh release create $env:GITHUB_REF_NAME @files `
+              --draft --verify-tag --generate-notes --title "pr0former $env:GITHUB_REF_NAME"
+          fi
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release update failed ($LASTEXITCODE)." }

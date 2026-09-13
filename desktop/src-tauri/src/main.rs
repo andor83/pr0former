@@ -64,6 +64,15 @@ type SharedServer = Arc<Mutex<Server>>;
 struct BundledUrl(tauri::Url);
 struct DiscoveryMenu(tauri::menu::Submenu<tauri::Wry>);
 
+fn bundled_executable(directory: &Path, name: &str) -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        return directory.join(format!("{name}.exe"));
+    }
+    #[cfg(not(target_os = "windows"))]
+    directory.join(name)
+}
+
 fn spawn_server(
     data: &Path,
     resources: &Path,
@@ -78,7 +87,7 @@ fn spawn_server(
         .write(true)
         .open(data.join("desktop-server.log"))
         .map_err(|e| e.to_string())?;
-    let mut command = Command::new(bin.join("pr0-server"));
+    let mut command = Command::new(bundled_executable(bin, "pr0-server"));
     // Inherited server overrides must never point a desktop app at production data.
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("PR0_") {
@@ -94,7 +103,7 @@ fn spawn_server(
         .env("PR0_DATA", data.join("data"))
         .env("PR0_RECORDINGS_ROOT", data.join("recordings"))
         .env("PR0_WEB_ROOT", resources.join("resources/web"))
-        .env("PR0_FFMPEG", bin.join("ffmpeg"))
+        .env("PR0_FFMPEG", bundled_executable(bin, "ffmpeg"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))

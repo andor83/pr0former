@@ -1,22 +1,31 @@
 # Desktop application
 
-`./build.sh` builds a Tauri 2 application containing the existing Rust server,
-the production Vue interface, and a pinned FFmpeg executable. The standalone
-server remains available through `init.sh`; neither script installs a desktop
-startup service as part of a build.
+`./build.sh` on macOS/Linux and `build.ps1` on Windows build a Tauri 2 application
+containing the existing Rust server, the production Vue interface, and a pinned
+FFmpeg executable. The standalone server remains available through `init.sh`;
+neither build entry point installs a desktop startup service.
 
 ## Build
 
 ```sh
 ./build.sh                 # macOS .app; Linux AppImage and .deb
 ./build.sh --bundles dmg   # macOS distributable disk image
+./build.sh --install-deps  # install supported missing prerequisites
 ./build.sh --jobs 8
 ./build.sh --help
+
+# Windows PowerShell
+.\build.ps1                         # NSIS .exe and MSI
+.\build.ps1 --bundles nsis          # NSIS only
+.\build.ps1 --install-deps --jobs 8
 ```
 
 Run on the OS/architecture being packaged. Apple Silicon and Intel Macs need
-separate builds; Linux builds likewise target the build machine. Cross compilation
-and universal macOS bundles are not implemented by this script. Output is under
+separate builds; Linux builds likewise target the build machine. The Windows path
+currently supports the native `x86_64-pc-windows-msvc` target. Cross compilation
+and universal macOS bundles are not implemented by these scripts. Git Bash on
+Windows may invoke `./build.sh`; it forwards the same arguments to `build.ps1`.
+Output is under
 `desktop/src-tauri/target/release/bundle/`; on macOS, open
 `macos/pr0former.app`. Builds do not launch the application.
 
@@ -25,8 +34,36 @@ opening. This ignored copy is replaced on each successful build, after any
 requested signing/notarization completes. Tauri's original bundle remains in its
 build directory for `--notarize-only`; that command refreshes the root copy too.
 
-Build dependencies are Cargo/Rust, Node/npm, Python 3, curl, make, a C compiler,
-and tar with xz support. On macOS install Xcode Command Line Tools. Linux also
+### GitHub release builds
+
+`.github/workflows/desktop-release.yml` runs the native build entry point on a
+Windows x86-64 runner. macOS and Linux packages remain local builds on the readily
+available native machines. The workflow runs only when started manually in GitHub
+Actions or when a `v*` tag is pushed. Manual runs leave a seven-day downloadable
+NSIS installer on the workflow run. A semantic version tag such as `v0.1.0` also
+sets the bundle version and creates a **draft** GitHub Release with the Windows
+installer attached. Windows installer signing is not configured yet; inspect and
+test every bundle before publishing the draft release.
+
+The workflow caches Cargo downloads and the compiled, checksum-pinned Windows
+FFmpeg tree. It does not cache the much larger Rust target trees. This repository
+is public, so standard GitHub-hosted Windows runner compute is free under GitHub's
+current Actions policy. Artifact/storage allowances still depend on the repository
+owner's plan; the manual/tag-only triggers and seven-day artifact retention bound
+the default usage. Current rates and quotas are documented in GitHub's Actions
+billing documentation.
+
+The scripts require Rust 1.88 or newer and Node.js 22.12 or newer. Missing tools
+and native libraries are listed before building with platform-specific install
+commands. In an interactive terminal the scripts offer to install supported
+dependencies; `--install-deps` accepts that step noninteractively. Package managers
+may request administrator access. Dependency downloads, Cargo/npm downloads, and
+the FFmpeg source download still require network access.
+
+Build dependencies are Cargo/Rust, Node/npm, Python 3, CMake, curl, make, a C
+compiler, and tar with xz support. On macOS install Xcode Command Line Tools;
+Homebrew is used when the script needs to add Node.js, Python, CMake, or pkg-config.
+Linux also
 needs the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/):
 WebKitGTK 4.1 and GTK development packages, plus ALSA/Opus development packages
 for the server. For example, Debian/Ubuntu package names include
@@ -35,6 +72,15 @@ libasound2-dev libopus-dev`. Install GStreamer base/good/bad plugins and
 `gstreamer1.0-libav` for multimedia testing. Build AppImages on the oldest supported
 base distribution with the required WebKitGTK; an AppImage is not a guarantee of
 compatibility with every Linux distribution. AppImage media bundling is enabled.
+
+Windows requires PowerShell, the MSVC Rust toolchain, Visual Studio 2022 C++ Build
+Tools, CMake, and MSYS2 UCRT64 with GCC/make for the pinned FFmpeg build. The script
+can install these with `winget` and `pacman`, or prints the exact commands when it
+cannot. A newly installed system tool may require reopening PowerShell before the
+build can continue. Tauri's normal Windows signing environment variables remain
+available; macOS `--sign`/`--notarize` flags do not apply. MSI creation may require
+Windows' VBSCRIPT optional feature. Native audio/MIDI, WebView2, sample import,
+installer signing, and installation must be validated on Windows hardware or a VM.
 
 The first build downloads locked npm/Rust dependencies and the checksum-pinned
 FFmpeg 8.1.1 source. FFmpeg is compiled locally and cached in `desktop/.build/`.
@@ -288,6 +334,7 @@ Default writable application directories:
 - macOS: `~/Library/Application Support/org.pr0former.desktop/`
 - Linux: `$XDG_DATA_HOME/org.pr0former.desktop/`, normally
   `~/.local/share/org.pr0former.desktop/`
+- Windows: `%APPDATA%\org.pr0former.desktop\`
 
 Inside are `data/` (SQLite, settings, samples and loops), `recordings/`,
 `desktop-server.log`, `desktop.lock`, `trusted-servers.json` and `window-layouts.json`. The lock is held by the OS, so a leftover
@@ -325,7 +372,8 @@ adopt existing server accounts and generating fresh sessions for one stable owne
 `web/e2e/desktop.spec.ts` exercises the desktop session/interface flow in Chromium;
 it does not test native webview cookie storage or microphone permissions.
 
-macOS/Linux hardware audio, physical MIDI, WebRTC capture/monitoring, sleep/wake,
-long performances, signing/notarization and Linux distribution compatibility are
-manual acceptance checks until actually performed. Desktop packaging does not
-change DSP timing guarantees. See STATUS for the checks performed on this change.
+macOS/Linux/Windows hardware audio, physical MIDI, WebRTC capture/monitoring,
+sleep/wake, long performances, signing/notarization, Windows installation, and
+Linux distribution compatibility are manual acceptance checks until actually
+performed. Desktop packaging does not change DSP timing guarantees. See STATUS
+for the checks performed on this change.

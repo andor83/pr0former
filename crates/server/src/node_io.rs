@@ -367,12 +367,24 @@ fn send(
     }
 }
 
-struct Input {
+pub(crate) struct Input {
     port: String,
     _connection: midir::MidiInputConnection<()>,
     queue: rtrb::Consumer<[u8; 3]>,
     dropped: Arc<AtomicU64>,
     last_dropped: u64,
+}
+impl Input {
+    /// Polled on a control worker, never in an audio/device callback.
+    pub(crate) fn control_message(&mut self) -> Result<Option<[u8; 3]>, String> {
+        let dropped = self.dropped.load(Ordering::Relaxed);
+        if dropped != self.last_dropped {
+            self.last_dropped = dropped;
+            while self.queue.pop().is_ok() {}
+            return Err(format!("MIDI input overflow on {}; controls reset", self.port));
+        }
+        Ok(self.queue.pop().ok())
+    }
 }
 #[derive(Default)]
 pub struct Inputs {
@@ -436,7 +448,7 @@ impl Inputs {
         }
     }
 }
-fn open_input(port: &str) -> Result<Input, String> {
+pub(crate) fn open_input(port: &str) -> Result<Input, String> {
     if std::env::var_os("PR0_DISABLE_NATIVE_DEVICES").is_some() {
         return Err("Native MIDI disabled for this server".into());
     }
@@ -472,7 +484,7 @@ fn open_input(port: &str) -> Result<Input, String> {
         last_dropped: 0,
     })
 }
-fn channel_message(bytes: &[u8]) -> Option<[u8; 3]> {
+pub(crate) fn channel_message(bytes: &[u8]) -> Option<[u8; 3]> {
     let status = *bytes.first()?;
     let length = if matches!(status >> 4, 12 | 13) { 2 } else { 3 };
     if bytes.len() != length {

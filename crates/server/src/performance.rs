@@ -54,16 +54,16 @@ pub struct Lane {
 #[derive(serde::Serialize)]
 pub struct PartPlayback {
     position_end: Option<f64>,
-    id: String,
-    playing: bool,
+    pub(crate) id: String,
+    pub(crate) playing: bool,
     start: f64,
     position: f64,
-    pending: Option<(f64, bool)>,
-    armed: bool,
+    pub(crate) pending: Option<(f64, bool)>,
+    pub(crate) armed: bool,
     repeating: bool,
     count_in_remaining: Option<u8>,
     dynamic_override: Option<u8>,
-    queue_position: Option<u8>,
+    pub(crate) queue_position: Option<u8>,
     scheduled_start: Option<f64>,
 }
 #[derive(Clone, Copy, PartialEq)]
