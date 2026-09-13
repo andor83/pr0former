@@ -2,6 +2,28 @@
 
 pr0former is a development alpha. Software validation does not establish physical audio latency, deadline reliability, iPad compatibility, or readiness for a 32-player performance.
 
+## Linux standard-port setup (2026-09-13)
+
+Linux source installs can grant the release server `CAP_NET_BIND_SERVICE` with
+`./init.sh --allow-low-ports`, run as the normal project user. The script requests
+`sudo` only for the `setcap` command, verifies the resulting file
+capability, and continues to reject running the installer or server as root. Fresh
+interactive Linux setup offers the grant after building. A later `init.sh` build
+detects an existing grant before compilation and restores it if the rebuilt binary
+lost the capability. Linux dependency installation includes the distribution's
+libcap tools. Start warns with the exact remedy when its selected/default address
+may use ports below 1024; unprivileged 8443/8080 operation remains available.
+
+Validation: Bash syntax/help checks passed. All five automated launcher tests
+passed (one opt-in real-server smoke check remained skipped), including a simulated
+Linux `sudo`/`setcap` grant, verification, idempotent rerun, rebuild loss and
+restoration, plus the unchanged startup-service branch. No service was installed
+or enabled. The server suite passed 92 tests (one manual throughput benchmark
+ignored), all 111 frontend tests passed, and the production frontend build passed
+with the existing large-chunk warning. The capability flow was simulated on macOS;
+an actual Linux filesystem capability and privileged-port bind remain manually
+unverified.
+
 ## Conducted editor controls and MIDI bindings (2026-09-13)
 
 The Conductor editor now exposes the same arm/play/repeat/stop and live-dynamic

@@ -232,6 +232,78 @@ fi
                 self.assertEqual(run("--start", "--host", "localhost").returncode, 0)
                 self.assertTrue((root / "binding").read_text().startswith("localhost||"))
 
+    def test_linux_low_port_permission_is_narrow_and_verified(self):
+        with tempfile.TemporaryDirectory(prefix="pr0former capabilities ") as directory:
+            root = Path(directory)
+            script = root / "init.sh"
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "init.sh", script)
+            server = root / "target/release/pr0-server"
+            server.parent.mkdir(parents=True)
+            server.write_text("#!/bin/bash\nexit 0\n")
+            server.chmod(0o700)
+            tools = root / "tools"
+            tools.mkdir()
+            state = root / "capability"
+            trace = root / "sudo-trace"
+            commands = {
+                "uname": "#!/bin/bash\necho Linux\n",
+                "getcap": '#!/bin/bash\nif [ -f "$PR0_TEST_CAPABILITY" ]; then printf "%s cap_net_bind_service=ep\\n" "$1"; fi\n',
+                "setcap": '#!/bin/bash\nprintf "%s|%s" "$1" "$2" > "$PR0_TEST_CAPABILITY"\n',
+                "sudo": '#!/bin/bash\nprintf "%s" "$*" >> "$PR0_TEST_SUDO_TRACE"\n"$@"\n',
+                "cargo": '#!/bin/bash\nif [ "${1-}" = build ]; then rm -f "$PR0_TEST_CAPABILITY"; fi\n',
+                "rustc": "#!/bin/bash\necho 'rustc 1.88.0'\n",
+                "node": "#!/bin/bash\nexit 0\n",
+                "npm": "#!/bin/bash\nexit 0\n",
+                "cmake": "#!/bin/bash\nexit 0\n",
+                "pkg-config": "#!/bin/bash\nexit 0\n",
+                "ffmpeg": "#!/bin/bash\necho ' fd'\n",
+            }
+            for name, body in commands.items():
+                command = tools / name
+                command.write_text(body)
+                command.chmod(0o700)
+            env = os.environ.copy()
+            (root / "home").mkdir()
+            env["HOME"] = str(root / "home")
+            env["PATH"] = f"{tools}:{env['PATH']}"
+            env["PR0_TEST_CAPABILITY"] = str(state)
+            env["PR0_TEST_SUDO_TRACE"] = str(trace)
+
+            result = subprocess.run(["/bin/bash", str(script), "--start"],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("./init.sh --allow-low-ports", result.stderr)
+            certs = root / "certs"
+            certs.mkdir()
+            (certs / "server.pem").write_text("test only")
+            alternate_env = env | {"PR0_HTTP_PORT": "8080"}
+            result = subprocess.run(["/bin/bash", str(script), "--start", "--port", "8443"],
+                                    env=alternate_env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Linux may deny ports", result.stderr)
+
+            result = subprocess.run(["/bin/bash", str(script), "--allow-low-ports"],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(state.read_text(), f"cap_net_bind_service=+ep|{server.resolve()}")
+            self.assertEqual(trace.read_text(), f"setcap cap_net_bind_service=+ep {server.resolve()}")
+            self.assertIn("without running as root", result.stdout)
+
+            trace.unlink()
+            result = subprocess.run(["/bin/bash", str(script), "--allow-low-ports"],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("already bind", result.stdout)
+            self.assertFalse(trace.exists())
+
+            (root / "web").mkdir()
+            result = subprocess.run(["/bin/bash", str(script), "--update"],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("restoring its low-port permission", result.stdout)
+            self.assertEqual(trace.read_text(), f"setcap cap_net_bind_service=+ep {server.resolve()}")
+            self.assertTrue(state.exists())
+
     def test_manual_lifecycle(self):
         with tempfile.TemporaryDirectory(prefix="pr0former launcher ") as directory:
             root = Path(directory)

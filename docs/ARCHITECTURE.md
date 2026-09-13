@@ -108,6 +108,12 @@ Manual `--start` launches record their PID, owner, and process start time under 
 
 `init.sh` builds the application and can generate `.local/start-pr0former.sh`. On macOS it installs `~/Library/LaunchAgents/org.pr0former.server.plist`; on Linux it installs `~/.config/systemd/user/pr0former.service`. The startup script sets absolute paths and optional TLS variables. Startup is per-user at login, not system-wide at boot. Disabling it does not delete project data.
 
+On Linux, `./init.sh --allow-low-ports` grants only the built server binary
+`CAP_NET_BIND_SERVICE`, allowing its normal user to bind HTTP 80 and HTTPS 443.
+The script verifies the grant and preserves an existing capability across builds
+that it performs. Direct rebuilds outside `init.sh` may require rerunning the
+command. Alternate unprivileged application and redirect ports remain supported.
+
 ## Score editor and scheduling
 
 Write-tool clicks choose an insertion point relative to note onsets in the selected measure/staff/voice. Entry starts at the measure boundary or immediately after the preceding note group, avoiding implied leading rests from pointer coordinates. Later chord groups shift right only as needed, consuming existing gaps. The insertion is planned before committing, and any resulting measure overflow rejects the complete edit without shortening the entered duration. Explicit chord entry remains a separate operation. Clicking after a full measure's final note rejects overflow; keyboard entry at the next measure remains available.

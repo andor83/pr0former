@@ -2639,7 +2639,9 @@ async fn main() {
             Some(&std::env::var("PR0_HTTP_PORT").unwrap_or("80".into())),
         )
         .expect("HTTP redirect address");
-        let listener = tokio::net::TcpListener::bind(&http_address).await.expect("Bind HTTP redirect listener (ports 80/443 may require OS permission; use PR0_HTTP_PORT/PR0_PORT for alternate ports)");
+        let listener = tokio::net::TcpListener::bind(&http_address)
+            .await
+            .expect("Bind HTTP redirect listener (on Linux run ./init.sh --allow-low-ports as your normal user, or use PR0_HTTP_PORT/PR0_PORT for alternate ports)");
         println!("HTTP redirect listening on http://{http_address}");
         let _discovery = discovery::advertise(socket, true);
         tokio::try_join!(
@@ -2648,7 +2650,9 @@ async fn main() {
         )
         .expect("Serve HTTPS and HTTP redirect");
     } else {
-        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .expect("Bind server listener (on Linux run ./init.sh --allow-low-ports as your normal user, or use PR0_PORT for an alternate port)");
         let _discovery = discovery::advertise(listener.local_addr().unwrap(), false);
         axum::serve(listener, router).await.unwrap();
     }

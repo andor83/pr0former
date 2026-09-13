@@ -12,6 +12,7 @@ UPDATE_ONLY=false
 UPDATE_AND_START=false
 SETUP_SSL=false
 REMOVE_SSL=false
+ALLOW_LOW_PORTS=false
 NO_SSL=false
 RUN_DIR="$PROJECT_DIR/.local/manual-runs"
 START_HOST=""
@@ -29,6 +30,8 @@ pr0former initial setup
   ./init.sh --startup   Interactively enable or disable startup only
   ./init.sh --setup-ssl Create a local certificate for HTTPS (restart to apply)
   ./init.sh --remove-ssl Remove managed certificates and use HTTP (restart to apply)
+  ./init.sh --allow-low-ports
+                        On Linux, allow the built server to bind ports 80/443
   ./init.sh --help      Show this help
   --no-ssl             Force HTTP for this --start/--uas launch
   --host HOST          Override the bind host for --start/--uas (IPv4, IPv6, or hostname)
@@ -37,6 +40,7 @@ pr0former initial setup
 macOS: startup uses a LaunchAgent for the current user, at login.
 Linux: startup uses a systemd user service, at login.
 The script asks before installing dependencies or changing startup services.
+On Linux, --allow-low-ports requests sudo only for setcap, not for the server.
 No administrator account or password is created; bootstrap in the web interface.
 --start prints the compiled Git revision and checks the tracked remote branch (up to 8 seconds).
 Red warnings identify stale/dirty builds or an unverifiable version; startup still continues.
@@ -49,8 +53,8 @@ then runs --update and --start. Pull/build failures prevent startup.
 It requires installed build tools and does not change startup services.
 HTTPS defaults to 443 with redirects on 80; without SSL the default is HTTP on 80.
 --setup-ssl/--remove-ssl take effect after restart and do not change startup services.
-Trust certs/ca.pem on each client. Linux may require bind-port permission
-or alternate ports: PR0_HTTP_PORT=8080 ./init.sh --start --port 8443.
+Trust certs/ca.pem on each client. On Linux, run --allow-low-ports once after
+building, or use: PR0_HTTP_PORT=8080 ./init.sh --start --port 8443.
 HELP
 }
 while [ "$#" -gt 0 ]; do
@@ -63,6 +67,7 @@ while [ "$#" -gt 0 ]; do
     --uas) UPDATE_AND_START=true ;;
     --setup-ssl) SETUP_SSL=true ;;
     --remove-ssl) REMOVE_SSL=true ;;
+    --allow-low-ports) ALLOW_LOW_PORTS=true ;;
     --no-ssl) NO_SSL=true ;;
     --host|--port)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
@@ -77,7 +82,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 mode_count=0
-for selected in "$START_ONLY" "$STOP_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$UPDATE_AND_START" "$SETUP_SSL" "$REMOVE_SSL"; do
+for selected in "$START_ONLY" "$STOP_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$UPDATE_AND_START" "$SETUP_SSL" "$REMOVE_SSL" "$ALLOW_LOW_PORTS"; do
   if [ "$selected" = true ]; then mode_count=$((mode_count + 1)); fi
 done
 if [ "$mode_count" -gt 1 ]; then printf 'Select only one launcher action.\n' >&2; exit 2; fi
@@ -109,9 +114,85 @@ if { [ "$START_ONLY" = true ] && [ "$STARTUP_ONLY" = true ]; } ||
   exit 2
 fi
 if [ "$(id -u)" -eq 0 ]; then
-  printf 'Run this script as your normal user, not root. It requests sudo when needed.\n' >&2
+  printf 'Run this script as your normal user, not root. It requests sudo when needed.\nOn Linux, use ./init.sh --allow-low-ports to grant only the bind permission.\n' >&2
   exit 1
 fi
+
+capability_tool() {
+  local name="$1" candidate
+  candidate="$(command -v "$name" 2>/dev/null || true)"
+  if [ -n "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+  for candidate in "/usr/sbin/$name" "/sbin/$name"; do
+    if [ -x "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+has_low_port_permission() {
+  local binary="$PROJECT_DIR/target/release/pr0-server" getcap_tool capabilities
+  [ "$PLATFORM" = Linux ] || return 1
+  [ -x "$binary" ] || return 1
+  getcap_tool="$(capability_tool getcap || true)"
+  [ -n "$getcap_tool" ] || return 1
+  capabilities="$("$getcap_tool" "$binary" 2>/dev/null || true)"
+  case "$capabilities" in *cap_net_bind_service*) return 0 ;; *) return 1 ;; esac
+}
+
+allow_low_ports() {
+  local binary="$PROJECT_DIR/target/release/pr0-server" setcap_tool getcap_tool capabilities
+  if [ "$PLATFORM" != Linux ]; then
+    printf '%s\n' '--allow-low-ports is needed only on Linux.' >&2
+    return 1
+  fi
+  if [ ! -x "$binary" ]; then
+    printf 'A release build is required. Run ./init.sh first (or cargo build --release).\n' >&2
+    return 1
+  fi
+  setcap_tool="$(capability_tool setcap || true)"
+  getcap_tool="$(capability_tool getcap || true)"
+  if [ -z "$setcap_tool" ] || [ -z "$getcap_tool" ]; then
+    printf 'Linux capability tools are required. Install libcap2-bin (Debian/Ubuntu) or libcap (Fedora/Arch), then rerun ./init.sh --allow-low-ports.\n' >&2
+    return 1
+  fi
+  if has_low_port_permission; then
+    printf 'The release server can already bind Linux ports below 1024.\n'
+    return 0
+  fi
+  command -v sudo >/dev/null 2>&1 || {
+    printf 'sudo is required to grant the release binary low-port permission.\n' >&2
+    return 1
+  }
+  printf 'Granting only CAP_NET_BIND_SERVICE to the release server (sudo may prompt)…\n'
+  # Let sudo resolve setcap through its administrator-controlled secure_path;
+  # never elevate a same-named executable supplied by the project or user PATH.
+  sudo setcap cap_net_bind_service=+ep "$binary"
+  capabilities="$("$getcap_tool" "$binary" 2>/dev/null || true)"
+  case "$capabilities" in
+    *cap_net_bind_service*)
+      printf 'The release server can now bind ports 80 and 443 without running as root.\n'
+      ;;
+    *)
+      printf 'setcap completed, but CAP_NET_BIND_SERVICE was not found on %s.\n' "$binary" >&2
+      return 1
+      ;;
+  esac
+}
+
+linux_launch_may_need_low_ports() {
+  local http_port
+  [ "$PLATFORM" = Linux ] || return 1
+  if [ -z "$START_PORT" ] || [ "$START_PORT" -lt 1024 ]; then return 0; fi
+  [ "$NO_SSL" = true ] && return 1
+  if [ -f "$PROJECT_DIR/certs/server.pem" ] || [ -n "${PR0_TLS_CERT:-}" ]; then
+    http_port="${PR0_HTTP_PORT:-80}"
+    case "$http_port" in ''|*[!0-9]*) return 0 ;; esac
+    [ "${#http_port}" -gt 5 ] && return 0
+    [ "$((10#$http_port))" -lt 1024 ] && return 0
+  fi
+  return 1
+}
+
+if [ "$ALLOW_LOW_PORTS" = true ]; then allow_low_ports; exit 0; fi
 
 # The start time and owner survive exec, and guard against stale, reused PIDs.
 process_identity() {
@@ -242,6 +323,9 @@ if [ "$START_ONLY" = true ]; then
     exit 1
   fi
   cd -- "$PROJECT_DIR"
+  if linux_launch_may_need_low_ports && ! has_low_port_permission; then
+    version_warning 'Linux may deny ports 80/443. Run ./init.sh --allow-low-ports as your normal user; it will request sudo only for setcap.'
+  fi
   check_start_version
   if [ "$NO_SSL" = true ]; then export PR0_NO_SSL=1; fi
   # These component overrides take precedence over PR0_BIND in saved scripts.
@@ -295,8 +379,10 @@ rust_supported() {
 }
 activate_tools() {
   if [ -x "$HOME/.local/share/pr0former/node/bin/node" ]; then export PATH="$HOME/.local/share/pr0former/node/bin:$PATH"; fi
-  if [ -x /opt/homebrew/bin/brew ]; then eval "$(/opt/homebrew/bin/brew shellenv)"; fi
-  if [ -x /usr/local/bin/brew ]; then eval "$(/usr/local/bin/brew shellenv)"; fi
+  if [ "$PLATFORM" = Darwin ]; then
+    if [ -x /opt/homebrew/bin/brew ]; then eval "$(/opt/homebrew/bin/brew shellenv)"; fi
+    if [ -x /usr/local/bin/brew ]; then eval "$(/usr/local/bin/brew shellenv)"; fi
+  fi
   if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
 }
 require_ffmpeg() {
@@ -346,13 +432,13 @@ install_dependencies() {
       if ask 'Install compiler, audio, Node.js, CMake, TLS and package-config dependencies using the system package manager?'; then
         if command -v apt-get >/dev/null 2>&1; then
           sudo apt-get update
-          sudo apt-get install -y build-essential curl ca-certificates git cmake pkg-config libasound2-dev libopus-dev libssl-dev nodejs npm ffmpeg openssl
+          sudo apt-get install -y build-essential curl ca-certificates git cmake pkg-config libasound2-dev libopus-dev libssl-dev libcap2-bin nodejs npm ffmpeg openssl
         elif command -v dnf >/dev/null 2>&1; then
-          sudo dnf install -y gcc gcc-c++ make curl ca-certificates git cmake pkgconf-pkg-config alsa-lib-devel opus-devel openssl-devel nodejs npm ffmpeg openssl
+          sudo dnf install -y gcc gcc-c++ make curl ca-certificates git cmake pkgconf-pkg-config alsa-lib-devel opus-devel openssl-devel libcap nodejs npm ffmpeg openssl
         elif command -v pacman >/dev/null 2>&1; then
-          sudo pacman -S --needed base-devel curl ca-certificates git cmake pkgconf alsa-lib opus openssl nodejs npm ffmpeg openssl
+          sudo pacman -S --needed base-devel curl ca-certificates git cmake pkgconf alsa-lib opus openssl libcap nodejs npm ffmpeg openssl
         else
-          printf 'No supported package manager. Install a C/C++ toolchain, curl, git, CMake, pkg-config, ALSA/Opus/OpenSSL development packages, FFmpeg, Node.js and npm.\n' >&2
+          printf 'No supported package manager. Install a C/C++ toolchain, curl, git, CMake, pkg-config, ALSA/Opus/OpenSSL development packages, libcap tools, FFmpeg, Node.js and npm.\n' >&2
         fi
       fi
       ;;
@@ -618,9 +704,15 @@ UNIT
 }
 
 build_application() {
+  local restore_low_ports=false
+  if has_low_port_permission; then restore_low_ports=true; fi
   printf '\nInstalling locked frontend dependencies and building the application…\n'
   (cd "$PROJECT_DIR/web" && npm ci && npm run build)
   (cd "$PROJECT_DIR" && cargo build --release --locked)
+  if [ "$restore_low_ports" = true ] && ! has_low_port_permission; then
+    printf '\nThe rebuild replaced the capable server binary; restoring its low-port permission.\n'
+    allow_low_ports
+  fi
 }
 
 if [ "$UPDATE_ONLY" = true ]; then
@@ -641,6 +733,7 @@ if [ "$STARTUP_ONLY" = true ]; then startup_menu; exit 0; fi
 if [ "$SETUP_SSL" = true ]; then setup_ssl; exit 0; fi
 install_dependencies
 build_application
+if [ "$PLATFORM" = Linux ] && ! has_low_port_permission && ask 'Allow the server to bind standard web ports 80 and 443? This runs sudo only for setcap.'; then allow_low_ports; fi
 if ask 'Create a local HTTPS certificate for browser audio on LAN devices?'; then setup_ssl; fi
 if ask 'Run automated Rust and frontend unit tests?'; then
   (cd "$PROJECT_DIR" && cargo test --workspace --locked)

@@ -30,6 +30,8 @@ Startup prints the compiled Git commit and build time. `--start` checks the trac
 
 Starts the built release server in the foreground; press Ctrl-C to stop. If `.local/start-pr0former.sh` exists, its saved bind address and TLS settings are used. Otherwise, the server uses the current `PR0_` environment settings and listens on `0.0.0.0:80` over HTTP or `0.0.0.0:443` with a certificate by default. Open http://127.0.0.1 locally or use the server's LAN address from another device. This command skips setup and does not require an interactive terminal.
 
+On Linux, keep the installer and server under your normal account. To use ports 80 and 443, run `./init.sh --allow-low-ports` after building. It requests `sudo` only to grant `CAP_NET_BIND_SERVICE` to the release binary; it never runs the server as root. Builds performed through `init.sh` preserve an existing grant.
+
 ```sh
 ./init.sh --start --host 127.0.0.1 --port 4500
 ```
@@ -103,7 +105,7 @@ The visible `certs/` folder is excluded from Git. Existing `.local/ssl/` certifi
 
 Copy only `certs/ca.pem` to each client and install/trust it. On iPad, install the certificate profile, then enable full trust under **Settings → General → About → Certificate Trust Settings**, as described in [Apple’s certificate trust instructions](https://support.apple.com/en-us/102390). Merely bypassing a certificate warning is insufficient for reliable browser audio. The server certificate lasts 397 days; rerun setup when it expires or when the server’s address changes, and trust the replacement CA on clients.
 
-On Linux systems restricting ports below 1024, grant the built binary bind permission (`sudo setcap cap_net_bind_service=+ep target/release/pr0-server`, reapply after rebuilding), or use unprivileged ports such as `PR0_HTTP_PORT=8080 ./init.sh --start --port 8443`. Setup does not change OS port privileges or client trust stores.
+On Linux systems restricting ports below 1024, run `./init.sh --allow-low-ports` as your normal user. The command requests `sudo` only for `setcap`, verifies the resulting `CAP_NET_BIND_SERVICE` grant, and does not run the installer or server as root. The initial Linux setup also offers this step, and later builds through `init.sh` preserve an existing grant. Alternatively, use unprivileged ports such as `PR0_HTTP_PORT=8080 ./init.sh --start --port 8443`.
 
 Use your own certificate authority or an existing trusted certificate if preferred. WebRTC also requires direct LAN UDP reachability; guest Wi-Fi/client isolation can prevent media connections. No external STUN/TURN service is configured.
 
