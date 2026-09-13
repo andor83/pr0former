@@ -8,9 +8,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    net::{Ipv4Addr, SocketAddr, UdpSocket},
+    net::{Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,6 +74,7 @@ struct StateData {
 }
 pub struct Runtime {
     state: Mutex<StateData>,
+    destinations: Mutex<std::collections::BTreeMap<String, (Instant, Result<SocketAddr, String>)>>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -83,6 +84,7 @@ impl Default for Runtime {
             let _ = socket.set_nonblocking(true);
         }
         Self {
+            destinations: Mutex::new(std::collections::BTreeMap::new()),
             state: Mutex::new(StateData {
                 settings,
                 sockets: Sockets {
@@ -186,6 +188,41 @@ impl Runtime {
     }
     pub fn reject(&self) {
         self.state.lock().unwrap().rejected += 1;
+    }
+    /// Called only by the external node output worker, never by render or callbacks.
+    pub fn send_host(&self, bytes: &[u8], destination: &str) -> Result<(), String> {
+        let address = if let Ok(address) = destination.parse::<SocketAddr>() {
+            address
+        } else {
+            let mut cache = self.destinations.lock().unwrap();
+            let now = Instant::now();
+            if !cache
+                .get(destination)
+                .is_some_and(|(until, _)| *until > now)
+            {
+                let result = destination
+                    .to_socket_addrs()
+                    .map_err(|error| {
+                        format!("Cannot resolve OSC destination {destination}: {error}")
+                    })
+                    .and_then(|mut addresses| {
+                        addresses.find(SocketAddr::is_ipv4).ok_or_else(|| {
+                            format!("OSC destination {destination} has no IPv4 address")
+                        })
+                    });
+                let ttl = if result.is_ok() { 60 } else { 5 };
+                if cache.len() >= 128 {
+                    cache.clear();
+                }
+                cache.insert(
+                    destination.into(),
+                    (Instant::now() + Duration::from_secs(ttl), result),
+                );
+            }
+            cache[destination].1.clone()?
+        };
+        self.send(bytes, address);
+        Ok(())
     }
     pub fn send(&self, bytes: &[u8], destination: SocketAddr) {
         let mut state = self.state.lock().unwrap();

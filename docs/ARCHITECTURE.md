@@ -22,7 +22,7 @@ The WebRTC adapter encodes the selected master mix or dedicated monitor output a
 
 Knobs and Sliders contain 1–8 MIDI CC controls. Each control has a channel and CC number, a numeric outlet, and (for Sliders) a matching numeric input. Received MIDI is forwarded unchanged; GUI gestures emit assigned CCs. Slider values apply range, step and decimal rounding in DSP. Connected slider inputs are read-only in the UI and controller API. Live values and learn state use fixed prepared arrays; telemetry serialization occurs outside rendering. MIDI Learn captures the next incoming CC and the initiating browser saves its channel/number as configuration. GUI values are transient; learned assignments and display options are project data.
 
-Local audio input device selection does not start capture. The node modal's connection button starts the shared browser monitor session with that node as its microphone destination. This uses the same validated WebRTC/Opus uplink as the Monitor panel; changing the destination reconnects the session.
+Local audio input starts the shared WebRTC/Opus microphone session automatically while the engine is enabled, selecting the user's first assigned input or the owner's first unassigned input. Microphone permission is still required. One input uplink is available per project/user session; a node accepts only one sender. The on-node microphone button controls the `mute` parameter (default 0); a positive connected value silences every channel in DSP and locks manual editing. Muting retains capture and the peer connection. Device and machine-name choices live locally in the modal. Tauri supplies its hostname; browsers use an editable local device name because browser APIs do not expose hostnames. `GET projects/:id/media` exposes transient, project-authorized source identity and connection state to all members; the graph and Monitor display user/machine names and sampled per-channel output levels. Metadata is removed when the sender lease ends and never creates a project revision.
 
 - Node IDs and edge IDs are unique. Unknown node kinds/ports/parameters are rejected.
 - Widths are 1–8 channels; audio edges require matching per-port widths. Ports normally inherit node width; catalog `fixed_channels` overrides it for mono split outputs and merge inputs. Split/merge ports beyond the active bundle width are silent/ignored.
@@ -47,7 +47,7 @@ All paths below are under `/api`:
 | Endpoint | Purpose |
 |---|---|
 | `GET status`, `GET catalog` | Bootstrap/server status and node descriptors |
-| `POST register/login/logout`, `GET me` | Local authentication |
+| `POST register/login/logout`, `GET/PUT me` | Local authentication |
 | `GET/POST projects` | List/create authorized projects |
 | `GET/PUT projects/:id` | Load/update with revision check |
 | `PUT projects/:id/parameter` | Validated `{node, parameter, value, revision}` mutation |
@@ -59,7 +59,7 @@ All paths below are under `/api`:
 | `GET projects/:id/members/candidates`, `GET/PUT users/:id/avatar` | Existing-user selection and normalized profile avatars |
 | `GET/POST projects/:id/samples` | List project samples / import audio through FFmpeg |
 | `GET devices`, `POST projects/:id/audio` | Native device discovery and input/output enablement |
-| `POST/DELETE projects/:id/media` | WebRTC SDP negotiation and disconnect |
+| `GET/POST/DELETE projects/:id/media` | Connected input identities, WebRTC SDP negotiation and disconnect |
 | `WS projects/:id/events` | Project revisions, timing, and telemetry |
 
 Telemetry carries project ID/revision, session epoch, sequence number, monotonic server timestamp, sample/beat/BPM/running state, device diagnostics, per-part playing/start/local-position/pending-cue state, and effective per-node parameter values. It is emitted at 20 Hz. Browser offset estimation uses the smallest observed ping round trip; the animation interpolates from the latest engine timestamp. Telemetry older than 500 ms is marked stale. A separate `engine_status` message publishes `active_project` (the show) and `graph_project` (the loaded development graph), including connection/recovery snapshots. Its monotonic server timestamp is sampled while holding the active-project lock, so browsers can reject queued statuses older than their initial snapshot. The client clears graph telemetry and disconnects its monitor when its graph is unloaded, disabled or assigned to another project; show deactivation alone keeps graph monitoring connected. This ownership status does not acknowledge physical device completion.
@@ -346,8 +346,11 @@ ignores bind/TLS overrides, and creates a persistent local owner only in a fresh
 or previously initialized desktop database. A `desktop_owner` identity mapping
 is created only in desktop mode. It never upgrades an existing server user into
 an administrator. A random expiring session crosses the private stdout pipe and
-is installed as an HttpOnly cookie by the native shell; HTTP authorization remains
-unchanged. The performance frontend has no Tauri capabilities. Host checks restrict requests
+is installed as an HttpOnly cookie by the native shell. `/api/me` identifies this
+exact session as `is_desktop_session`; its account menu disables Sign out and the logout API
+refuses to revoke it. Ordinary logout preserves this private session, while app
+shutdown revokes it. User creation, invitations, remote sign-out and project
+authorization remain available. The performance frontend has no Tauri capabilities. Host checks restrict requests
 to the assigned loopback authority. Frontend and FFmpeg locations can be set with
 `PR0_WEB_ROOT` and `PR0_FFMPEG` while standalone defaults remain unchanged.
 
@@ -586,10 +589,11 @@ The selected channel still filters input, while Notes/CC mode affects only scala
 decoding. The typed outlet forwards CC, pitch bend, pressure and program changes
 in either mode. New nodes default to channel 0 (all); existing explicit channel
 settings remain respected. Both input kinds report received message count and
-last status/data bytes in transient telemetry. Nodes show a 200 ms activity light
-and a last-message tooltip, with no message count. Input modals decode note, CC,
+last status/data bytes in transient telemetry. Nodes show a larger 200 ms activity light
+and an orange-bordered table of the last five observed channel/detail/value rows,
+with no message count or last-message tooltip. Input modals decode note, CC,
 pitch bend, program and pressure messages, show raw bytes/counts/drops and retain
-at most 64 observations locally. These are sampled at 20 Hz, after channel filtering;
+at most 20 observations locally, discarding older entries. These are sampled at 20 Hz, after channel filtering;
 intermediate messages can be missed. History freezes when telemetry is stale or
 the engine is off, and never enters project state or undo history.
 
@@ -607,3 +611,36 @@ unassigned knob, while raw MIDI still passes through and MIDI Learn remains
 available. Double-click clears the binding through ordinary graph validation/save;
 it cancels pending learn first. The options channel selector can explicitly
 unassign or reassign; default and existing bindings retain their previous values.
+
+## Control range conversions (2026-09-12)
+
+Scale normalizes `a` using `input_min` / `input_max` before mapping to `min` /
+`max`. Defaults are 0–1 input and -90–6 output, matching output gain's dB range.
+Stored output endpoints retain their values. Equal input endpoints return the
+output minimum; reversed ranges are supported and out-of-range inputs extrapolate.
+Amplitude to dB remains `20 * log10(abs(a))`, with the existing numerical floor,
+and now clamps to editable/connectable `min` / `max` dB bounds (defaults -90/+6).
+Amplitude 1 yields 0 dB; larger magnitudes yield positive dB. Reversed dB limits
+are ordered before clamping, so live crossings cannot panic. All range controls
+use server-validated parameter ports and the standard modal sliders/numeric fields.
+
+## OSC node hostname destinations (2026-09-12)
+
+OSC Output and MIDI to OSC accept `hostname:port` as well as `IPv4:port`.
+Core graph validation checks hostname syntax and port bounds without DNS/network
+access. Prepared routes retain the destination string; only the external node
+output worker resolves it, using the server's system resolver and the first IPv4
+result, matching the existing IPv4 OSC socket. The separate resolver cache holds
+at most 128 entries, with 60-second successful results and 5-second failed results.
+Resolution errors flow through node I/O telemetry. No DNS runs on the rendering
+worker or device callbacks. DNS delays can stall the external output worker;
+OSC delivery remains best effort. Local interface binds and legacy direct part
+OSC destinations retain their existing numeric-address contracts.
+
+Console Out captures numeric/text control changes and explicit events into 128 prepared
+slots per engine; rendering does no formatting, logging, allocation or locking. The
+20 Hz orchestration pass drains these into the project console and reports dropped
+entries on overload. Held numeric values are not logged on every sample. MIDI bridge
+debugging uses the existing bounded MIDI observations; OSC input/output debugging
+reports the latest accepted/prepared value and a counter. These are sampled debug
+views, not lossless packet logs or delivery acknowledgements, and never enter revisions.

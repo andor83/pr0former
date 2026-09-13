@@ -10,11 +10,11 @@ const readout = computed(() => props.stale ? '—' : db.value <= -60 ? '−∞' 
 <template>
   <article class="vu-strip" :data-channel="channel" :data-zone="zone" :class="{stale}">
     <div class="vu-clip" :class="{lit:zone==='clip' && !stale}">{{zone==='clip' && !stale ? 'CLIP' : stale ? 'NO DATA' : 'PEAK'}}</div>
-    <div class="vu-track" role="meter" :aria-label="`${device} ${direction} channel ${channel} level`" aria-valuemin="-60" aria-valuemax="0" :aria-valuenow="Math.max(-60,Math.min(0,db))" :aria-valuetext="stale ? 'No current hardware data' : `${readout} dBFS${zone==='clip'?', clipping':''}`">
+    <div class="vu-track" role="meter" :aria-label="`${device} ${direction} channel ${channel} level`" aria-valuemin="-60" aria-valuemax="0" :aria-valuenow="Math.max(-60,Math.min(0,db))" :aria-valuetext="stale ? 'No current audio data' : `${readout} dBFS${zone==='clip'?', clipping':''}`">
       <div class="vu-fill" :style="{height:`${percent}%`}"></div><div class="vu-grid"></div>
     </div>
     <output class="vu-value">{{readout}} <small>dBFS</small></output>
-    <div class="vu-name" :title="`Physical channel ${channel}`">Channel {{channel}}</div>
+    <div class="vu-name" :title="`Audio channel ${channel}`">Channel {{channel}}</div>
     <div class="vu-detail">{{direction}}</div>
   </article>
 </template>

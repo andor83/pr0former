@@ -5,7 +5,7 @@ test('local MIDI forwards CC, learns, cancels with Escape/click away, and releas
   await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
   let p=await(await page.request.post('/api/projects',{headers,data:{name:'Local MIDI regression',mode:'freeform'}})).json()
   const n=(id:string,kind:string,x:number)=>({id,kind,label:id,x,y:0,channels:1,parameters:{}})
-  p.parts=[];p.graph={nodes:[n('Local','local_midi_input',0),n('Knobs','knobs',300),n('Keys','piano',850)],edges:[{id:'cc',source:'Local',source_port:'midi',target:'Knobs',target_port:'midi'},{id:'keys',source:'Local',source_port:'midi',target:'Keys',target_port:'midi'}]}
+  p.parts=[];p.graph={nodes:[n('Local','local_midi_input',0),n('Knobs','knobs',480),n('Keys','piano',1100)],edges:[{id:'cc',source:'Local',source_port:'midi',target:'Knobs',target_port:'midi'},{id:'keys',source:'Local',source_port:'midi',target:'Keys',target_port:'midi'}]}
   const saved=await page.request.put(`/api/projects/${p.id}`,{headers,data:p});expect(saved.ok()).toBe(true);p=await saved.json()
   await page.addInitScript(()=>{
     class Input extends EventTarget{ id='twister';name='MIDI Fighter Twister';state='connected';async open(){return this} }
@@ -47,12 +47,23 @@ test('local MIDI forwards CC, learns, cancels with Escape/click away, and releas
   await expect(debug.getByLabel('Observed MIDI messages',{exact:true}).locator('tbody tr')).toHaveCount(5)
   const activity=page.getByLabel('MIDI input activity',{exact:true})
   expect(await page.evaluate(()=>(window as any).midiFlashed)).toBe(true)
-  await expect(activity).toHaveText('')
+  await expect(activity.getByRole('row')).toHaveCount(6)
+  await expect(activity).toContainText('Note 60')
   await expect(activity).not.toHaveClass(/lit/)
+  for(let i=0;i<25;i++){
+    await page.evaluate(i=>(window as any).midi([0xb0,20,i]),i)
+    await expect(debug.getByLabel('Latest MIDI message',{exact:true}).locator('output')).toHaveText(String(i))
+  }
+  await expect(debug.getByLabel('Observed MIDI messages',{exact:true}).locator('tbody tr')).toHaveCount(20)
+  await expect(debug.getByLabel('Observed MIDI messages',{exact:true}).locator('tbody tr').last()).toContainText('B0 14 05')
+  await expect(activity.locator('tbody tr')).toHaveCount(5)
+  await expect(activity.locator('tbody tr').first()).toHaveText('1CC 2024')
+  await expect(activity.locator('tbody tr').last()).toHaveText('1CC 2020')
   await debug.getByRole('button',{name:'Clear observed MIDI history',exact:true}).click()
   await expect(debug.getByText('No observations yet.',{exact:true})).toBeVisible()
   expect((await(await page.request.get(`/api/projects/${p.id}`)).json()).project.revision).toBe(revision)
   await page.getByRole('button',{name:'Close parameters',exact:true}).click()
+  await page.screenshot({path:'test-results/midi-node-history.png'})
   const ownershipError=await page.evaluate(id=>new Promise<string>((resolve,reject)=>{
     const socket=new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/api/projects/${id}/events`)
     const timeout=setTimeout(()=>{socket.close();reject(new Error('No ownership response'))},5000)
@@ -66,7 +77,7 @@ test('local MIDI forwards CC, learns, cancels with Escape/click away, and releas
   await page.evaluate(()=>(window as any).midi([0xb3,74,100]))
   await expect.poll(async()=>{const q=(await(await page.request.get(`/api/projects/${p.id}`)).json()).project;return q.graph.nodes[1].parameters.controller_1}).toBe(74)
   await expect.poll(()=>latest?.values.Knobs._control_1).toBeCloseTo(100/127)
-  await expect(page.getByLabel('MIDI input activity')).toHaveAttribute('title',/Control change · Ch 4 · CC 74 · 100 · B3 4A 64/)
+  await expect(page.getByLabel('MIDI input activity').locator('tbody tr').first()).toHaveText('4CC 74100')
   const before=(await(await page.request.get(`/api/projects/${p.id}`)).json()).project.revision
   for(const action of ['escape','away']){
     await knob.click();await expect.poll(()=>latest?.values.Knobs._learning).toBe(1)

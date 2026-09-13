@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
-import { browserInputs, browserInputMessage, browserInputChoices, browserInputBusy, captureError, refreshBrowserInputs } from '../browserInputs'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { localMachineName, saveMachineName, browserInputs, browserInputMessage, browserInputChoices, browserInputBusy, captureError, refreshBrowserInputs } from '../browserInputs'
 const props = defineProps<{ inputKey: string; disabled?: boolean; nodeId?:string; active?:boolean }>()
-const connectInput=inject<(node:string)=>Promise<void>>('connectBrowserInput')
 const asking = ref(false), error = ref('')
 const choice = computed({ get: () => browserInputChoices[props.inputKey] || '', set: value => { browserInputChoices[props.inputKey] = value } })
 async function permit() {
@@ -20,6 +19,7 @@ onBeforeUnmount(() => navigator.mediaDevices?.removeEventListener('devicechange'
 </script>
 <template>
   <section class="browser-input-picker">
+    <label>Machine name<input aria-label="Machine name" :value="localMachineName" maxlength="80" :disabled="browserInputBusy[inputKey]" @change="saveMachineName(($event.target as HTMLInputElement).value)"></label>
     <label>Local audio input device<select v-model="choice" aria-label="Local audio input device" :disabled="disabled || asking || browserInputBusy[inputKey]">
       <option value="">System default input</option>
       <option v-for="(device, index) in browserInputs" :key="device.deviceId || index" :value="device.deviceId" :disabled="!device.deviceId">{{device.label || `Audio input ${index + 1} · permission needed`}}</option>
@@ -30,8 +30,7 @@ onBeforeUnmount(() => navigator.mediaDevices?.removeEventListener('devicechange'
     <button class="button small" :disabled="asking" @click="refreshBrowserInputs">Refresh local audio inputs</button>
     <button class="button small" :disabled="asking || browserInputBusy[inputKey]" @click="permit">{{asking ? 'Waiting for permission…' : 'Grant microphone access'}}</button>
     <p v-if="error" role="alert" class="field-error">{{error}}</p>
-    <button v-if="nodeId" class="button primary" :disabled="!active||asking" @click="connectInput?.(nodeId)">Connect this input to graph</button>
     <p v-if="nodeId&&!active" class="feature-note">Enable the audio engine to connect this input.</p>
-    <HelpNote>Device selection applies to this browser or app session. The connection button starts capture and opens Monitor, where you can disconnect or inspect the connection. Selecting a device or granting permission alone does not send audio.</HelpNote>
+    <HelpNote>Device selection applies to this browser or app session. The node’s microphone button mutes or unmutes its graph output. Capture connects automatically when the engine is enabled for your assigned input (or the owner’s first unassigned input). Monitor shows the connection and lets you stop capture. Muting keeps the connection open.</HelpNote>
   </section>
 </template>

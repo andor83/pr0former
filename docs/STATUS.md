@@ -28,6 +28,60 @@ pr0former is a development alpha. Software validation does not establish physica
 
 ## Validation
 
+Local input controls, profiles and branding (2026-09-12): Local audio input defaults
+unmuted and automatically starts its authorized microphone uplink when the engine
+is enabled. The orange dome microphone button on the node toggles graph mute;
+a Mute control input overrides it. Shared monitor/source labels identify the user
+and machine, with native hostnames or an editable browser device name. Metadata is
+session-only. The existing single uplink per project/user limit remains; duplicate
+senders to one node are refused. Physical microphone permission, iPad capture and
+Wi-Fi timing remain manual/unverified.
+The updated arm64 app was signed, notarized (Accepted submission
+`0a07ed2b-df0e-4204-80bf-474b05c06d94`), stapled and accepted by Gatekeeper,
+then exported to the ignored project-root `pr0former.app`. Both release-server
+desktop process tests passed. The native bundle icon matches the supplied artwork.
+
+The account button now opens a profile menu, shows uploaded avatars, and keeps
+Sign out disabled for the private bundled admin. Self-editing includes profile
+fields, avatar upload and password changes; ordinary password changes require the
+current password and revoke other sessions. Avatar upload moved from Ensemble.
+The supplied artwork is used for desktop, web header, favicon, Apple touch and
+manifest icons. OSC history's explanatory paragraph was removed.
+
+Console Out captures control changes/text/pulses in a bounded preallocated queue,
+then logs outside rendering. MIDI/OSC bridge and OSC input/output nodes show
+orange/dark message histories on the node and in options. Telemetry is sampled;
+OSC output history means prepared values, not confirmed network delivery.
+
+Validation so far: workspace Rust tests passed 243 cases (one opt-in ignored),
+including all-channel local input mute and render allocation guards; 8 desktop
+Rust tests and 97 frontend tests passed. The production web build passed. Real
+Chromium WebRTC tests confirmed automatic capture, mute/unmute without reconnecting,
+and shared identities in a second user's Monitor with unauthorized reads rejected.
+Profile and desktop session browser regressions also passed. The assigned performer can mute their own input but cannot edit other node parameters. Real loopback UDP verified OSC/MIDI histories and Console Out text logging without revisions; the simulated-hardware Monitor layout regression passed. Generated test audio
+was used; physical devices were not exercised.
+
+
+OSC node DNS destinations (2026-09-12): OSC Output and MIDI to OSC accept DNS
+hostnames with ports. Resolution runs on the external output worker, selects an
+IPv4 result and uses a bounded cache; errors appear in node I/O telemetry.
+Core/server tests passed 110 cases (one opt-in ignored), including syntax checks
+and real UDP delivery through `localhost` for values, notes and note releases.
+All 97 frontend tests and the production build passed. The Chromium OSC
+round-trip/sample-playback regression also passed using a hostname destination.
+Remote DNS, LAN mDNS availability and physical network latency remain unverified.
+
+MIDI history sizing and conversion ranges (2026-09-12): options retain only the
+last 20 MIDI observations, and the node retains five channel/detail/value rows
+in an orange-bordered dark panel with a larger activity light. Chromium verified
+old-entry eviction and both bounds. Scale now has input endpoints (default 0–1)
+and output endpoints (default -90/+6). Amplitude to dB exposes min/max sliders,
+numeric fields and control ports, defaulting to -90/+6 dB. The logarithmic
+conversion retains amplitude 1 = 0 dB. Rust core/DSP tests passed 147 cases,
+including equal/reversed ranges and connected dB bounds; 97 frontend tests and
+the production build passed. Two focused Chromium cases passed for MIDI history
+and live Scale/dB editing. Hardware timing and physical MIDI remain unverified.
+
 Help and documentation center (2026-09-12): the authenticated gear menu now
 opens a two-column documentation modal with getting-started, first-project,
 performance-mode, interface, and server-catalog-backed node reference sections.
@@ -43,9 +97,10 @@ URL-tested but not manually exercised in a packaged Tauri app.
 
 MIDI debugging and knob unassignment (2026-09-12): MIDI input options now decode
 CC, pitch bend, program change, channel/poly pressure and notes, with raw bytes,
-received/drop counts and up to 64 locally observed messages. History samples the
+received/drop counts and up to 20 locally observed messages. History samples the
 existing 20 Hz telemetry after channel filtering; it is not a complete event log.
-Nodes show only an activity light and a last-message tooltip. Double-clicking a
+Nodes show a larger activity light and an orange-glowing table of the last five
+observed channel/detail/value rows. Both histories are bounded in memory only. Double-clicking a
 knob clears its channel binding; unassigned knobs are dimmed and reject value
 changes in both the server API and DSP. Clicking starts MIDI Learn; the modal's
 channel selector also restores a binding. Existing bindings remain unchanged.
@@ -87,6 +142,25 @@ server's exact origin, and return to the bundled admin window. No production ser
 was restarted. Physical audio/MIDI capture, remote HTTPS certificate/device prompts
 and Linux native webviews remain manual/unverified.
 
+
+Desktop server identity and account editing (2026-09-12): native performance,
+login and documentation titles show `pr0former (bundled)` or the actual remote
+scheme/host/port after the app name, including default ports. The private bundled
+admin session is identified by its exact token, with sign-out disabled in the UI
+and refused by the server. Ordinary logout preserves the private session; quitting
+the app still revokes it. User creation, invitations and remote sign-out remain
+available. User administration now unwraps Vue reactive rows before cloning,
+provides explicit Edit buttons, highlights the selection and focuses its form.
+
+Validation: 8 desktop Rust tests and 97 frontend unit tests passed, along with the
+production frontend build, 2 desktop process tests, and 2 focused Chromium cases.
+These cover local logout refusal, remote account creation and logout, disabled sign-out
+in multiple project views, and selecting an existing user row to edit and
+persist profile details. Native title formatting covers bundled, hostnames, IPv4,
+IPv6, explicit ports and default HTTPS ports. Physical devices were not used.
+The updated arm64 app was signed, notarized (Accepted submission
+`c616df9e-21fe-49bf-8480-8782ac0ee69c`), stapled, verified by Gatekeeper, and
+exported to the ignored project-root `pr0former.app`.
 
 Desktop LAN hosting and windows (2026-09-12): the Mac Server menu now discovers
 compatible LAN servers via embedded mDNS/DNS-SD and offers opt-in HTTPS hosting

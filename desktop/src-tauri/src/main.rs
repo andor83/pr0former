@@ -208,7 +208,7 @@ fn main() {
                             .inner_size(1440., 960.)
                             .min_inner_size(640., 480.)
                             .disable_drag_drop_handler()
-                            .initialization_script(windows::INIT)
+                            .initialization_script(windows::initialization_script())
                             .on_document_title_changed(windows::loaded)
                             .build()
                             .map(|_| ())
@@ -237,7 +237,7 @@ fn main() {
                     .inner_size(1440., 960.)
                     .min_inner_size(640., 480.)
                     .disable_drag_drop_handler()
-                    .initialization_script(windows::INIT)
+                    .initialization_script(windows::initialization_script())
                     .on_document_title_changed(windows::loaded)
                     .build()?;
             let data = std::env::var_os("PR0_DESKTOP_DATA")

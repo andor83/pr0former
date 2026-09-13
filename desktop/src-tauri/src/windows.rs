@@ -16,7 +16,15 @@ use tauri::{
 
 const LIMIT: usize = 8;
 static NEXT: AtomicU64 = AtomicU64::new(1);
-pub const INIT: &str = "window.__PR0_DESKTOP__=true;";
+pub fn initialization_script() -> String {
+    static SCRIPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SCRIPT.get_or_init(|| {
+        let name = std::process::Command::new("hostname").output().ok()
+            .filter(|out| out.status.success()).map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .unwrap_or_else(|| "Desktop computer".into());
+        format!("window.__PR0_DESKTOP__=true;window.__PR0_MACHINE_NAME__={};", serde_json::to_string(&name).unwrap())
+    }).clone()
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Placement {
     x: i32,
@@ -169,18 +177,45 @@ pub fn record(window: &WebviewWindow) {
     }
 }
 
-pub fn loaded(window: WebviewWindow, title: String) {
+fn server_title(title: &str, url: &Url, bundled: Option<&Url>) -> String {
     let title: String = title
         .chars()
         .filter(|c| !c.is_control())
         .take(160)
         .collect();
-    let _ = window.set_title(&title);
+    if !matches!(url.scheme(), "http" | "https") {
+        return title;
+    }
+    let server = if bundled.is_some_and(|local| local.origin() == url.origin()) {
+        "bundled".to_owned()
+    } else {
+        let host = url.host_str().unwrap_or("");
+        format!(
+            "{}://{}:{}",
+            url.scheme(),
+            host,
+            url.port_or_known_default().unwrap_or(0)
+        )
+    };
+    let prefix = title.strip_suffix("pr0former").unwrap_or(&title);
+    if title.ends_with("pr0former") {
+        format!("{prefix}pr0former ({server})")
+    } else if title.is_empty() {
+        format!("pr0former ({server})")
+    } else {
+        format!("{title} — pr0former ({server})")
+    }
+}
+
+pub fn loaded(window: WebviewWindow, title: String) {
     let app = window.app_handle();
+    let local = app.try_state::<crate::BundledUrl>();
+    if let Ok(url) = window.url() {
+        let _ = window.set_title(&server_title(&title, &url, local.as_ref().map(|v| &v.0)));
+    }
     let Some(state) = app.try_state::<Windows>() else {
         return;
     };
-    let local = app.try_state::<crate::BundledUrl>();
     let Some(ctx) = window
         .url()
         .ok()
@@ -314,7 +349,7 @@ fn duplicate(source: &WebviewWindow, saved: Option<Placement>) -> Result<(), Str
         .min_inner_size(320., 240.)
         .disable_drag_drop_handler()
         .incognito(remote)
-        .initialization_script(INIT)
+        .initialization_script(initialization_script())
         .on_document_title_changed(loaded)
         .on_navigation(|url| matches!(url.scheme(), "http" | "https" | "tauri"))
         .build()
@@ -379,12 +414,17 @@ pub fn help(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let label = format!("documentation-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
-        .title("Documentation — pr0former")
+        .title(server_title(
+            "Documentation — pr0former",
+            &target,
+            local.as_ref().map(|v| &v.0),
+        ))
+        .on_document_title_changed(loaded)
         .inner_size(1180., 820.)
         .min_inner_size(640., 480.)
         .disable_drag_drop_handler()
         .incognito(remote)
-        .initialization_script(INIT)
+        .initialization_script(initialization_script())
         .on_navigation(|url| matches!(url.scheme(), "http" | "https" | "tauri"))
         .build()
         .map_err(|error| error.to_string())?;
@@ -469,6 +509,25 @@ pub fn quitting(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn titles_show_the_actual_server_after_the_app_name() {
+        let local: Url = "http://127.0.0.1:8000".parse().unwrap();
+        assert_eq!(
+            server_title("Show — score — pr0former", &local, Some(&local)),
+            "Show — score — pr0former (bundled)"
+        );
+        for (address, expected) in [
+            ("https://studio.local", "https://studio.local:443"),
+            ("https://192.168.1.2:8443", "https://192.168.1.2:8443"),
+            ("http://127.0.0.1:9000", "http://127.0.0.1:9000"),
+            ("https://[::1]:8443", "https://[::1]:8443"),
+        ] {
+            assert_eq!(
+                server_title("Sign in", &address.parse().unwrap(), Some(&local)),
+                format!("Sign in — pr0former ({expected})")
+            );
+        }
+    }
     #[test]
     fn layout_keys_survive_local_port_changes_and_isolate_remote_servers() {
         let local: Url = "http://127.0.0.1:8000".parse().unwrap();

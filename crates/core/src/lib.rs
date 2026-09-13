@@ -2,6 +2,35 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Syntax-only validation; DNS resolution belongs to the server output worker.
+pub fn valid_osc_node_destination(value: &str) -> bool {
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return false;
+    };
+    if port.is_empty()
+        || !port.bytes().all(|c| c.is_ascii_digit())
+        || port.parse::<u16>().map_or(true, |p| p == 0)
+    {
+        return false;
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    let host = host.strip_suffix('.').unwrap_or(host);
+    !host.is_empty()
+        && host.len() <= 253
+        && !host.bytes().all(|c| c.is_ascii_digit() || c == b'.')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        })
+}
+
 pub mod midi;
 pub mod score;
 
@@ -446,10 +475,22 @@ pub fn catalog() -> Vec<Descriptor> {
             label,
             symbol,
             "Math",
-            "Single-input conversion.",
+            if kind == "atodb" {
+                "Convert amplitude magnitude to dB, limited by minimum and maximum dB (default -90 to +6). Amplitude 1 is 0 dB; amplitudes above 1 produce positive dB. Reversed limits are ordered automatically."
+            } else {
+                "Single-input conversion."
+            },
             vec![],
             vec![port("out", Control)],
-            vec![param("a", "Input", "", -100000., 100000., 0.)],
+            if kind == "atodb" {
+                vec![
+                    param("a", "Input", "", -100000., 100000., 0.),
+                    param("min", "Minimum dB", "dB", -180., 100., -90.),
+                    param("max", "Maximum dB", "dB", -180., 100., 6.),
+                ]
+            } else {
+                vec![param("a", "Input", "", -100000., 100000., 0.)]
+            },
             &[kind],
         );
     }
@@ -473,13 +514,15 @@ pub fn catalog() -> Vec<Descriptor> {
         "Scale",
         "↗",
         "Math",
-        "Map a normalized input to a range.",
+        "Linearly map an input range to an output range. Defaults map 0–1 to -90–6 dB, matching output gain. Values outside the input range extrapolate; equal input endpoints produce the output minimum.",
         vec![],
         vec![port("out", Control)],
         vec![
             param("a", "Input", "", -100000., 100000., 0.),
-            param("min", "Minimum", "", -100000., 100000., 0.),
-            param("max", "Maximum", "", -100000., 100000., 1.),
+            param("input_min", "Input minimum", "", -100000., 100000., 0.),
+            param("input_max", "Input maximum", "", -100000., 100000., 1.),
+            param("min", "Output minimum", "", -100000., 100000., -90.),
+            param("max", "Output maximum", "", -100000., 100000., 6.),
         ],
         &[],
     );
@@ -1151,10 +1194,10 @@ pub fn catalog() -> Vec<Descriptor> {
         "Local audio input",
         "◉",
         "Audio",
-        "Audio input captured on this device in a browser or desktop app session and sent to the server over WebRTC. Assigned to a performer.",
+        "Audio input captured on this device and sent over WebRTC. Defaults to unmuted. Mute silences every output channel: 0 passes audio, positive values mute. A connected Mute control overrides the microphone button. Capture still requires microphone permission.",
         vec![],
         vec![port("out", Audio)],
-        vec![],
+        vec![param("mute", "Mute", "", 0., 1., 0.)],
         &[],
     );
     let mono_ports = || {
@@ -1261,6 +1304,11 @@ pub fn catalog() -> Vec<Descriptor> {
         vec![port("out", Audio)],
         vec![param("gain", "Gain", "dB", -90., 12., -6.)],
         &["+~"],
+    );
+    add(
+        "console_out", "Console Out", ">_", "Control",
+        "Print incoming numeric or text control values to the project Console. Logs changed values and explicit events, not every held sample. Debug capture is bounded; overload is reported. Enable the engine and open Settings → Console.",
+        vec![port("in", Control)], vec![], vec![], &["console", "debug", "print", "log"],
     );
     add(
         "control_visualizer",
@@ -2239,13 +2287,8 @@ impl Graph {
                         "Choose a literal OSC address starting with / (at most 256 bytes)".into(),
                     );
                 }
-                if !io.destination.is_empty()
-                    && io
-                        .destination
-                        .parse::<std::net::SocketAddr>()
-                        .map_or(true, |a| !a.is_ipv4() || a.port() == 0)
-                {
-                    return Err("OSC node destination must be IPv4:port with a nonzero port".into());
+                if !io.destination.is_empty() && !valid_osc_node_destination(&io.destination) {
+                    return Err("OSC node destination must be hostname:port or IPv4:port with a port from 1–65535".into());
                 }
             }
             if matches!(n.kind.as_str(), "midi_input" | "midi_output")
@@ -2683,7 +2726,7 @@ impl Graph {
                     && (edge.target_port == "target" || self.nodes[target].kind == "send_control"))
                 && !matches!(
                     self.nodes[target].kind.as_str(),
-                    "control_visualizer" | "control_input" | "osc_output" | "toggle"
+                    "control_visualizer" | "control_input" | "osc_output" | "console_out" | "toggle"
                 )
                 && !(self.nodes[target].kind.starts_with("subgraph_")
                     && self.nodes[target].kind.ends_with("_control"))
@@ -3114,6 +3157,34 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn osc_node_destinations_accept_dns_and_reject_malformed_endpoints() {
+        for address in [
+            "localhost:9000",
+            "synth.local:65535",
+            "osc-1.example.com.:1",
+            "127.0.0.1:9000",
+        ] {
+            assert!(valid_osc_node_destination(address), "{address}");
+        }
+        for address in [
+            "host",
+            "host:0",
+            "host:65536",
+            "host:-1",
+            "host:abc",
+            "host: 9",
+            "bad host:9",
+            "http://host:9",
+            "-bad:9",
+            "bad-:9",
+            "a..b:9",
+            "256.1.1.1:9",
+            "[::1]:9",
+        ] {
+            assert!(!valid_osc_node_destination(address), "{address}");
+        }
+    }
     #[test]
     fn part_note_contract_requires_a_local_part_and_numeric_ports() {
         let mut p = demo_project("x".into(), "x".into(), Mode::Structured);

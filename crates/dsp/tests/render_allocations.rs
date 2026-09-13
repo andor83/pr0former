@@ -58,6 +58,7 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
         nodes: [
             ("keys", "piano"),
             ("local", "local_midi_input"),
+            ("mic", "browser_input"),
             ("knobs", "knobs"),
             ("sliders", "sliders"),
             ("fm", "fm_synth"),
@@ -75,6 +76,7 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
             ("loop", "looper"),
             ("record", "record"),
             ("one", "value"),
+            ("debug", "console_out"),
         ]
         .into_iter()
         .map(|(id, kind)| node(id, kind))
@@ -108,6 +110,7 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
         }
     }
     for (s, sp, t, tp) in [
+        ("one", "out", "debug", "in"),
         ("knobs", "midi", "sliders", "midi"),
         ("local", "midi", "sliders", "midi"),
         ("one", "out", "sliders", "slider_2"),

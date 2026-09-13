@@ -14,9 +14,9 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Route {
     Midi(String, u8),
-    Osc(std::net::SocketAddr, String),
+    Osc(String, String),
     /// Single-argument OSC value route with its maximum send rate in Hz.
-    OscValue(std::net::SocketAddr, String, u32),
+    OscValue(String, String, u32),
 }
 impl Route {
     pub fn from_node(node: &Node) -> Option<Self> {
@@ -26,23 +26,25 @@ impl Route {
                 io.port.clone(),
                 node.parameters.get("channel").copied().unwrap_or(1.) as u8,
             )),
-            "midi_to_osc" if !io.address.is_empty() => io
-                .destination
-                .parse()
-                .ok()
-                .map(|destination| Self::Osc(destination, io.address.clone())),
-            "osc_output" if !io.address.is_empty() => {
-                io.destination.parse().ok().map(|destination| {
-                    Self::OscValue(
-                        destination,
-                        io.address.clone(),
-                        node.parameters
-                            .get("rate")
-                            .copied()
-                            .unwrap_or(60.)
-                            .clamp(1., 200.) as u32,
-                    )
-                })
+            "midi_to_osc"
+                if !io.address.is_empty()
+                    && pr0_core::valid_osc_node_destination(&io.destination) =>
+            {
+                Some(Self::Osc(io.destination.clone(), io.address.clone()))
+            }
+            "osc_output"
+                if !io.address.is_empty()
+                    && pr0_core::valid_osc_node_destination(&io.destination) =>
+            {
+                Some(Self::OscValue(
+                    io.destination.clone(),
+                    io.address.clone(),
+                    node.parameters
+                        .get("rate")
+                        .copied()
+                        .unwrap_or(60.)
+                        .clamp(1., 200.) as u32,
+                ))
             }
             _ => None,
         }
@@ -306,7 +308,7 @@ fn send_value(
         }],
     });
     let bytes = rosc::encoder::encode(&packet).map_err(|e| e.to_string())?;
-    osc.send(&bytes, *destination);
+    osc.send_host(&bytes, destination)?;
     Ok(())
 }
 fn send(
@@ -359,7 +361,7 @@ fn send(
                 ],
             });
             let bytes = rosc::encoder::encode(&packet).map_err(|e| e.to_string())?;
-            osc.send(&bytes, *destination);
+            osc.send_host(&bytes, destination)?;
             Ok(())
         }
     }
@@ -592,6 +594,31 @@ mod tests {
         assert_eq!(engine.telemetry()["in"]["_midi_received"], 2.);
     }
     #[test]
+    fn osc_hostname_value_route_delivers_udp() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let runtime = crate::osc::Runtime::default();
+        let route = Route::OscValue(
+            format!("localhost:{}", receiver.local_addr().unwrap().port()),
+            "/value".into(),
+            60,
+        );
+        for _ in 0..2 {
+            send_value(&route, &pr0_core::ControlValue::Number(0.75), &runtime).unwrap();
+            let mut buffer = [0; 128];
+            let size = receiver.recv(&mut buffer).unwrap();
+            let (_, rosc::OscPacket::Message(message)) =
+                rosc::decoder::decode_udp(&buffer[..size]).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(message.addr, "/value");
+            assert_eq!(message.args, vec![rosc::OscType::Float(0.75)]);
+        }
+    }
+    #[test]
     fn osc_output_route_carries_destination_address_and_rate() {
         let p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
         let mut node = p.graph.nodes[0].clone();
@@ -767,7 +794,10 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .unwrap();
         let outputs = Outputs::new(Arc::new(crate::osc::Runtime::default()));
-        let route = Route::Osc(receiver.local_addr().unwrap(), "/notes".into());
+        let route = Route::Osc(
+            format!("localhost:{}", receiver.local_addr().unwrap().port()),
+            "/notes".into(),
+        );
         for (pitch, velocity) in [(60, 90), (64, 80), (60, 70), (60, 0)] {
             outputs.note("node", &route, NoteEvent { pitch, velocity }, false);
         }

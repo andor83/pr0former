@@ -4,6 +4,7 @@ import { reactive, ref } from 'vue'
 export const browserInputs = ref<MediaDeviceInfo[]>([])
 export const browserInputMessage = ref('Checking local audio inputs…')
 export const browserInputChoices = reactive<Record<string, string>>({})
+export const browserInputState = reactive<Record<string, string>>({})
 export const browserInputBusy = reactive<Record<string, boolean>>({})
 export function captureError(error: unknown): string {
   const name = error instanceof Error ? error.name : ''
@@ -26,3 +27,9 @@ export async function refreshBrowserInputs() {
       : `${browserInputs.value.length} local audio input${browserInputs.value.length === 1 ? '' : 's'} available.`
   } catch (error) { browserInputs.value = []; browserInputMessage.value = captureError(error) }
 }
+
+export interface RemoteAudioInput {project_id:string;node:string;user_name:string;machine_name:string;state:string}
+export const remoteAudioInputs=ref<RemoteAudioInput[]>([])
+const nativeName=(window as Window & {__PR0_MACHINE_NAME__?:string}).__PR0_MACHINE_NAME__
+export const localMachineName=ref((()=>{try{return localStorage.getItem('pr0former.machine-name')||nativeName||(/iPad/.test(navigator.userAgent)?'iPad':/Mac/.test(navigator.userAgent)?'Mac browser':/Windows/.test(navigator.userAgent)?'Windows browser':'Browser device')}catch{return nativeName||'Browser device'}})())
+export function saveMachineName(value:string){localMachineName.value=value.trim().slice(0,80)||'Browser device';try{localStorage.setItem('pr0former.machine-name',localMachineName.value)}catch{}}

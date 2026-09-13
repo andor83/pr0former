@@ -1,4 +1,5 @@
 //! Prepared DSP graph. `render` performs no allocation or locking.
+mod console;
 mod channels;
 mod clock_ratio;
 mod convolution;
@@ -197,6 +198,8 @@ struct RuntimeNode {
     outgoing_notes: [Option<note_inputs::NoteEvent>; 2],
     outgoing_control: Option<visualizer::Datum>,
     last_control: Option<visualizer::Datum>,
+    osc_received: u64,
+    osc_last: Option<visualizer::Datum>,
     sampler: Option<Box<sampler::Sampler>>,
     granular: Option<Box<granular::Granular>>,
     pitch_shift: Option<Box<granular::PitchShift>>,
@@ -388,7 +391,7 @@ impl RuntimeNode {
         if self.kind != "receive_control" {
             self.control_event_only = false;
         }
-        if matches!(self.kind.as_str(), "midi_input" | "local_midi_input") {
+        if matches!(self.kind.as_str(), "midi_input" | "local_midi_input" | "midi_to_osc" | "osc_to_midi") {
             self.midi_received = self
                 .midi_received
                 .saturating_add(self.midi_frame.len as u64);
@@ -451,9 +454,21 @@ impl RuntimeNode {
             "mtof" => scalar = 440. * 2_f64.powf((a - 69.) / 12.),
             "ftom" => scalar = 69. + 12. * (a / 440.).log2(),
             "dbtoa" => scalar = 10_f64.powf(a / 20.),
-            "atodb" => scalar = 20. * a.abs().max(1e-9).log10(),
+            "atodb" => {
+                let min = self.p("min").min(self.p("max"));
+                let max = self.p("min").max(self.p("max"));
+                scalar = (20. * a.abs().max(1e-9).log10()).clamp(min, max);
+            }
             "clamp" => scalar = a.max(self.p("min")).min(self.p("max")),
-            "scale" => scalar = self.p("min") + a * (self.p("max") - self.p("min")),
+            "scale" => {
+                let span = self.p("input_max") - self.p("input_min");
+                let normalized = if span == 0. {
+                    0.
+                } else {
+                    (a - self.p("input_min")) / span
+                };
+                scalar = self.p("min") + normalized * (self.p("max") - self.p("min"));
+            }
             "knobs" | "sliders" => {
                 let controls = self.controllers.as_mut().unwrap();
                 for index in 0..self.midi_frame.len {
@@ -644,6 +659,12 @@ impl RuntimeNode {
                         clock.running,
                     );
                 } else {
+                    if self.kind == "midi_to_osc" && self.midi_frame.len == 0 {
+                        for note in notes.iter().flatten() {
+                            self.midi_received=self.midi_received.saturating_add(1);
+                            self.midi_last=pr0_core::midi::Message {status:if note.velocity>0 {0x90} else {0x80},data1:note.pitch,data2:note.velocity};
+                        }
+                    }
                     self.outgoing_notes = notes;
                 }
             }
@@ -742,6 +763,8 @@ impl RuntimeNode {
                 };
                 if publish {
                     self.outgoing_control = Some(datum);
+                    self.osc_received = self.osc_received.saturating_add(1);
+                    self.osc_last = Some(datum);
                     self.last_control = Some(datum);
                 }
                 scalar = input[0];
@@ -833,7 +856,7 @@ impl RuntimeNode {
             }
             "browser_input" => {
                 for ch in 0..self.channels {
-                    self.output[ch] = self.external[ch] as f64;
+                    self.output[ch] = if self.p("mute") > 0. { 0. } else { self.external[ch] as f64 };
                 }
             }
             "input" => {
@@ -1319,7 +1342,10 @@ impl RuntimeNode {
     }
 }
 
+pub struct ConsoleEntry { pub node: String, pub label: String, pub sample: u64, pub value: pr0_core::ControlValue }
+
 pub struct Engine {
+    console: console::Buffer,
     nodes: Vec<RuntimeNode>,
     order: Vec<usize>,
     pub clock: Clock,
@@ -1469,6 +1495,8 @@ impl Engine {
                 outgoing_notes: [None; 2],
                 outgoing_control: None,
                 last_control: None,
+                osc_received: 0,
+                osc_last: None,
                 recorder: if n.kind == "record" {
                     let width = graph
                         .edges
@@ -1811,6 +1839,7 @@ impl Engine {
             .map(|(i, _)| i)
             .collect();
         Ok(Self {
+            console: console::Buffer::new(),
             nodes,
             priority,
             order,
@@ -1822,6 +1851,24 @@ impl Engine {
             },
             graph,
         })
+    }
+    /// Latest received/prepared OSC values, serialized outside rendering.
+    pub fn osc_messages(&self) -> std::collections::BTreeMap<String, (u64, pr0_core::ControlValue)> {
+        self.nodes.iter().filter(|node| matches!(node.kind.as_str(), "osc_input" | "osc_output"))
+            .filter_map(|node| node.osc_last.map(|value| (node.id.clone(),(node.osc_received,match value {
+                visualizer::Datum::Number(value)=>pr0_core::ControlValue::Number(value),
+                visualizer::Datum::Text(value)=>pr0_core::ControlValue::Text(value.as_str().into()),
+            })))).collect()
+    }
+    /// Drain outside render, at the server's telemetry cadence.
+    pub fn take_console_entries(&mut self) -> (Vec<ConsoleEntry>, u64) {
+        let mut entries=Vec::new();
+        while let Some(entry)=self.console.pop() {
+            let node=&self.graph.nodes[entry.node];
+            entries.push(ConsoleEntry {node:node.id.clone(),label:node.label.clone(),sample:entry.sample,
+                value:match entry.value {visualizer::Datum::Number(value)=>pr0_core::ControlValue::Number(value),visualizer::Datum::Text(value)=>pr0_core::ControlValue::Text(value.as_str().into())}});
+        }
+        (entries,self.console.take_dropped())
     }
     pub fn take_record_events(
         &mut self,
@@ -2453,6 +2500,8 @@ impl Engine {
         };
         if valid {
             node.fallback = visualizer::Datum::prepare(Some(value));
+            node.osc_received = node.osc_received.saturating_add(1);
+            node.osc_last = Some(node.fallback);
         }
         valid
     }
@@ -2805,6 +2854,16 @@ impl Engine {
                     }
                 }
                 self.nodes[idx].process(&self.graph_clock, &hardware);
+                let node=&mut self.nodes[idx];
+                if node.kind=="console_out" && node.bindings.iter().any(|b|!b.parameter && b.destination==0)
+                    && (!node.input_event_only[0] || node.input_events[0]) {
+                    let value=node.input_text.map(visualizer::Datum::Text).unwrap_or(visualizer::Datum::Number(node.input[0][0]));
+                    if node.last_control!=Some(value) || (node.input_event_only[0] && node.input_events[0]) {
+                        self.console.push(console::Entry {node:idx,sample:self.graph_clock.sample,value});
+                        node.last_control=Some(value);
+                    }
+                }
+
                 if self.nodes[idx].kind == "output" {
                     for (ch, sample) in out.iter_mut().enumerate() {
                         *sample += self.nodes[idx].output[ch] as f32;
@@ -2989,7 +3048,7 @@ impl Engine {
                         }
                     }
                 }
-                if matches!(n.kind.as_str(), "midi_input" | "local_midi_input") {
+                if matches!(n.kind.as_str(), "midi_input" | "local_midi_input" | "midi_to_osc" | "osc_to_midi") {
                     for (key, value) in [
                         ("_midi_received", n.midi_received as f64),
                         ("_midi_status", n.midi_last.status as f64),
@@ -3062,6 +3121,9 @@ impl Engine {
                 }
                 if n.kind == "clock" {
                     values.insert("tempo".into(), self.clock.bpm);
+                }
+                if n.kind == "browser_input" {
+                    for ch in 0..n.channels { values.insert(format!("_level{}",ch+1),n.output[ch].abs()); }
                 }
                 if n.kind == "meter" {
                     for ch in 0..n.channels {
@@ -5393,6 +5455,82 @@ mod feedback_and_pad_tests {
         assert_eq!(engine.telemetry()["knobs"]["_control_1"], 0.25);
     }
     #[test]
+    fn amplitude_to_db_supports_positive_values_and_bounded_connected_limits() {
+        for (amplitude, low, high, expected) in [
+            (0., -90., 6., -90.),
+            (1., -90., 6., 0.),
+            (2., -90., 6., 6.),
+            (-2., -90., 12., 20. * 2_f64.log10()),
+            (100., -30., 12., 12.),
+            (0.0001, -30., 12., -30.),
+            (2., 6., -90., 6.),
+            (1., 3., 3., 3.),
+        ] {
+            let mut convert = node("convert", "atodb", 0.);
+            convert.parameters.insert("a".into(), amplitude);
+            let mut minimum = node("minimum", "value", -300.);
+            minimum.parameters.insert("value".into(), low);
+            let mut maximum = node("maximum", "value", -300.);
+            maximum.parameters.insert("value".into(), high);
+            let mut engine = Engine::prepare(
+                Graph {
+                    nodes: vec![minimum, maximum, convert],
+                    edges: vec![
+                        edge("minimum", "out", "convert", "min"),
+                        edge("maximum", "out", "convert", "max"),
+                    ],
+                },
+                48000.,
+            )
+            .unwrap();
+            engine.render(&[], &mut [[0.; 8]]);
+            assert!((engine.telemetry()["convert"]["_out"] - expected).abs() < 1e-9);
+        }
+    }
+    #[test]
+    fn scale_maps_input_ranges_and_handles_equal_or_reversed_endpoints() {
+        for (input, input_min, input_max, expected) in [
+            (0., 0., 1., -90.),
+            (0.5, 0., 1., -42.),
+            (1., 0., 1., 6.),
+            (64., 0., 127., -90. + 64. / 127. * 96.),
+            (0., 1., 0., 6.),
+            (1., 1., 1., -90.),
+            (2., 0., 1., 102.),
+        ] {
+            let mut scale = node("scale", "scale", 0.);
+            scale.parameters.extend([
+                ("a".into(), input),
+                ("input_min".into(), input_min),
+                ("input_max".into(), input_max),
+            ]);
+            let mut engine = Engine::prepare(
+                Graph {
+                    nodes: vec![scale],
+                    edges: vec![],
+                },
+                48000.,
+            )
+            .unwrap();
+            engine.render(&[], &mut [[0.; 8]]);
+            assert!((engine.telemetry()["scale"]["_out"] - expected).abs() < 1e-9);
+        }
+        let mut scale = node("scale", "scale", 0.);
+        scale
+            .parameters
+            .extend([("a".into(), 0.5), ("min".into(), 10.), ("max".into(), 20.)]);
+        let mut engine = Engine::prepare(
+            Graph {
+                nodes: vec![scale],
+                edges: vec![],
+            },
+            48000.,
+        )
+        .unwrap();
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(engine.telemetry()["scale"]["_out"], 15.);
+    }
+    #[test]
     fn controller_count_is_validated_and_slider_control_input_is_rounded() {
         let mut slider = node("slider", "sliders", 300.);
         slider.parameters.extend([
@@ -6153,5 +6291,61 @@ mod unified_midi_tests {
             tick(&mut e);
             assert!(releasing(&e, "tone", 69));
         }
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+    use pr0_core::{ControlValue, Edge, Node};
+    fn node(id:&str,kind:&str)->Node { Node {id:id.into(),kind:kind.into(),label:id.into(),x:0.,y:0.,channels:1,parameters:Default::default(),part_id:None,io:None,library:None,parent:None,control_value:None} }
+    fn engine()->Engine {
+        Engine::prepare(Graph {nodes:vec![node("source","control_input"),node("debug","console_out")],edges:vec![Edge{id:"wire".into(),source:"source".into(),source_port:"out".into(),target:"debug".into(),target_port:"in".into()}]},48000.).unwrap()
+    }
+    #[test]
+    fn local_audio_defaults_open_and_mute_control_silences_all_channels() {
+        let mut mic=node("mic","browser_input");mic.channels=8;
+        let mut engine=Engine::prepare(Graph{nodes:vec![mic.clone()],edges:vec![]},48000.).unwrap();
+        engine.external("mic",[0.25;8]);engine.render(&[],&mut [[0.;8]]);
+        assert_eq!(engine.nodes[0].output,[0.25;8]);
+        engine.parameter("mic","mute",1.).unwrap();engine.render(&[],&mut [[0.;8]]);
+        assert_eq!(engine.nodes[0].output,[0.;8]);
+        engine.parameter("mic","mute",0.).unwrap();engine.render(&[],&mut [[0.;8]]);
+        assert_eq!(engine.nodes[0].output,[0.25;8]);
+        let mut engine=Engine::prepare(Graph{nodes:vec![node("control","control_input"),mic],edges:vec![Edge{id:"mute".into(),source:"control".into(),source_port:"out".into(),target:"mic".into(),target_port:"mute".into()}]},48000.).unwrap();
+        engine.external("mic",[0.5;8]);
+        for (value,expected) in [(0.,0.5),(0.1,0.),(1.,0.),(0.,0.5)] {
+            engine.control("control",&ControlValue::Number(value));engine.render(&[],&mut [[0.;8]]);
+            assert_eq!(engine.nodes.iter().find(|n|n.id=="mic").unwrap().output,[expected;8]);
+        }
+        assert!(engine.parameter("mic","mute",0.).is_err());
+    }
+    #[test]
+    fn console_captures_changes_numbers_text_and_short_pulses() {
+        let mut engine=engine();
+        engine.control("source",&ControlValue::Number(42.));engine.render(&[],&mut [[0.;8];8]);
+        engine.control("source",&ControlValue::Number(1.));engine.render(&[],&mut [[0.;8]]);
+        engine.control("source",&ControlValue::Number(0.));engine.render(&[],&mut [[0.;8]]);
+        engine.control("source",&ControlValue::Text("ready ♫".into()));engine.render(&[],&mut [[0.;8];8]);
+        let (events,dropped)=engine.take_console_entries();assert_eq!(dropped,0);assert_eq!(events.len(),4);
+        assert_eq!(events[0].node,"debug");assert_eq!(events[0].sample,0);assert_eq!(events[1].sample,8);assert_eq!(events[2].sample,9);
+        assert_eq!(events[0].value,ControlValue::Number(42.));assert_eq!(events[3].value,ControlValue::Text("ready ♫".into()));
+        engine.render(&[],&mut [[0.;8];8]);assert!(engine.take_console_entries().0.is_empty());
+    }
+    #[test]
+    fn console_overload_is_bounded_and_counted() {
+        let mut engine=engine();
+        for value in 0..131 {engine.control("source",&ControlValue::Number(value as f64));engine.render(&[],&mut [[0.;8]]);}
+        let (events,dropped)=engine.take_console_entries();assert_eq!(events.len(),128);assert_eq!(dropped,3);
+        assert_eq!(engine.take_console_entries().1,0);
+    }
+    #[test]
+    fn disconnected_console_is_silent_and_accepts_text_sources() {
+        let mut source=node("source","control_visualizer");source.control_value=Some(ControlValue::Text("hello".into()));
+        let mut engine=Engine::prepare(Graph {nodes:vec![source,node("debug","console_out")],edges:vec![]},48000.).unwrap();
+        engine.render(&[],&mut [[0.;8];8]);assert!(engine.take_console_entries().0.is_empty());
+        let mut graph=engine.graph.clone();graph.edges.push(Edge{id:"wire".into(),source:"source".into(),source_port:"out".into(),target:"debug".into(),target_port:"in".into()});
+        let mut engine=Engine::prepare(graph,48000.).unwrap();engine.render(&[],&mut [[0.;8]]);
+        assert_eq!(engine.take_console_entries().0[0].value,ControlValue::Text("hello".into()));
     }
 }

@@ -2,10 +2,10 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { Headphones, Mic, Radio, Square } from '@lucide/vue'
 import BrowserInputPicker from './BrowserInputPicker.vue'
-import { browserInputChoices, browserInputBusy, captureError, refreshBrowserInputs } from '../browserInputs'
+import { localMachineName, browserInputChoices, browserInputBusy, browserInputState, captureError, refreshBrowserInputs } from '../browserInputs'
 import { api } from '../api'
 import type { GraphNode } from '../types'
-const props = defineProps<{ compact?: boolean; projectId: string; active: boolean; nodes: GraphNode[] }>()
+const props = defineProps<{ compact?: boolean; autoInput?:string; projectId: string; active: boolean; nodes: GraphNode[] }>()
 const error = ref(''), state = ref('disconnected'), microphone = ref(false), inputNode = ref(''), monitorNode = ref(''), volume = ref(0.5)
 const monitor = ref<HTMLAudioElement>(), settings = ref(''), stats = ref({ lost: 0, jitter: 0, buffer: 0, rtt: 0 })
 type Attempt = { inputKey?: string; peer: RTCPeerConnection; abort: AbortController; stream?: MediaStream; offer?: Promise<RTCSessionDescriptionInit>; timer?: ReturnType<typeof setInterval> }
@@ -118,7 +118,7 @@ async function connect() {
     if (current !== owned) return
     await gather(owned)
     if (current !== owned) return
-    owned.offer = api<RTCSessionDescriptionInit>(`/projects/${props.projectId}/media`, 'POST', { sdp: pc.localDescription?.sdp, input_node: microphone.value ? inputNode.value : null, monitor_node: monitorNode.value || null })
+    owned.offer = api<RTCSessionDescriptionInit>(`/projects/${props.projectId}/media`, 'POST', { sdp: pc.localDescription?.sdp, machine_name:localMachineName.value, input_node: microphone.value ? inputNode.value : null, monitor_node: monitorNode.value || null })
     const answer = await owned.offer
     if (current !== owned) return
     await pc.setRemoteDescription(answer)
@@ -145,13 +145,19 @@ async function toggle() {
   else await connect()
 }
 async function connectInput(node:string) {
+  if(current?.inputKey===`${props.projectId}:${node}` && !['failed','interrupted','closed'].includes(state.value)) return
   if(state.value!=='disconnected')await disconnect()
   microphone.value=true;inputNode.value=node
   await connect()
 }
 defineExpose({ toggle, state, error, meter, connectInput })
 function level() { if (monitor.value) monitor.value.volume = volume.value }
-watch(() => props.active, active => { if (!active && current) void disconnect() })
+watch(state, value => { if(inputNode.value) browserInputState[`${props.projectId}:${inputNode.value}`]=value }, {flush:'sync'})
+watch(() => [props.active, props.autoInput] as const, async ([active,node]) => {
+  if (!active) { if(current) await disconnect(); return }
+  if(node && !current && state.value==='disconnected') await connectInput(node)
+}, {immediate:true,flush:'post'})
+watch(() => props.nodes.map(n=>n.id), async ids => { if(current?.inputKey && !ids.includes(inputNode.value)) { await disconnect(); if(props.active&&props.autoInput)await connectInput(props.autoInput) } })
 onBeforeUnmount(() => { void disconnect() })
 </script>
 <template>

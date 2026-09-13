@@ -60,7 +60,18 @@ impl Drop for MonitorSubscription {
 }
 type Peers = Arc<Mutex<BTreeMap<String, Arc<RTCPeerConnection>>>>;
 type Admissions = Arc<StdMutex<BTreeMap<String, Arc<AtomicBool>>>>;
+struct InputSource {
+    token: Arc<AtomicBool>,
+    session: String,
+    project: String,
+    node: String,
+    user_name: String,
+    machine_name: String,
+}
+type InputSources = Arc<StdMutex<BTreeMap<String, InputSource>>>;
 struct SessionLease {
+    inputs: InputSources,
+    input_key: Option<String>,
     key: String,
     cancelled: Arc<AtomicBool>,
     admissions: Admissions,
@@ -78,6 +89,10 @@ fn release_slot(admissions: &Admissions, key: &str, token: &Arc<AtomicBool>) {
 }
 impl Drop for SessionLease {
     fn drop(&mut self) {
+        if let Some(key) = &self.input_key {
+            let mut inputs = self.inputs.lock().unwrap();
+            if inputs.get(key).is_some_and(|source| Arc::ptr_eq(&source.token, &self.cancelled)) { inputs.remove(key); }
+        }
         if let Some(peer) = self.peer.take() {
             let (key, token, admissions, peers) = (
                 self.key.clone(),
@@ -102,6 +117,7 @@ impl Drop for SessionLease {
     }
 }
 pub struct Media {
+    inputs: InputSources,
     pub audio: broadcast::Sender<AudioBlock>,
     pub peers: Peers,
     admissions: Admissions,
@@ -196,6 +212,7 @@ impl Media {
         let cancelled = Arc::new(AtomicBool::new(false));
         slots.insert(key.clone(), cancelled.clone());
         Ok(SessionLease {
+            inputs: self.inputs.clone(), input_key: None,
             key,
             cancelled,
             admissions: self.admissions.clone(),
@@ -206,6 +223,7 @@ impl Media {
     pub fn new() -> Self {
         let (audio, _) = broadcast::channel(crate::monitor_packets::QUEUED_PACKETS);
         Self {
+            inputs: Arc::new(StdMutex::new(BTreeMap::new())),
             audio,
             peers: Arc::new(Mutex::new(BTreeMap::new())),
             admissions: Arc::new(StdMutex::new(BTreeMap::new())),
@@ -214,9 +232,19 @@ impl Media {
 }
 #[derive(Deserialize)]
 pub struct Offer {
+    pub machine_name: Option<String>,
     pub sdp: String,
     pub input_node: Option<String>,
     pub monitor_node: Option<String>,
+}
+
+pub async fn inputs(State(app): State<App>, headers: HeaderMap, Path(id): Path<String>) -> Api<Json<Value>> {
+    let u=user(&app,&headers)?; role(&app,&id,&u)?;
+    let peers=app.media.peers.lock().await;
+    let sources=app.media.inputs.lock().unwrap();
+    let inputs: Vec<Value> = sources.values().filter(|s|s.project==id && !s.token.load(Ordering::Acquire))
+        .map(|s| json!({"project_id":s.project,"node":s.node,"user_name":s.user_name,"machine_name":s.machine_name,"state":peers.get(&s.session).map(|p|p.connection_state().to_string()).unwrap_or_else(||"connecting".into())})).collect();
+    Ok(Json(json!(inputs)))
 }
 
 pub async fn offer(
@@ -270,7 +298,17 @@ pub async fn offer(
         }
     }
     let key = format!("{id}/{u}");
+    let machine_name = request.machine_name.as_deref().unwrap_or("Browser device").trim();
+    if machine_name.is_empty() || machine_name.chars().count() > 80 || machine_name.chars().any(char::is_control) { return Err(bad("Machine name must contain 1–80 printable characters")); }
     let mut lease = app.media.reserve(key.clone())?;
+    if let Some(node) = &input {
+        let user_name: String = app.db.lock().unwrap().query_row("SELECT username FROM users WHERE id=?1", [&u], |r|r.get(0)).map_err(bad)?;
+        let input_key = format!("{id}/{node}");
+        let mut inputs = app.media.inputs.lock().unwrap();
+        if inputs.contains_key(&input_key) { return Err(Failure(StatusCode::CONFLICT, "This local audio input is already connected from another session".into())); }
+        inputs.insert(input_key.clone(), InputSource {token:lease.cancelled.clone(),session:key.clone(),project:id.clone(),node:node.clone(),user_name,machine_name:machine_name.to_owned()});
+        lease.input_key=Some(input_key);
+    }
     let mut media = MediaEngine::default();
     media.register_default_codecs().map_err(bad)?;
     let registry = register_default_interceptors(Registry::new(), &mut media).map_err(bad)?;

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Copy, Link2, Plus, Trash2, Upload, UserPlus, Users } from '@lucide/vue'
+import { Copy, Link2, Plus, Trash2, UserPlus, Users } from '@lucide/vue'
 import { api } from '../api'
 import type { Member, Project } from '../types'
 
 const props=defineProps<{project:Project;members:Member[];userId:string;owner:boolean}>()
 const emit=defineEmits<{refresh:[];project:[project:Project];error:[error:unknown]}>()
-const selectedId=ref(''),query=ref(''),candidates=ref<Member[]>([]),candidateId=ref(''),addRole=ref('performer'),inviteRole=ref('performer'),inviteLink=ref(''),busy=ref(false),avatarBusy=ref(false)
+const selectedId=ref(''),query=ref(''),candidates=ref<Member[]>([]),candidateId=ref(''),addRole=ref('performer'),inviteRole=ref('performer'),inviteLink=ref(''),busy=ref(false)
 const selected=computed(()=>props.members.find(member=>member.id===selectedId.value)||props.members[0])
 const assignedParts=computed(()=>props.project.parts.filter(part=>part.performer===selected.value?.id))
 const fullName=computed(()=>[selected.value?.first_name,selected.value?.last_name].filter(Boolean).join(' '))
@@ -21,7 +21,7 @@ async function invite(){busy.value=true;try{const result=await api<{path:string}
 async function copyInvite(){if(inviteLink.value)await navigator.clipboard.writeText(inviteLink.value)}
 async function removeMember(member=selected.value){if(!member||member.role==='owner'||!confirm(`Remove ${member.username} from this project? Their assigned parts will become unassigned.`))return;busy.value=true;try{const result=await api<{project:Project;unassigned_parts:number}>(`/projects/${props.project.id}/members/${member.id}`,'DELETE');emit('project',result.project);emit('refresh')}catch(error){emit('error',error)}finally{busy.value=false}}
 async function designateConductor(){const member=selected.value;if(!member||assignedParts.value.length)return;busy.value=true;try{const next=JSON.parse(JSON.stringify(props.project)) as Project;next.conductor=next.conductor===member.id?null:member.id;const saved=await api<Project>(`/projects/${props.project.id}`,'PUT',next);emit('project',saved)}catch(error){emit('error',error)}finally{busy.value=false}}
-async function uploadAvatar(event:Event){const input=event.target as HTMLInputElement,file=input.files?.[0],member=selected.value;if(!file||!member||member.id!==props.userId)return;avatarBusy.value=true;try{const form=new FormData();form.append('avatar',file);const response=await fetch(`/api/users/${member.id}/avatar`,{method:'PUT',credentials:'same-origin',headers:{'X-Pr0former':'1'},body:form});const result=await response.json();if(!response.ok)throw new Error(result.error||'Avatar upload failed');emit('refresh')}catch(error){emit('error',error)}finally{avatarBusy.value=false;input.value=''}}
+
 </script>
 
 <template>
@@ -48,7 +48,7 @@ async function uploadAvatar(event:Event){const input=event.target as HTMLInputEl
       </div>
       <section class="member-parts"><h3>Assigned Parts</h3><div v-if="assignedParts.length" class="assigned-part-list"><span v-for="part in assignedParts" :key="part.id">{{part.name}}</span></div><p v-else>No parts are currently assigned to this member.</p></section>
       <section v-if="owner&&project.mode==='conducted'" class="conductor-assignment"><div><h3>Performance conductor</h3><p>The designated conductor receives the cue interface and cannot hold performer parts.</p></div><button class="button" :class="{primary:project.conductor===selected.id}" :disabled="busy||!!assignedParts.length" @click="designateConductor">{{project.conductor===selected.id?'Remove designation':'Designate conductor'}}</button></section>
-      <section v-if="selected.id===userId" class="avatar-upload"><div><h3>Avatar</h3><p>Choose an image. The server center-crops it to a 256px square.</p></div><label class="button" :class="{disabled:avatarBusy}"><Upload :size="15"/>{{avatarBusy?'Processing…':'Upload Avatar'}}<input type="file" accept="image/png,image/jpeg,image/webp" :disabled="avatarBusy" @change="uploadAvatar"></label></section>
+
       <button v-if="owner&&selected.role!=='owner'" class="button danger remove-member" :disabled="busy" @click="removeMember()"><Trash2 :size="15"/> Remove from Project</button>
       <section v-if="owner" class="ensemble-management">
         <div class="management-heading"><div><div class="eyebrow">MEMBERSHIP</div><h3>Add an Existing User</h3></div><UserPlus :size="20"/></div>

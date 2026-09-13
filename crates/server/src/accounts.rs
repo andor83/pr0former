@@ -26,12 +26,13 @@ pub fn admin(app: &App, headers: &HeaderMap) -> Api<String> {
     Ok(id)
 }
 pub fn profile(db: &Connection, id: &str) -> Api<Value> {
-    db.query_row("SELECT u.username,p.is_admin,p.enabled,p.body,p.revision,p.created FROM users u JOIN user_profiles p ON p.user_id=u.id WHERE u.id=?1 AND p.deleted=0",[id],|r| {
+    db.query_row("SELECT u.username,p.is_admin,p.enabled,p.body,p.revision,p.created,COALESCE(a.revision,0) FROM users u JOIN user_profiles p ON p.user_id=u.id LEFT JOIN user_avatars a ON a.user_id=u.id WHERE u.id=?1 AND p.deleted=0",[id],|r| {
         let body:String=r.get(3)?;
         let mut value:Value=serde_json::from_str(&body).unwrap_or(json!({}));
         value["id"]=json!(id); value["username"]=json!(r.get::<_,String>(0)?);
         value["is_admin"]=json!(r.get::<_,bool>(1)?);value["enabled"]=json!(r.get::<_,bool>(2)?);
         value["revision"]=json!(r.get::<_,u64>(4)?);value["created"]=json!(r.get::<_,u64>(5)?);
+        value["avatar_revision"]=json!(r.get::<_,u64>(6)?);
         Ok(value)
     }).map_err(|_|Failure(StatusCode::NOT_FOUND,"User unavailable".into()))
 }
@@ -102,6 +103,132 @@ async fn password_hash(password: String) -> Api<String> {
     .await
     .map_err(internal)?
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfEdit {
+    username: String,
+    revision: u64,
+    fields: Fields,
+    current_password: Option<String>,
+    password: Option<String>,
+}
+
+pub async fn update_self(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(request): Json<SelfEdit>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let id = user(&app, &headers)?;
+    let mut edit = Edit {
+        username: request.username,
+        revision: Some(request.revision),
+        fields: request.fields,
+        is_admin: false,
+        enabled: true,
+        password: request.password,
+    };
+    validate(&mut edit)?;
+    let new_password = edit.password.take().filter(|value| !value.is_empty());
+    let old_hash: String = app
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT password FROM users WHERE id=?1", [&id], |row| {
+            row.get(0)
+        })
+        .map_err(internal)?;
+    let hash = if let Some(password) = new_password {
+        if !is_desktop_session(&app, &headers) {
+            let current = request.current_password.unwrap_or_default();
+            let expected = old_hash.clone();
+            let valid = tokio::task::spawn_blocking(move || {
+                PasswordHash::new(&expected).is_ok_and(|parsed| {
+                    Argon2::default()
+                        .verify_password(current.as_bytes(), &parsed)
+                        .is_ok()
+                })
+            })
+            .await
+            .map_err(internal)?;
+            if !valid {
+                return Err(bad("Current password is incorrect"));
+            }
+        }
+        Some(password_hash(password).await?)
+    } else {
+        None
+    };
+    // Recheck the session and password after expensive hashing, before writing.
+    user(&app, &headers)?;
+    let changing_password = hash.is_some();
+    let mut value = {
+        let mut db = app.db.lock().unwrap();
+        let tx = db.transaction().map_err(internal)?;
+        let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions s JOIN user_profiles p ON p.user_id=s.user_id WHERE s.token=?1 AND s.user_id=?2 AND s.expires>?3 AND p.enabled=1 AND p.deleted=0)", params![session_token(&headers),id,now()], |row|row.get(0)).map_err(internal)?;
+        if !valid {
+            return Err(Failure(StatusCode::UNAUTHORIZED, "Please sign in".into()));
+        }
+        let old = profile(&tx, &id)?;
+        let current_hash: String = tx
+            .query_row("SELECT password FROM users WHERE id=?1", [&id], |row| {
+                row.get(0)
+            })
+            .map_err(internal)?;
+        if old["revision"].as_u64() != edit.revision || current_hash != old_hash {
+            return Err(Failure(
+                StatusCode::CONFLICT,
+                "Your profile changed. Close and reopen it before saving.".into(),
+            ));
+        }
+        tx.execute(
+            "UPDATE users SET username=?2,password=COALESCE(?3,password) WHERE id=?1",
+            params![id, edit.username, hash],
+        )
+        .map_err(|_| bad("Username already exists"))?;
+        tx.execute(
+            "UPDATE user_profiles SET body=?2,revision=revision+1 WHERE user_id=?1",
+            params![id, serde_json::to_string(&edit.fields).map_err(internal)?],
+        )
+        .map_err(internal)?;
+        if changing_password {
+            tx.execute(
+                "DELETE FROM sessions WHERE user_id=?1 AND token!=?2 AND token!=?3",
+                params![
+                    id,
+                    session_token(&headers),
+                    app.desktop_session.as_deref().unwrap_or("")
+                ],
+            )
+            .map_err(internal)?;
+        }
+        let value = profile(&tx, &id)?;
+        tx.commit().map_err(internal)?;
+        value
+    };
+    if changing_password {
+        revoke_live(&app, &id).await;
+    }
+    let projects = {
+        let db = app.db.lock().unwrap();
+        let mut query = db
+            .prepare("SELECT project_id FROM members WHERE user_id=?1")
+            .map_err(internal)?;
+        query
+            .query_map([&id], |row| row.get::<_, String>(0))
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?
+    };
+    for project_id in projects {
+        let _ = app
+            .events
+            .send(json!({"type":"members_changed","project_id":project_id,"user_id":id}).into());
+    }
+    value["is_desktop_session"] = json!(is_desktop_session(&app, &headers));
+    Ok(Json(value))
+}
+
 pub async fn list(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
     admin(&app, &headers)?;
     let db = app.db.lock().unwrap();

@@ -172,7 +172,9 @@ opens the existing interface signed in as `admin`. The first account receives th
 system administrator role for settings and user administration. It owns projects
 it creates; project access still follows membership rules. The random account
 password is discarded; no default password or HTTP authentication bypass exists.
-Signing out remains effective; relaunch the app to obtain a fresh local session.
+The bundled admin avatar opens the profile menu, where Sign out is disabled; its private session cannot sign out.
+Quit the app to end it. User creation and invitations remain available for remote
+clients, whose ordinary sessions can still sign out.
 Sessions follow the server's existing 24-hour expiry and are revoked on clean exit.
 
 The server sends its fresh session over the parent's private stdout pipe. Rust
@@ -258,6 +260,8 @@ over Wi-Fi still require physical-device testing.
 With a performance open, **Window → New Window for This Performance**
 (**Cmd/Ctrl+Shift+N**) opens another view of that same project and server session.
 Each view can show Graph, Score, Conductor, Ensemble, Monitor, or Stage independently.
+Native titles end with `pr0former (bundled)` for the bundled engine or
+`pr0former (https://server:port)` for a remote HTTPS server (HTTP uses its actual scheme).
 Up to eight windows per performance are supported. **Window → Tile Windows**
 arranges open performance windows on the focused window's display.
 
@@ -302,6 +306,14 @@ Standalone server additions: `PR0_WEB_ROOT` selects the frontend directory and
 `pr0-server --desktop` is the launcher's private protocol: stdout carries a session
 credential, private JSON stdin commands control opt-in hosting, stdin closure requests shutdown, and bind/TLS environment overrides are ignored.
 Do not use that mode as a public service command.
+
+## App artwork
+
+`web/public/app-icon.png` is the supplied original artwork, shared by the web header
+and desktop branding. Desktop icon formats are generated with
+`desktop/node_modules/.bin/tauri icon web/public/app-icon.png --output desktop/src-tauri/icons`.
+The web build also includes a 32px favicon, a 180px Apple touch icon, and 192px/512px
+manifest icons for browser installation. These assets are bundled locally.
 
 ## Verification
 

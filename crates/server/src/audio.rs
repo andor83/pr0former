@@ -1168,6 +1168,12 @@ fn run(
                     if visualize {
                         e.analyze_visualizers();
                     }
+                    let (debug, dropped)=e.take_console_entries();
+                    for entry in debug {
+                        let value=match entry.value {pr0_core::ControlValue::Number(value)=>value.to_string(),pr0_core::ControlValue::Text(value)=>serde_json::to_string(&value).unwrap_or_default()};
+                        logs.push(&p.id,"info",&format!("Console Out [{} · {}] sample {}: {}",entry.label,entry.node,entry.sample,value));
+                    }
+                    if dropped>0 { logs.push(&p.id,"warn",&format!("Console Out: dropped {dropped} values because debug capture filled (128 entries per telemetry interval)")); }
                     let count = underruns.load(Ordering::Relaxed);
                     if count > logged_underruns {
                         logs.push(
@@ -1185,7 +1191,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"metronome":metronome,"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":persistence.error().unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"route_targets":e.route_targets(),"feedback_edges":e.feedback_edges(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"metronome":metronome,"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":persistence.error().unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"osc_messages":e.osc_messages(),"route_targets":e.route_targets(),"feedback_edges":e.feedback_edges(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
 ).into());
                 }
             }

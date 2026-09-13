@@ -25,13 +25,13 @@ test('part note-on/off streams round-trip through OSC and play a polyphonic samp
   const n = (id: string, kind: string, x: number, y: number, extra = {}) => ({ id, kind, label: id, x, y, channels: 2, parameters: {}, ...extra })
   p.graph = { nodes: [
     n('Part notes', 'part_midi', 0, 0),
-    n('Send notes', 'midi_to_osc', 300, 0, { io: { port: '', address: '/notes', destination: `127.0.0.1:${port}` } }),
+    n('Send notes', 'midi_to_osc', 300, 0, { io: { port: '', address: '/notes', destination: `localhost:${port}` } }),
     n('Receive notes', 'osc_to_midi', 600, 0, { io: { port: '', address: '/notes', destination: '' } }),
     n('Sampler', 'poly_sampler', 900, 0, { parameters: { asset: upload.asset, root_note: 60, loop: 1, release: 5, amplitude: .5 } }),
     n('Headphones', 'monitor_output', 1200, 0),
     n('On count', 'counter', 0, 420), n('Off count', 'counter', 300, 420),
     n('Received on', 'counter', 600, 420), n('Received off', 'counter', 900, 420),
-    n('Keyboard', 'midi_input', 1200, 420), n('MIDI destination', 'midi_output', 1500, 420),
+    n('Keyboard', 'midi_input', 1200, 420), n('MIDI destination', 'midi_output', 1700, 420),
   ], edges: [] }
   const wire = (source: string, source_port: string, target: string, target_port: string) => p.graph.edges.push({ id: `${source}-${source_port}-${target}`, source, source_port, target, target_port })
   for (const name of ['pitch', 'velocity', 'gate', 'trigger', 'note_off']) { wire('Part notes', name, 'Send notes', name); wire('Receive notes', name, 'Sampler', name) }

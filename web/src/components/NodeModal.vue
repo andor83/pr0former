@@ -4,6 +4,7 @@ import { X, Link2, ArrowUpRight, Unplug, RotateCcw, Activity } from '@lucide/vue
 import type { Descriptor, GraphNode, GraphEdge, Parameter, Part, IoConfig } from '../types'
 import { finiteInput, formatValue } from '../api'
 import { roundSlider, formatSlider } from '../sliderNumbers'
+import OscMessageDebug from './OscMessageDebug.vue'
 import MidiInputDebug from './MidiInputDebug.vue'
 import NodeIoSettings from './NodeIoSettings.vue'
 import type {SampleEntry} from '../samples'
@@ -17,7 +18,7 @@ import LooperStatus from './LooperStatus.vue'
 import ToggleButton from './ToggleButton.vue'
 import EnvelopeGraph from './EnvelopeGraph.vue'
 import type {Visualization} from '../types'
-const props = defineProps<{ routeTargets?:Record<string,string>;routeTarget?:string;samples?:SampleEntry[]; inputError?:string|null; ioStatus?:{error:string|null;dropped:number}; parts?: Part[]; projectId?:string; visualization?:Visualization; sampleRate?:number;blockSize?:number; interfaces?: {id:number;name:string}[]; node: GraphNode; descriptor: Descriptor; edges: GraphEdge[]; nodes: GraphNode[]; values?: Record<string, number>; stale: boolean; editable: boolean; active: boolean; saving: boolean }>()
+const props = defineProps<{ oscMessage?:[number,number|string]; routeTargets?:Record<string,string>;routeTarget?:string;samples?:SampleEntry[]; inputError?:string|null; ioStatus?:{error:string|null;dropped:number}; parts?: Part[]; projectId?:string; visualization?:Visualization; sampleRate?:number;blockSize?:number; interfaces?: {id:number;name:string}[]; node: GraphNode; descriptor: Descriptor; edges: GraphEdge[]; nodes: GraphNode[]; values?: Record<string, number>; stale: boolean; editable: boolean; active: boolean; saving: boolean }>()
 const emit = defineEmits<{ sample:[sample:SampleEntry]; rename: [label:string]; part: [id:string]; io: [value:IoConfig]; expand: []; close: []; change: [key: string, value: number]; disconnect: [edge: GraphEdge]; source: [id: string]; undo: []; remove: []; upload: [file: File]; control: [value:number|string]; curve: [parameters: Record<string, number>]; channels: [width: number] }>()
 const nameDraft = ref(props.node.label)
 watch(() => [props.node.id, props.node.label], () => { nameDraft.value = props.node.label })
@@ -128,7 +129,8 @@ function backdropClick(event: MouseEvent) { if (pressedOutside && outside(event)
       <NodeIoSettings v-if="['midi_input','midi_output','midi_to_osc','osc_to_midi','osc_input','osc_output'].includes(node.kind)" :node="node" :disabled="!editable || saving" @change="value=>emit('io',value)" />
       <section v-if="['midi_input','osc_to_midi'].includes(node.kind)" class="parameter-row"><div class="part-midi-values"><label v-for="name in ['pitch','velocity','gate','trigger','note_off']" :key="name">{{ name.replace('_',' ') }}<output :aria-label="`MIDI ${name}`">{{ active && !stale ? formatValue(values?.[name]) : '—' }}</output></label></div><p v-if="node.kind==='midi_input' && active && inputError" class="field-error">{{inputError}}</p><p v-if="active && !stale && values?._dropped" class="field-error">MIDI event queue overloaded: {{values._dropped}} events dropped.</p></section>
       <p v-if="active && ['midi_output','midi_to_osc'].includes(node.kind) && ioStatus?.error" class="field-error">{{ioStatus.error}}</p>
-      <MidiInputDebug v-if="['midi_input','local_midi_input'].includes(node.kind)" :key="node.id" :values="values" :active="active" :stale="stale" />
+      <OscMessageDebug v-if="['osc_input','osc_output'].includes(node.kind)" :key="node.id" :message="oscMessage" :address="node.io?.address" :output="node.kind==='osc_output'" :active="active" :stale="stale" />
+      <MidiInputDebug v-if="['midi_input','local_midi_input','midi_to_osc','osc_to_midi'].includes(node.kind)" :key="node.id" :values="values" :active="active" :stale="stale" />
       <LocalMidiInputPicker v-if="node.kind==='local_midi_input'" :node="node.id" :active="active" :editable="editable" :values="values" />
       <section v-if="node.kind==='browser_input'" class="parameter-row"><BrowserInputPicker :input-key="`${projectId}:${node.id}`" :node-id="node.id" :active="active" /></section>
       <section v-if="node.kind==='clock'" class="parameter-row"><label>Project tempo input</label><template v-if="links.tempo"><p class="connected-label">CONNECTED · {{active ? formatValue(values?.tempo, 'BPM') : 'Project inactive'}}</p><button class="text-button" @click="emit('source',links.tempo.source)">{{sourceName(links.tempo)}} / {{links.tempo.source_port}}</button><button class="text-button" :disabled="!editable || saving" @click="emit('disconnect',links.tempo)">Disconnect tempo</button></template><HelpNote v-else>Connect a control signal to tempo to change global BPM programmatically. With no connection, use the project transport tempo.</HelpNote></section>

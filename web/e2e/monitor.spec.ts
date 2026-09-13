@@ -49,7 +49,7 @@ test('monitor sidebar, process stats and physical device groups and individual c
   const resource=await(await page.request.get('/api/system/stats')).json()
   expect(resource.resident_bytes).toBeGreaterThan(0)
   await expect.poll(async()=> (await(await page.request.get('/api/system/stats')).json()).cpu_percent).toBeGreaterThanOrEqual(0)
-  await expect(page.getByRole('meter',{name:'Idle microphone input channel 1 level'})).toHaveAttribute('aria-valuetext','No current hardware data')
+  await expect(page.getByRole('meter',{name:'Idle microphone input channel 1 level'})).toHaveAttribute('aria-valuetext','No current audio data')
   const capture=page.getByRole('region',{name:'Inputs VU meters'}).locator('.device-group[data-device="101"]')
   await expect(capture.getByRole('meter')).toHaveCount(8)
   await expect(capture.locator('[data-channel="1"]')).toHaveAttribute('data-zone','normal')
@@ -92,7 +92,7 @@ test('monitor sidebar, process stats and physical device groups and individual c
   await page.screenshot({path:'test-results/monitor-phone.png'})
   publish=false
   await expect(main).toHaveClass(/stale/)
-  await expect(main.getByRole('meter')).toHaveAttribute('aria-valuetext','No current hardware data')
+  await expect(main.getByRole('meter')).toHaveAttribute('aria-valuetext','No current audio data')
   active=false;publish=true
   await expect(page.getByRole('region',{name:'Outputs VU meters'}).getByRole('meter')).toHaveCount(0)
   await expect(capture.getByRole('meter')).toHaveCount(8)

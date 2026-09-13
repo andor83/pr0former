@@ -4,8 +4,8 @@ mod bind;
 mod build_info;
 mod desktop;
 mod discovery;
-mod hosting;
 mod hardware_meter;
+mod hosting;
 mod local_midi;
 mod loops;
 mod media;
@@ -90,6 +90,7 @@ struct App {
     setup: Arc<tokio::sync::Mutex<()>>,
     logs: Arc<settings::Logs>,
     secure: bool,
+    desktop_session: Option<String>,
     media: Arc<media::Media>,
 }
 type Api<T> = Result<T, Failure>;
@@ -127,17 +128,23 @@ fn csrf(headers: &HeaderMap) -> Api<()> {
     }
     Ok(())
 }
-fn user(app: &App, headers: &HeaderMap) -> Api<String> {
+fn session_token(headers: &HeaderMap) -> &str {
     let cookie = headers
         .get(header::COOKIE)
         .and_then(|x| x.to_str().ok())
         .unwrap_or("");
-    let token = cookie
+    cookie
         .split(';')
         .filter_map(|x| x.trim().split_once('='))
         .find(|(k, _)| *k == "pr0_session")
         .map(|(_, v)| v)
-        .unwrap_or("");
+        .unwrap_or("")
+}
+fn is_desktop_session(app: &App, headers: &HeaderMap) -> bool {
+    app.desktop_session.as_deref().is_some_and(|token| token == session_token(headers))
+}
+fn user(app: &App, headers: &HeaderMap) -> Api<String> {
+    let token = session_token(headers);
     app.db
         .lock()
         .unwrap()
@@ -567,11 +574,14 @@ async fn login(
 }
 async fn logout(State(app): State<App>, headers: HeaderMap) -> Api<Response> {
     csrf(&headers)?;
+    if is_desktop_session(&app, &headers) {
+        return Err(Failure(StatusCode::FORBIDDEN, "The bundled admin session cannot sign out. Quit the desktop app to end this session.".into()));
+    }
     let id = user(&app, &headers)?;
     app.db
         .lock()
         .unwrap()
-        .execute("DELETE FROM sessions WHERE user_id=?1", [id])
+        .execute("DELETE FROM sessions WHERE user_id=?1 AND token!=?2", params![id, app.desktop_session.as_deref().unwrap_or("")])
         .map_err(internal)?;
     Ok((
         [(
@@ -584,7 +594,9 @@ async fn logout(State(app): State<App>, headers: HeaderMap) -> Api<Response> {
 }
 async fn me(State(app): State<App>, headers: HeaderMap) -> Api<Json<Value>> {
     let id = user(&app, &headers)?;
-    accounts::profile(&app.db.lock().unwrap(), &id).map(Json)
+    let mut profile = accounts::profile(&app.db.lock().unwrap(), &id)?;
+    profile["is_desktop_session"] = json!(is_desktop_session(&app, &headers));
+    Ok(Json(profile))
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     let count: i64 = app
@@ -1138,9 +1150,13 @@ async fn parameter(
 ) -> Api<Json<Project>> {
     csrf(&headers)?;
     let u = user(&app, &headers)?;
-    can_edit(&role(&app, &id, &u)?)?;
+    let membership=role(&app,&id,&u)?;
     let _guard = app.setup.lock().await;
     let mut p = load(&app, &id)?;
+    let owns_input = c.parameter == "mute"
+        && p.graph.nodes.iter().any(|n| n.id == c.node && n.kind == "browser_input")
+        && p.parts.iter().any(|part| part.performer.as_deref() == Some(&u) && part.instrument_node.as_deref() == Some(&c.node));
+    if !owns_input { can_edit(&membership)?; }
     let previous = p.clone();
     if p.revision != c.revision {
         return Err(Failure(StatusCode::CONFLICT, "Stale parameter edit".into()));
@@ -2236,7 +2252,7 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
         tokio::select! {
             event=events.recv()=>match event{Ok(event)=>{
                 let v=&event.value;
-                if v["type"]=="session_revoked" && v["user_id"]==u {let _=socket_text(&mut socket,event.text.to_string()).await;break;}
+                if v["type"]=="session_revoked" && v["user_id"]==u && user(&app, &headers).is_err() {let _=socket_text(&mut socket,event.text.to_string()).await;break;}
                 let mine=v.get("project_id").and_then(Value::as_str)==Some(&id);
                 if mine && (v["type"]=="project" || v["type"]=="members_changed") {performer=None;local_midi.invalidate();}
                 // Serialized once by the producer; non-subscribers take the variant without visualizations.
@@ -2398,6 +2414,7 @@ async fn main() {
         setup: Arc::new(tokio::sync::Mutex::new(())),
         logs,
         secure: tls_config.pair.is_some(),
+        desktop_session: desktop_session.clone(),
         media,
     };
     app.osc.listen(&app);
@@ -2462,7 +2479,7 @@ async fn main() {
         .route("/api/register", post(register))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
-        .route("/api/me", get(me))
+        .route("/api/me", get(me).put(accounts::update_self))
         .route("/api/catalog", get(|| async { Json(catalog()) }))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}/opened", post(accounts::opened))
@@ -2520,7 +2537,7 @@ async fn main() {
         .route("/api/projects/{id}/events", get(websocket))
         .route(
             "/api/projects/{id}/media",
-            post(media::offer).delete(media::disconnect),
+            get(media::inputs).post(media::offer).delete(media::disconnect),
         )
         .route("/api/projects/{id}/clip", post(clip))
         .route("/api/projects/{id}/cue", post(cue))

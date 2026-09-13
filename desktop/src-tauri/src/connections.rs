@@ -95,7 +95,7 @@ pub async fn connect_server(
         // Cookies are host-scoped, not port-scoped: even another loopback server
         // must never inherit the bundled engine's automatically granted session.
         .incognito(true)
-        .initialization_script(crate::windows::INIT)
+        .initialization_script(crate::windows::initialization_script())
         .on_document_title_changed(crate::windows::loaded)
         .visible(false)
         .on_navigation(|url| matches!(url.scheme(), "http" | "https" | "tauri"))
