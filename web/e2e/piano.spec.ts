@@ -5,7 +5,7 @@ test('piano plays notes, forwards polyphony, highlights received keys and select
   await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
   let p=await(await page.request.post('/api/projects',{headers,data:{name:'Piano test',mode:'freeform'}})).json()
   const n=(id:string,kind:string,x:number)=>({id,kind,label:id,x,y:0,channels:1,parameters:{}})
-  p.parts=[];p.graph={nodes:[n('Play keys','piano',0),n('Receive keys','piano',390),n('On count','counter',750),n('Off count','counter',1000)],edges:[]}
+  p.parts=[];p.graph={nodes:[n('Play keys','piano',0),n('Receive keys','piano',390),n('On count','counter',900),n('Off count','counter',1150)],edges:[]}
   for(const port of ['pitch','velocity','gate','trigger','note_off'])p.graph.edges.push({id:port,source:'Play keys',source_port:port,target:'Receive keys',target_port:port})
   for(const [port,target] of [['trigger','On count'],['note_off','Off count']])p.graph.edges.push({id:target,source:'Receive keys',source_port:port,target,target_port:'trigger'})
   const saved=await page.request.put(`/api/projects/${p.id}`,{headers,data:p});expect(saved.ok()).toBe(true);p=await saved.json()
@@ -38,7 +38,7 @@ test('piano plays notes, forwards polyphony, highlights received keys and select
   allowNote()
   await expect(receivedC).toHaveAttribute('aria-pressed','true')
   expect(await receivedC.evaluate(el=>getComputedStyle(el).backgroundColor)).not.toBe(normalColor)
-  await page.mouse.move(box.x+300,box.y+90);await page.mouse.up()
+  await page.mouse.move(box.x+box.width/2,box.y-80);await page.mouse.up()
   await expect(receivedC).toHaveAttribute('aria-pressed','false')
   await expect.poll(()=>latest?.values?.['Off count']?._out).toBe(1)
   expect((await(await page.request.get(`/api/projects/${p.id}`)).json()).project.revision).toBe(initial)

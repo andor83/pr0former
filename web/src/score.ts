@@ -53,6 +53,124 @@ export function caretStops(
   }
   return [...stops].sort((a, b) => a - b)
 }
+/**
+ * A write click chooses a bar and its preceding note group. The new entry abuts
+ * that group, or starts at the bar boundary when the click precedes all notes.
+ */
+export function entryBeat(
+  notes: Note[],
+  part: Part,
+  staff: string,
+  voice: number,
+  hiddenRests: { beat: number; duration: number; voice: number }[] | undefined,
+  clicked: number,
+  barStart = 0,
+  barEnd = Infinity,
+): number {
+  const occupied: { beat: number; end: number }[] = []
+  for (const n of notes) {
+    const v = metadata(n, part)
+    if (v.staff !== staff || v.voice !== voice || v.grace_to) continue
+    if (n.beat < barEnd - 1e-9 && n.beat + n.duration > barStart + 1e-9)
+      occupied.push({ beat: n.beat, end: n.beat + n.duration })
+  }
+  for (const r of hiddenRests || [])
+    if (
+      r.voice === voice &&
+      r.beat < barEnd - 1e-9 &&
+      r.beat + r.duration > barStart + 1e-9
+    )
+      occupied.push({ beat: r.beat, end: r.beat + r.duration })
+  occupied.sort((a, b) => a.beat - b.beat || a.end - b.end)
+  let cursor = barStart
+  for (const event of occupied) {
+    if (event.beat >= clicked - 1e-9) break
+    cursor = Math.max(cursor, event.end)
+  }
+  return Math.min(cursor, barEnd)
+}
+/** Plan an insertion without modifying the score. Chords move as one onset;
+ * existing gaps absorb displacement before later events have to move. */
+export function insertEntry(
+  part: Part, staff: string, voice: number, beat: number, duration: number, barEnd: number,
+): { notes: Note[] } | string {
+  const eps = 1e-9
+  const events = part.notes.filter(n => {
+    const v = metadata(n, part)
+    return v.staff === staff && v.voice === voice && !v.grace_to
+  }).sort((a,b) => a.beat-b.beat)
+  if (beat + duration > barEnd + eps)
+    return 'Cannot insert note: this would overflow the bar.'
+  if (events.some(n => n.beat < beat-eps && n.beat+n.duration > beat+eps))
+    return 'Cannot insert inside a sustained note; place the caret after it.'
+  const moves = new Map<string, number>()
+  let end = beat + duration
+  for (let i = 0; i < events.length;) {
+    const onset = events[i]!.beat
+    const group: Note[] = []
+    while (i < events.length && Math.abs(events[i]!.beat-onset) < eps) group.push(events[i++]!)
+    if (onset < beat-eps || onset >= barEnd-eps) continue
+    const next = Math.max(onset, end)
+    const release = next + Math.max(...group.map(n => n.duration))
+    if (release > barEnd+eps) return 'Cannot insert note: this would overflow the bar.'
+    for (const n of group) moves.set(n.id,next)
+    end = release
+  }
+  return {notes: part.notes.map(n => {
+    const v = metadata(n,part)
+    const position = moves.get(n.id) ?? (v.grace_to ? moves.get(v.grace_to) : undefined)
+    return position === undefined ? n : atBeat(n,position)
+  })}
+}
+const glyphBeats: Record<string, number> = {
+  '1/2': 8,
+  w: 4,
+  h: 2,
+  q: 1,
+  '8': 0.5,
+  '16': 0.25,
+  '32': 0.125,
+  '64': 0.0625,
+}
+/**
+ * Make a new entry fit its staff/voice the way Finale does: rests it covers are
+ * replaced, and a value longer than the room before the next pitched onset is
+ * shortened to the largest plain value that fits. Returns a message when the
+ * onset lies inside another note or nothing representable fits.
+ */
+export function fitEntry(
+  notes: Note[],
+  part: Part,
+  staff: string,
+  voice: number,
+  beat: number,
+  duration: number,
+): { remove: string[]; shorten: { base: number; dots: number } | null } | string {
+  const eps = 1e-6
+  const events = notes.filter((n) => {
+    const v = metadata(n, part)
+    return v.staff === staff && v.voice === voice && !v.grace_to
+  })
+  const inside = events.find(
+    (n) => !n.rest && n.beat < beat - eps && n.beat + n.duration > beat + eps,
+  )
+  if (inside)
+    return `Beat ${Math.round((beat + 1) * 1000) / 1000} lies inside another note in voice ${voice}. Use another voice or shorten that note first.`
+  const remove = events
+    .filter(
+      (n) =>
+        n.rest && n.beat < beat + duration - eps && n.beat + n.duration > beat + eps,
+    )
+    .map((n) => n.id)
+  const next = events
+    .filter((n) => !remove.includes(n.id) && n.beat > beat + eps)
+    .reduce((min, n) => Math.min(min, n.beat), Infinity)
+  if (beat + duration <= next + eps) return { remove, shorten: null }
+  const fit = durationGlyphs(next - beat)?.[0]
+  if (!fit || !glyphBeats[fit.duration])
+    return `Nothing fits in the ${Math.round((next - beat) * 1000) / 1000} beats before the next note in voice ${voice}.`
+  return { remove, shorten: { base: glyphBeats[fit.duration]!, dots: fit.dots } }
+}
 export function nextCaretStop(
   stops: number[],
   beat: number,

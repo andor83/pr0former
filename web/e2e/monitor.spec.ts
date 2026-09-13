@@ -6,7 +6,7 @@ test('monitor sidebar, process stats and physical device groups and individual c
   let p=await(await page.request.post('/api/projects',{headers,data:{name:'Monitor layout',mode:'freeform'}})).json()
   p.parts=[]
   const node=(id:string,kind:string,parameters={})=>({id,kind,label:id,x:0,y:0,channels:2,parameters})
-  p.graph={nodes:[node('Native input','input'),node('Browser input','browser_input'),node('Tone','oscillator',{frequency:440,amplitude:0.8}),node('Main output','output',{gain:-24}),node('Headphones','monitor_output',{gain:-12})],edges:[{id:'main',source:'Tone',source_port:'out',target:'Main output',target_port:'in'},{id:'phones',source:'Tone',source_port:'out',target:'Headphones',target_port:'in'}]}
+  p.graph={nodes:[node('Native input','input'),node('Local audio input','browser_input'),node('Tone','oscillator',{frequency:440,amplitude:0.8}),node('Main output','output',{gain:-24}),node('Headphones','monitor_output',{gain:-12})],edges:[{id:'main',source:'Tone',source_port:'out',target:'Main output',target_port:'in'},{id:'phones',source:'Tone',source_port:'out',target:'Headphones',target_port:'in'}]}
   p=await(await page.request.put(`/api/projects/${p.id}`,{headers,data:p})).json()
   expect((await page.request.put(`/api/projects/${p.id}/system/audio`,{headers,data:{sample_rate:48000,block_size:128,interfaces:[],input_interfaces:[]}})).ok()).toBeTruthy()
   // UI fixtures only: the test server explicitly disables native device access.
@@ -60,7 +60,7 @@ test('monitor sidebar, process stats and physical device groups and individual c
   await expect(main.getByText('CLIP',{exact:true})).toBeVisible()
   await expect(main.locator('.vu-fill')).toHaveCSS('background-color','rgb(241, 109, 105)')
   await expect(main.getByRole('meter')).toHaveAttribute('aria-valuetext',/clipping/)
-  await expect(page.getByRole('meter',{name:/Browser input|Headphones/})).toHaveCount(0)
+  await expect(page.getByRole('meter',{name:/Local audio input|Headphones/})).toHaveCount(0)
   const geometry=()=>page.locator('.meter-banks').evaluate(root=>({
     strips:Array.from(root.querySelectorAll('.vu-strip')).map(el=>{const r=el.getBoundingClientRect();return [r.x,r.y,r.width,r.height]}),
     overflow:Array.from(root.querySelectorAll('.meter-bank,.device-groups,.device-group,.meter-bank-body,.vu-strip')).map(el=>el.scrollHeight-el.clientHeight),

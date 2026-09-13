@@ -41,7 +41,7 @@ test('syncopation, point tools, mixing and preparation playback', async ({
   await expect.poll(async () => (await read()).parts[0].notes.length).toBe(1)
   const note = (await read()).parts[0].notes[0]
   expect(note.duration).toBe(1)
-  expect(note.beat % 1).not.toBe(0)
+  expect(note.beat).toBe(0)
   const glyph = staff.locator('[data-note-id]').first()
   await glyph.hover()
   await expect(glyph.locator('path').first()).toHaveCSS(
@@ -142,6 +142,7 @@ test('syncopation, point tools, mixing and preparation playback', async ({
   await page
     .getByRole('button', { name: 'Performance mode', exact: true })
     .click()
+  await page.getByLabel('Show all parts', { exact: true }).check()
   // Performance mode is a read-only score view: notation must not acquire a
   // selection or highlight when it is clicked.
   const performanceGlyph = page
@@ -159,7 +160,7 @@ test('syncopation, point tools, mixing and preparation playback', async ({
     (await page.request.put(url, { headers, data: locked })).status(),
   ).toBe(400)
   await page
-    .getByRole('button', { name: 'Exit performance mode', exact: true })
+    .getByRole('button', { name: 'End performance', exact: true })
     .click()
   await page
     .getByRole('button', { name: 'Disable audio engine', exact: true })

@@ -9,9 +9,29 @@
   "app": {
     "windows": [],
     "security": {
-      "capabilities": [],
+      "capabilities": [
+        {
+          "identifier": "server-chooser",
+          "windows": [
+            "server-connection"
+          ],
+          "permissions": [
+            "allow-connect-server"
+          ]
+        },
+        {
+          "identifier": "desktop-hosting",
+          "windows": [
+            "hosting"
+          ],
+          "permissions": [
+            "allow-hosting-control"
+          ]
+        }
+      ],
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
-    }
+    },
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": true,

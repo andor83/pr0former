@@ -15,6 +15,7 @@ test('desktop owner session opens the ready-made interface and keeps browser aut
   child.stderr.on('data', chunk => { stderr += String(chunk) })
   const lines = createInterface({ input: child.stdout })
   const context = await browser.newContext()
+  await context.addInitScript(() => { (window as Window & { __PR0_DESKTOP__?: boolean }).__PR0_DESKTOP__ = true })
   try {
     const ready = await new Promise<{ url: string; session: string }>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`Desktop startup timed out: ${stderr}`)), 15000)
@@ -34,6 +35,15 @@ test('desktop owner session opens the ready-made interface and keeps browser aut
     await page.locator('.dialog-card input[maxlength="120"]').fill('Desktop workspace')
     await page.getByRole('button', { name: 'Create performance', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Enable audio engine', exact: true })).toBeVisible()
+    await expect.poll(() => new URL(page.url()).searchParams.get('project')).toBeTruthy()
+    const projectId = new URL(page.url()).searchParams.get('project')!
+    const secondWindow = await context.newPage()
+    await secondWindow.goto(`${ready.url}/?project=${encodeURIComponent(projectId)}&view=score`)
+    await expect(secondWindow.getByTitle('Sign out admin', { exact: true })).toBeVisible()
+    await expect(secondWindow.getByRole('button', { name: 'Score & Parts', exact: true })).toHaveClass(/active/)
+    await expect(secondWindow).toHaveTitle(/Desktop workspace — score/)
+    await expect(page.getByRole('button', { name: 'Signal Graph', exact: true })).toHaveClass(/active/)
+    await secondWindow.close()
     await page.reload()
     await expect(page.getByTitle('Sign out admin', { exact: true })).toBeVisible()
     expect(await page.evaluate(() => document.cookie)).not.toContain('pr0_session')

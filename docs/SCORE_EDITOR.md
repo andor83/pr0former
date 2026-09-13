@@ -1,5 +1,12 @@
 # Score editor
 
+In Write mode, clicking empty staff inserts at the bar's beginning or immediately
+after the note to the left. Horizontal spacing does not create leading rests.
+Inserting before or between notes shifts later notes and chords right as needed;
+existing gaps absorb that movement. If the new note or any shifted note would
+overflow the bar, the editor shows an error and leaves the score unchanged.
+The chosen duration is preserved. Add rests explicitly when silence is intended.
+
 Open **Score & Parts** in preparation mode, with the audio engine on or off. The sidebar is a compact list of full-width part rows: a small header bar holds the collapse toggle, Show all, Hide all and Add part; each row has move up/down buttons around a drag handle (drag rows to reorder), the part name with performer, staff count and instrument, and a vertical group of tiny controls: a check that shows or hides the part in the score, **M** mute and **S** solo. Collapsing the sidebar leaves only the expand button. The centered floating toolbar contains MusicXML import/export, **Part** settings, **Score** settings, **Measure** and **Bars & meter**. The footer holds Follow playback, **Spacing** (horizontal note spacing, the former Zoom slider) and **Zoom**, which scales the whole score like a page without changing note spacing: use the slider, the −/+ buttons, Ctrl/Cmd + mouse wheel or trackpad pinch, or pinch with two fingers on a touch screen; two-finger pans keep working during a pinch. Spacing, Zoom and Follow are local viewing settings and Zoom persists per browser. The score scrolls continuously, without pages.
 
 **M** mutes the part's MIDI and **S** is an exclusive solo. Solo unmutes that part and silences the others. Switching solo off restores the other parts’ saved mute states. These settings affect scheduled notes, dynamics and raw MIDI; merely hiding a part does not mute it.

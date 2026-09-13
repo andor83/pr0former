@@ -25,23 +25,23 @@ onBeforeUnmount(()=>clearInterval(timer))
 <button class="button small" @click="emit('refresh')">Refresh MIDI devices</button>
 <p v-if="devices?.midi_error" role="alert" class="field-error">{{devices.midi_error}}</p>
 <h4>MIDI inputs</h4><p v-for="name in devices?.midi_inputs" :key="name">{{name}}</p><p v-if="!devices?.midi_inputs?.length">No MIDI inputs detected on the server.</p>
-<p class="feature-note">Input discovery is available; MIDI input routing is not implemented yet.</p>
+<HelpNote>Input discovery is available; MIDI input routing is not implemented yet.</HelpNote>
 <h4>MIDI outputs</h4><p v-for="name in devices?.midi_outputs" :key="name">{{name}}</p><p v-if="!devices?.midi_outputs?.length">No MIDI outputs detected on the server.</p>
-<p class="feature-note">Browser MIDI devices are not connected. A future browser bridge can announce them after login and permission, and mark routes unavailable when the browser disconnects.</p>
+<HelpNote>Browser MIDI devices are not connected. A future browser bridge can announce them after login and permission, and mark routes unavailable when the browser disconnects.</HelpNote>
 </template>
 <template v-else>
 <p>Network bindings apply to every project on this server. Incoming messages affect only the active show.</p>
 <p v-if="status?.error" role="alert" class="field-error">{{status.error}}</p><p v-if="status?.interface_error" role="alert" class="field-error">Interface discovery failed: {{status.interface_error}}</p>
 <fieldset v-if="osc" :disabled="!editable||active||busy">
 <label class="check-label"><input v-model="osc.receive_enabled" type="checkbox">Receive OSC</label>
-<p class="feature-note">Enabling reception allows devices on the selected networks to control the active show without a browser login.</p>
+<HelpNote>Enabling reception allows devices on the selected networks to control the active show without a browser login.</HelpNote>
 <h4>Receive interfaces (IPv4)</h4>
 <label v-for="i in interfaces" :key="i.address" class="check-label"><input type="checkbox" :checked="osc.bind_addresses.includes(i.address)" @change="binding(i.address,($event.target as HTMLInputElement).checked)">{{i.name}} · {{i.address}}</label>
 <p v-if="!status?.interfaces?.length">No individual IPv4 interfaces available.</p>
 <label>OSC receive port<input v-model.number="osc.receive_port" type="number" min="1" max="65535" step="1"></label>
 <label class="check-label"><input v-model="osc.send_enabled" type="checkbox">Send OSC</label>
 <label>OSC send interface<select v-model="osc.send_address"><option v-for="i in interfaces" :key="i.address" :value="i.address">{{i.name}} · {{i.address}}</option><option v-if="!interfaces.some(i=>i.address===osc!.send_address)" :value="osc.send_address">{{osc.send_address}} · unavailable</option></select></label>
-<label>OSC source port<input v-model.number="osc.send_port" type="number" min="0" max="65535" step="1"></label><p class="feature-note">Source port 0 lets the OS choose a port. The destination port belongs to each part below.</p>
+<label>OSC source port<input v-model.number="osc.send_port" type="number" min="0" max="65535" step="1"></label><HelpNote>Source port 0 lets the OS choose a port. The destination port belongs to each part below.</HelpNote>
 <button class="button primary" @click="save">Save OSC settings</button>
 </fieldset>
 <p v-if="active" class="feature-note">Deactivate the show to change network bindings or part routes.</p>
@@ -59,7 +59,7 @@ onBeforeUnmount(()=>clearInterval(timer))
 <template v-else>
 <label>OSC IP:port<input :value="part.osc_destination||''" placeholder="192.168.1.10:9000" @change="update('osc_destination',($event.target as HTMLInputElement).value||null)"></label>
 <label>OSC address<input :value="part.osc_address" placeholder="/pr0former/note" @change="update('osc_address',($event.target as HTMLInputElement).value)"></label>
-<p class="feature-note">Score output sends two integers: pitch (0–127), velocity (0–127; zero releases the note). Changes save to this project.</p>
+<HelpNote>Score output sends two integers: pitch (0–127), velocity (0–127; zero releases the note). Changes save to this project.</HelpNote>
 </template>
 </fieldset>
 </section>

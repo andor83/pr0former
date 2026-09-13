@@ -218,9 +218,9 @@ test('shared score meter/repeats and MIDI automation reach the graph and round-t
       {
         id: 'events',
         source: 'source',
-        source_port: 'events',
+        source_port: 'midi',
         target: 'decode',
-        target_port: 'events',
+        target_port: 'midi',
       },
       {
         id: 'value',
@@ -440,7 +440,7 @@ test('multi-staff MusicXML preserves voices, ties, grace, tuplets and spelling; 
   await page.getByLabel('Show all parts', { exact: true }).check()
   await expect(page.locator('[data-score-part]')).toHaveCount(1)
   await page
-    .getByRole('button', { name: 'Exit performance mode', exact: true })
+    .getByRole('button', { name: 'End performance', exact: true })
     .click()
   await page
     .getByRole('button', { name: 'Performance mode', exact: true })

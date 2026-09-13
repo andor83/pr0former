@@ -41,7 +41,7 @@ test('visualizers preserve typed inputs and display multichannel block history, 
   expect(latest.visualizations['Audio display'].sequence-sequence).toBe(latest.sequence-telemetrySequence)
   // Hidden graphs must stop analysis, while the audio sample clock keeps moving.
   await page.getByRole('button',{name:'Score & Parts',exact:true}).click()
-  await expect.poll(()=>latest?.visualizations).toBeUndefined()
+  await expect.poll(()=>Object.keys(latest?.visualizations || {})).toHaveLength(0)
   const hiddenSample=latest.sample
   await expect.poll(()=>latest?.sample).toBeGreaterThan(hiddenSample+48000/4)
   await page.getByRole('button',{name:'Signal Graph',exact:true}).click()

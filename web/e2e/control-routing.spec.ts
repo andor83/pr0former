@@ -43,7 +43,7 @@ test('named control audio and spectral sends route locally and accept text targe
   await page.screenshot({path:'test-results/named-routing.png'})
   await page.getByRole('button',{name:'Close parameters'}).click();await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
 })
-test('connect matching ports uses selection order and C from the context menu',async({page})=>{
+test('connect matching ports uses selection order and prefers one typed MIDI cable',async({page})=>{
   const p=await setup(page,'Match ports');p.parts=[];p.graph={nodes:[node('Left','piano',0,0),node('Right','piano',400,0)],edges:[]}
   expect((await page.request.put(`/api/projects/${p.id}`,{headers,data:p})).ok()).toBe(true)
   const load=async()=>(await(await page.request.get(`/api/projects/${p.id}`)).json()).project
@@ -52,7 +52,7 @@ test('connect matching ports uses selection order and C from the context menu',a
   await right.click({position:{x:30,y:40}});await page.keyboard.down('Control');await left.click({position:{x:30,y:40}});await page.keyboard.up('Control')
   await left.click({button:'right',position:{x:30,y:40}})
   await expect(page.getByRole('menuitem',{name:/Connect matching ports/})).toBeVisible();await page.keyboard.press('c')
-  await expect.poll(async()=>(await load()).graph.edges.length).toBe(5)
+  await expect.poll(async()=>(await load()).graph.edges.length).toBe(1)
   expect((await load()).graph.edges.every((e:any)=>e.source==='Right'&&e.target==='Left'&&e.source_port===e.target_port)).toBe(true)
   await page.getByRole('button',{name:'Undo',exact:true}).click();await expect.poll(async()=>(await load()).graph.edges.length).toBe(0)
   await page.locator('.vue-flow__pane').click({position:{x:10,y:100}})
@@ -60,7 +60,7 @@ test('connect matching ports uses selection order and C from the context menu',a
   await page.mouse.move(b.x+b.width+15,b.y-15);await page.mouse.down();await page.mouse.move(a.x-15,a.y+a.height+15,{steps:15});await page.mouse.up()
   await expect(page.locator('.vue-flow__node.selected')).toHaveCount(2)
   await page.keyboard.press('c')
-  await expect.poll(async()=>(await load()).graph.edges.length).toBe(5)
+  await expect.poll(async()=>(await load()).graph.edges.length).toBe(1)
   expect((await load()).graph.edges.every((e:any)=>e.source==='Left'&&e.target==='Right')).toBe(true)
 
 })

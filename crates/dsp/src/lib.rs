@@ -155,9 +155,13 @@ struct Voice {
     level: f64,
     releasing: bool,
 }
+mod controllers;
 struct RuntimeNode {
+    controllers: Option<Box<controllers::Controllers>>,
     midi_pending: Box<midi_events::Buffer>,
     midi_frame: Box<midi_events::Buffer>,
+    midi_received: u64,
+    midi_last: pr0_core::midi::Message,
     clock_ratio: clock_ratio::ClockRatio,
     channel_map: channels::ChannelMap,
     adsr: envelope::Adsr,
@@ -384,6 +388,14 @@ impl RuntimeNode {
         if self.kind != "receive_control" {
             self.control_event_only = false;
         }
+        if matches!(self.kind.as_str(), "midi_input" | "local_midi_input") {
+            self.midi_received = self
+                .midi_received
+                .saturating_add(self.midi_frame.len as u64);
+            if self.midi_frame.len > 0 {
+                self.midi_last = self.midi_frame.events[self.midi_frame.len - 1];
+            }
+        }
         match self.kind.as_str() {
             "subgraph_input_audio" | "subgraph_output_audio" => self.output = input,
             "subgraph_input_control" | "subgraph_output_control" => {
@@ -442,6 +454,31 @@ impl RuntimeNode {
             "atodb" => scalar = 20. * a.abs().max(1e-9).log10(),
             "clamp" => scalar = a.max(self.p("min")).min(self.p("max")),
             "scale" => scalar = self.p("min") + a * (self.p("max") - self.p("min")),
+            "knobs" | "sliders" => {
+                let controls = self.controllers.as_mut().unwrap();
+                for index in 0..self.midi_frame.len {
+                    controls.receive(self.midi_frame.events[index]);
+                }
+                for index in 0..controls.count {
+                    if let Some(message) = controls.pending[index].take() {
+                        self.midi_frame.push(message);
+                    }
+                    if self.kind == "sliders"
+                        && self.bindings.iter().any(|b| {
+                            !b.parameter
+                                && b.destination == index
+                                && b.signal == pr0_core::Signal::Control
+                        })
+                    {
+                        let value = controls.value(self.input[index][0]);
+                        if value != controls.values[index] {
+                            self.midi_frame.push(controls.set(index, value));
+                        }
+                    }
+                    self.control[index] = controls.values[index];
+                }
+                scalar = self.control[0];
+            }
             "piano" => {
                 let values = std::array::from_fn(|i| self.input[i][0]);
                 let connected = std::array::from_fn(|i| {
@@ -568,7 +605,7 @@ impl RuntimeNode {
                         }
                     }
                     let settings = granular::Settings {
-                        root: self.p("root_note"),
+                        root: self.p("root_note") - self.midi_controls.as_ref().unwrap().bend,
                         position: self.p("position"),
                         spray_ms: self.p("spray"),
                         grain_ms: self.p("grain_ms"),
@@ -592,7 +629,7 @@ impl RuntimeNode {
                         }
                     }
                     let (root, amplitude, looping, release) = (
-                        self.p("root_note"),
+                        self.p("root_note") - self.midi_controls.as_ref().unwrap().bend,
                         self.p("amplitude"),
                         self.p("loop") > 0.,
                         self.p("release"),
@@ -876,7 +913,7 @@ impl RuntimeNode {
                         v.level = 0.;
                         continue;
                     }
-                    let ratio = v.pitch_ratio;
+                    let ratio = v.pitch_ratio * self.midi_controls.as_ref().unwrap().bend_ratio;
                     let mod_step = (modulator * ratio / sr).min(0.49);
                     v.mod_phase = (v.mod_phase + mod_step).fract();
                     self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -933,7 +970,11 @@ impl RuntimeNode {
                     } else {
                         0.
                     };
-                    let level = if level.is_finite() && level > 1e-6 { level } else { 0. };
+                    let level = if level.is_finite() && level > 1e-6 {
+                        level
+                    } else {
+                        0.
+                    };
                     self.control[ch + 1] = level;
                     scalar = scalar.max(level);
                 }
@@ -1397,7 +1438,34 @@ impl Engine {
                 note_inputs: note_inputs::NoteInputs::default(),
                 midi_lanes: Vec::new(),
                 midi_pending: Box::new(midi_events::Buffer::new()),
+                controllers: matches!(n.kind.as_str(), "knobs" | "sliders").then(|| {
+                    let p = |key: &str, default| n.parameters.get(key).copied().unwrap_or(default);
+                    let min = p("min", 0.);
+                    let mut controls = Box::new(controllers::Controllers {
+                        pending: [None; 8],
+                        values: [min; 8],
+                        channels: std::array::from_fn(|i| {
+                            // Channel 0 is unassigned; 255 cannot match a MIDI channel.
+                            (p(&format!("channel_{}", i + 1), 1.) as u8).wrapping_sub(1)
+                        }),
+                        numbers: std::array::from_fn(|i| {
+                            p(&format!("controller_{}", i + 1), (i + 1) as f64) as u8
+                        }),
+                        count: p("count", 4.) as usize,
+                        learning: None,
+                        learned: None,
+                        serial: 0,
+                        min,
+                        max: p("max", 1.),
+                        step: p("step", 0.),
+                        decimals: (n.kind == "sliders").then_some(p("decimals", 2.) as i32),
+                    });
+                    controls.values = [controls.value(min); 8];
+                    controls
+                }),
                 midi_frame: Box::new(midi_events::Buffer::new()),
+                midi_received: 0,
+                midi_last: pr0_core::midi::Message::default(),
                 outgoing_notes: [None; 2],
                 outgoing_control: None,
                 last_control: None,
@@ -1926,6 +1994,13 @@ impl Engine {
             if !compatible {
                 let target = &mut self.nodes[index];
                 let source = &mut previous.nodes[source_index];
+                if target.kind == source.kind {
+                    if let (Some(a), Some(b)) = (&mut target.controllers, &source.controllers) {
+                        for i in 0..a.count.min(b.count) {
+                            a.values[i] = a.value(b.values[i]);
+                        }
+                    }
+                }
                 if let (Some(a), Some(b)) = (&target.looper, &source.looper) {
                     if a.compatible(b) {
                         std::mem::swap(&mut target.looper, &mut source.looper);
@@ -2051,6 +2126,39 @@ impl Engine {
             if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
                 node.midi_pending.push(message);
             }
+        }
+    }
+    pub fn cancel_controller_learn(&mut self, id: &str, index: usize) {
+        if let Some(controls) = self
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .and_then(|n| n.controllers.as_mut())
+        {
+            if controls.learning == Some(index) {
+                controls.learning = None;
+            }
+        }
+    }
+    pub fn controller(&mut self, id: &str, index: usize, value: Option<f64>) {
+        let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
+            return;
+        };
+        let Some(controls) = &mut node.controllers else {
+            return;
+        };
+        if index >= controls.count {
+            return;
+        }
+        if let Some(value) = value {
+            if !value.is_finite() || controls.channels[index] > 15 {
+                return;
+            }
+            controls.learning = None;
+            let message = controls.set(index, value);
+            controls.pending[index] = Some(message);
+        } else {
+            controls.learning = Some(index);
         }
     }
     /// Used only during prepared graph installation, never in render.
@@ -2881,6 +2989,16 @@ impl Engine {
                         }
                     }
                 }
+                if matches!(n.kind.as_str(), "midi_input" | "local_midi_input") {
+                    for (key, value) in [
+                        ("_midi_received", n.midi_received as f64),
+                        ("_midi_status", n.midi_last.status as f64),
+                        ("_midi_data1", n.midi_last.data1 as f64),
+                        ("_midi_data2", n.midi_last.data2 as f64),
+                    ] {
+                        values.insert(key.into(), value);
+                    }
+                }
                 if n.kind == "piano" {
                     let start = ((n.p("octave") + 1.) * 12.) as usize;
                     for pitch in start..(start + 12 * n.p("octaves") as usize).min(128) {
@@ -2906,6 +3024,21 @@ impl Engine {
                                 0.
                             },
                         );
+                    }
+                }
+                if let Some(controls) = &n.controllers {
+                    for i in 0..controls.count {
+                        values.insert(format!("_control_{}", i + 1), controls.values[i]);
+                    }
+                    values.insert(
+                        "_learning".into(),
+                        controls.learning.map_or(0., |i| (i + 1) as f64),
+                    );
+                    values.insert("_learn_serial".into(), controls.serial as f64);
+                    if let Some((index, channel, number)) = controls.learned {
+                        values.insert("_learn_index".into(), (index + 1) as f64);
+                        values.insert("_learn_channel".into(), (channel + 1) as f64);
+                        values.insert("_learn_controller".into(), number as f64);
                     }
                 }
                 values.insert(
@@ -3765,15 +3898,14 @@ mod tests {
             n.parameters = parameters;
             n
         };
-        let edge = |source: &str, source_port: &str, target: &str, target_port: &str| {
-            pr0_core::Edge {
+        let edge =
+            |source: &str, source_port: &str, target: &str, target_port: &str| pr0_core::Edge {
                 id: format!("{source}-{source_port}-{target}-{target_port}"),
                 source: source.into(),
                 source_port: source_port.into(),
                 target: target.into(),
                 target_port: target_port.into(),
-            }
-        };
+            };
         let graph = Graph {
             nodes: vec![
                 node("keys", "piano", BTreeMap::new()),
@@ -3818,15 +3950,14 @@ mod tests {
             n.parameters = parameters;
             n
         };
-        let edge = |source: &str, source_port: &str, target: &str, target_port: &str| {
-            pr0_core::Edge {
+        let edge =
+            |source: &str, source_port: &str, target: &str, target_port: &str| pr0_core::Edge {
                 id: format!("{source}-{source_port}-{target}-{target_port}"),
                 source: source.into(),
                 source_port: source_port.into(),
                 target: target.into(),
                 target_port: target_port.into(),
-            }
-        };
+            };
         let graph = Graph {
             nodes: vec![
                 node("src", "input", 2, BTreeMap::new()),
@@ -3858,7 +3989,11 @@ mod tests {
         // Silence: levels fall exponentially (about 63% per fall time).
         engine.render(&[[0.; MAX_CHANNELS]; 1000], &mut [[0.; 8]; 1000]);
         let t = engine.telemetry();
-        assert!(t["vu"]["_level1"] > 0.17 && t["vu"]["_level1"] < 0.2, "{}", t["vu"]["_level1"]);
+        assert!(
+            t["vu"]["_level1"] > 0.17 && t["vu"]["_level1"] < 0.2,
+            "{}",
+            t["vu"]["_level1"]
+        );
         assert!(t["vu"]["_level2"] > 0.08 && t["vu"]["_level2"] < 0.1);
         assert!(t["left"]["value"] > 0.17 && t["left"]["value"] < 0.2);
     }
@@ -5192,6 +5327,95 @@ mod feedback_and_pad_tests {
         assert_eq!(e.telemetry()["sum"]["_out"], 10.);
     }
     #[test]
+    fn controllers_forward_learn_and_preserve_precise_gui_values() {
+        let mut slider = node("slider", "sliders", 300.);
+        slider.parameters.extend([
+            ("min".into(), -2.),
+            ("max".into(), 2.),
+            ("step".into(), 0.25),
+            ("decimals".into(), 2.),
+        ]);
+        let graph = Graph {
+            nodes: vec![node("knobs", "knobs", 0.), slider],
+            edges: vec![edge("knobs", "midi", "slider", "midi")],
+        };
+        let mut engine = Engine::prepare(graph.clone(), 48000.).unwrap();
+        engine.controller("knobs", 0, Some(0.123456));
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(engine.telemetry()["knobs"]["_control_1"], 0.123456);
+        assert_eq!(engine.telemetry()["slider"]["_control_1"], -1.5);
+        engine.controller("slider", 1, None);
+        engine.node_midi_message(
+            "knobs",
+            pr0_core::midi::Message {
+                status: 0xb5,
+                data1: 74,
+                data2: 127,
+            },
+        );
+        engine.render(&[], &mut [[0.; 8]]);
+        let values = engine.telemetry();
+        assert_eq!(values["slider"]["_learn_channel"], 6.);
+        assert_eq!(values["slider"]["_learn_controller"], 74.);
+        assert_eq!(values["slider"]["_control_2"], 2.);
+        let mut next = Engine::prepare(graph, 48000.).unwrap();
+        next.carry_node_state(&mut engine);
+        assert_eq!(next.telemetry()["knobs"]["_control_1"], 0.123456);
+    }
+    #[test]
+    fn unassigned_knob_ignores_values_and_cc_until_learned() {
+        let mut knob = node("knobs", "knobs", 0.);
+        knob.parameters.insert("channel_1".into(), 0.);
+        let mut engine = Engine::prepare(
+            Graph {
+                nodes: vec![knob],
+                edges: vec![],
+            },
+            48000.,
+        )
+        .unwrap();
+        engine.controller("knobs", 0, Some(0.75));
+        let cc = pr0_core::midi::Message {
+            status: 0xb0,
+            data1: 1,
+            data2: 127,
+        };
+        engine.node_midi_message("knobs", cc);
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(engine.telemetry()["knobs"]["_control_1"], 0.);
+        assert!(engine.nodes[0].controllers.as_ref().unwrap().pending[0].is_none());
+        engine.controller("knobs", 0, None);
+        engine.node_midi_message("knobs", cc);
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(engine.telemetry()["knobs"]["_control_1"], 1.);
+        engine.controller("knobs", 0, Some(0.25));
+        engine.render(&[], &mut [[0.; 8]]);
+        assert_eq!(engine.telemetry()["knobs"]["_control_1"], 0.25);
+    }
+    #[test]
+    fn controller_count_is_validated_and_slider_control_input_is_rounded() {
+        let mut slider = node("slider", "sliders", 300.);
+        slider.parameters.extend([
+            ("count".into(), 1.),
+            ("decimals".into(), 0.),
+            ("max".into(), 10.),
+        ]);
+        let mut value = node("value", "value", 0.);
+        value.parameters.insert("value".into(), 2.7);
+        let mut graph = Graph {
+            nodes: vec![value, slider],
+            edges: vec![edge("value", "out", "slider", "slider_1")],
+        };
+        let mut e = Engine::prepare(graph.clone(), 48000.).unwrap();
+        e.render(&[], &mut [[0.; 8]]);
+        assert_eq!(e.telemetry()["slider"]["_control_1"], 3.);
+        graph.edges[0].target_port = "slider_2".into();
+        assert!(graph.validate().is_err());
+        graph.edges.clear();
+        graph.nodes[1].parameters.insert("count".into(), 1.5);
+        assert!(graph.validate().is_err());
+    }
+    #[test]
     fn audio_delay_feedback_loop_renders_finite_echoes() {
         let mut tone = node("tone", "oscillator", -300.);
         tone.parameters
@@ -5886,5 +6110,48 @@ mod unified_midi_tests {
             .copied()
             .unwrap();
         assert!((voice.level - 42. / 127.).abs() < 1e-9);
+    }
+    #[test]
+    fn piano_bend_reaches_midi_and_changes_voice_phase_without_retriggering() {
+        for kind in ["synth", "fm_synth"] {
+            let mut instrument = node("tone", kind);
+            if kind == "fm_synth" {
+                instrument.parameters.insert("fm_depth".into(), 0.);
+            }
+            let g = Graph {
+                nodes: vec![
+                    node("keys", "piano"),
+                    instrument,
+                    node("sink", "midi_output"),
+                ],
+                edges: vec![midi("keys", "tone"), midi("keys", "sink")],
+            };
+            let mut e = Engine::prepare(g, 48000.).unwrap();
+            e.piano_note("keys", 69, 100);
+            tick(&mut e);
+            for (value, semitones) in [(16383u16, 2.), (0, -2.), (8192, 0.)] {
+                let tone = e.nodes.iter().find(|n| n.id == "tone").unwrap();
+                let voice = *tone.voices.iter().find(|v| v.level > 0.).unwrap();
+                let carrier = if kind == "synth" {
+                    440.
+                } else {
+                    tone.p("carrier_frequency")
+                };
+                let message = m(0xe0, (value & 127) as u8, (value >> 7) as u8);
+                e.node_midi_message("keys", message);
+                e.render(&[], &mut [[0.; 8]; 1]);
+                assert_eq!(e.take_midi_message("sink"), Some(message));
+                let tone = e.nodes.iter().find(|n| n.id == "tone").unwrap();
+                let next = tone.voices.iter().find(|v| v.level > 0.).unwrap();
+                assert_eq!(next.order, voice.order);
+                let expected =
+                    (voice.phase + carrier * 2_f64.powf(semitones / 12.) / 48000.).fract();
+                assert!((next.phase - expected).abs() < 1e-10);
+                assert_eq!(e.telemetry()["keys"]["pitch"], 69.);
+            }
+            e.piano_note("keys", 69, 0);
+            tick(&mut e);
+            assert!(releasing(&e, "tone", 69));
+        }
     }
 }

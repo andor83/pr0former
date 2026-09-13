@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import App from './App.vue'
+import HelpNote from './components/HelpNote.vue'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
@@ -10,5 +11,5 @@ import '@fontsource/space-grotesk/400.css'
 import '@fontsource/space-grotesk/500.css'
 import '@fontsource/space-grotesk/600.css'
 import './style.css'
-createApp(App).mount('#app')
+createApp(App).component('HelpNote', HelpNote).mount('#app')
 

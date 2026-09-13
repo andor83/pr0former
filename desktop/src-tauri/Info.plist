@@ -2,6 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>NSMicrophoneUsageDescription</key><string>pr0former uses audio input for live performance and graph development.</string>
-<key>NSLocalNetworkUsageDescription</key><string>pr0former connects to audio and OSC devices on your local network.</string>
+<key>NSLocalNetworkUsageDescription</key><string>pr0former discovers performance servers and connects to audio and OSC devices on your local network.</string>
+<key>NSBonjourServices</key><array><string>_pr0former._tcp</string></array>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>

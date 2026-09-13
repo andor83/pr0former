@@ -14,7 +14,8 @@ test('granular sample MIDI feeds live convolution and pitch shifting with modal 
   const load=async()=>(await(await page.request.get(`/api/projects/${p.id}`)).json()).project
   let latest:any;page.on('websocket',s=>s.on('framereceived',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='telemetry')latest=m}))
   await page.goto('/');await page.getByRole('button',{name:'Edit Grains',exact:true}).click()
-  await page.getByLabel('Project sample',{exact:true}).selectOption(String(sample.asset))
+  await page.getByLabel('Project sample',{exact:true}).fill('Grain.wav')
+  await page.getByLabel('Project sample',{exact:true}).press('Tab')
   await expect.poll(async()=>(await load()).graph.nodes.find((n:any)=>n.id==='Grains').parameters.root_note).toBe(69)
   await expect(page.locator('#param-root_note')).toHaveValue('69')
   await expect(page.locator('#param-density')).toBeVisible();await expect(page.locator('#param-grain_ms')).toBeVisible()

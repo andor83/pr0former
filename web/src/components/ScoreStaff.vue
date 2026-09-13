@@ -440,7 +440,9 @@ function render() {
           if (n.beat > cursor) gap(cursor, n.beat)
           cursor = Math.max(cursor, n.beat + n.duration)
         }
-        if (cursor < m.end) gap(cursor, m.end)
+        // While editing, a bar's unfilled tail stays blank; the performance view
+        // completes every bar with rests.
+        if (cursor < m.end && props.interactive === false) gap(cursor, m.end)
       }
     const fragments = displayNotes
       .flatMap((n) => {
@@ -620,7 +622,26 @@ function render() {
             )
         }
       })
-      beams.push(...Beam.generateBeams(notes))
+      // Beams only join notes that follow each other directly; a hidden rest or
+      // other unfilled gap ends the group so the written values read correctly.
+      const glyphBeats: Record<string, number> = {
+        '1/2': 8, w: 4, h: 2, q: 1, '8': 0.5, '16': 0.25, '32': 0.125, '64': 0.0625,
+      }
+      let run: StaveNote[] = [],
+        runEnd = -1
+      items.forEach((item, i) => {
+        const beats = item.center
+          ? item.center.end - item.center.start
+          : ((glyphBeats[item.glyph] ?? 1) * (2 - 2 ** -item.dots) * item.v.tuplet_normal) /
+            item.v.tuplet_actual
+        if (run.length && Math.abs(item.beat - runEnd) > 1e-6) {
+          beams.push(...Beam.generateBeams(run))
+          run = []
+        }
+        run.push(notes[i]!)
+        runEnd = item.beat + beats
+      })
+      if (run.length) beams.push(...Beam.generateBeams(run))
       voice.draw(ctx, stave)
       notes.forEach((note, i) => {
         const item = items[i]!

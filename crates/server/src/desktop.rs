@@ -36,6 +36,7 @@ pub async fn serve(router: Router, app: App, token: String) {
         .expect("Bind desktop server");
     let address = listener.local_addr().unwrap();
     let expected_host = address.to_string();
+    let shared_router = router.clone();
     let router = router.layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {
             let valid = req
@@ -52,22 +53,57 @@ pub async fn serve(router: Router, app: App, token: String) {
             }
         },
     ));
-    let (stop_tx, stop_rx) = oneshot::channel();
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
     // A standard thread avoids Tokio stdin's uncancellable blocking read at runtime exit.
     std::thread::spawn(move || {
-        let mut line = String::new();
-        let _ = std::io::stdin().lock().read_line(&mut line);
-        let _ = stop_tx.send(()); // command OR EOF (including parent crash)
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value["hosting"].is_boolean() {
+                    if control_tx.send(Some(value)).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            }
+            break; // Preserve the legacy stop-on-command behavior for other input.
+        }
+        let _ = control_tx.send(None); // EOF (including parent crash) stops both listeners.
     });
     println!(
         "PR0_DESKTOP_READY {}",
         json!({"url":format!("http://{address}"),"session":token})
     );
     std::io::stdout().flush().expect("Notify desktop launcher");
-    tokio::select! {
-        result = axum::serve(listener, router).into_future() => { result.expect("Serve desktop"); }
-        _ = stop_rx => {}
+    let serving = axum::serve(listener, router).into_future();
+    tokio::pin!(serving);
+    let mut hosting: Option<crate::hosting::Hosting> = None;
+    loop {
+        tokio::select! {
+            result = &mut serving => { result.expect("Serve desktop"); break; }
+            control = control_rx.recv() => {
+                let Some(Some(value)) = control else { break; };
+                let status = if value["hosting"].as_bool() == Some(false) {
+                    hosting = None;
+                    json!({"enabled":false})
+                } else if let Some(host) = &hosting {
+                    host.status.clone()
+                } else {
+                    let port = value["port"].as_u64().unwrap_or(8443);
+                    if port > u16::MAX as u64 { json!({"enabled":false,"error":"Invalid hosting port"}) }
+                    else { match crate::hosting::start(shared_router.clone(), token.clone(), port as u16).await {
+                        Ok(host) => { let status=host.status.clone(); hosting=Some(host); status }
+                        Err(error) => json!({"enabled":false,"error":error}),
+                    } }
+                };
+                println!("PR0_DESKTOP_HOSTING {status}");
+                let _ = std::io::stdout().flush();
+            }
+        }
     }
+    drop(hosting);
     let (tx, rx) = oneshot::channel();
     let engine = app.engine.clone();
     tokio::task::spawn_blocking(move || engine.send(audio::Command::Shutdown(tx)))

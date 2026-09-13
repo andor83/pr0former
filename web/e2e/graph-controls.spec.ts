@@ -21,7 +21,7 @@ test('graphical controls, group context menu, duplication and live subgraph conv
   await expect.poll(async()=>(await load()).graph.nodes.length).toBe(7)
   await page.getByRole('button',{name:'Undo',exact:true}).click();await expect.poll(async()=>(await load()).graph.nodes.length).toBe(5)
   await select();await page.locator('.vue-flow__node[data-id="A"] .patch-node').click({button:'right',position:{x:30,y:45}})
-  await expect(page.getByRole('menuitem')).toHaveCount(3)
+  await expect(page.getByRole('menuitem')).toHaveCount(4)
   await expect(page.getByRole('menuitem',{name:'Make subgraph',exact:true})).toBeVisible()
   await page.getByRole('menuitem',{name:'Make subgraph',exact:true}).click()
   await expect.poll(async()=>(await load()).graph.nodes.find((n:any)=>n.id==='A').parent).toBeTruthy()

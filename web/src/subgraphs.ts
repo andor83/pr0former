@@ -4,6 +4,10 @@ export function nodeDescriptor(node: GraphNode, nodes: GraphNode[], catalog: Des
   const base = catalog.find(d => d.kind === node.kind)!
   if(node.kind==='pitch_tracker')return {...base,outputs:base.outputs.slice(0,node.parameters.slots??1)}
   if(node.kind==='meter')return {...base,outputs:base.outputs.slice(0,1+Math.max(1,Math.min(8,node.channels)))}
+  if(node.kind==='knobs'||node.kind==='sliders'){
+    const count=Math.max(1,Math.min(8,node.parameters.count??4)), enabled=(p:{id:string})=>p.id==='midi'||Number(p.id.split('_').at(-1))<=count
+    return {...base,inputs:base.inputs.filter(enabled),outputs:base.outputs.filter(enabled)}
+  }
   if (node.kind === 'subgraph') {
     const ports = (direction: string) => nodes.filter(n => n.parent === node.id && n.kind.startsWith(`subgraph_${direction}_`)).map(n => ({ id: n.id, label: n.label, signal: n.kind.split('_').at(-1) as Signal, fixed_channels: n.channels }))
     return {...base, inputs: ports('input'), outputs: ports('output')}

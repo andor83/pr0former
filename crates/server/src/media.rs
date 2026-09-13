@@ -256,7 +256,7 @@ pub async fn offer(
             .iter()
             .any(|n| n.id == *node && n.kind == "browser_input")
         {
-            return Err(bad("Select a browser input node"));
+            return Err(bad("Select a local audio input node"));
         }
         if membership != "owner"
             && !project.parts.iter().any(|p| {
@@ -265,7 +265,7 @@ pub async fn offer(
         {
             return Err(Failure(
                 StatusCode::FORBIDDEN,
-                "This browser input is not assigned to you".into(),
+                "This local audio input is not assigned to you".into(),
             ));
         }
     }

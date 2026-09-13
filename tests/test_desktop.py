@@ -4,6 +4,9 @@ import os
 from pathlib import Path
 import queue
 import sqlite3
+import ssl
+import plistlib
+import hashlib
 import subprocess
 import tempfile
 import threading
@@ -31,9 +34,11 @@ class DesktopTests(unittest.TestCase):
             proc.stdout.close()
         self.addCleanup(cleanup)
         ready = queue.Queue()
+        self.hosting = queue.Queue()
         def read():
             for line in proc.stdout:
                 if line.startswith('PR0_DESKTOP_READY '): ready.put(json.loads(line.split(' ', 1)[1]))
+                if line.startswith('PR0_DESKTOP_HOSTING '): self.hosting.put(json.loads(line.split(' ', 1)[1]))
         threading.Thread(target=read, daemon=True).start()
         return proc, ready.get(timeout=30)
 
@@ -48,6 +53,56 @@ class DesktopTests(unittest.TestCase):
                 return response.status, json.loads(body) if response.headers.get_content_type() == 'application/json' else body
         except urllib.error.HTTPError as error:
             with error: return error.code, error.read()
+
+    def test_opt_in_https_hosting_uses_invites_and_preserves_private_engine(self):
+        with tempfile.TemporaryDirectory(prefix='pr0-hosting-test-') as directory:
+            root = Path(directory)
+            proc, ready = self.start_server(root)
+            def host(enabled):
+                proc.stdin.write(json.dumps({'hosting': enabled, 'port': 0}) + '\n')
+                proc.stdin.flush()
+                return self.hosting.get(timeout=30)
+            status = host(True)
+            self.assertTrue(status['enabled'], status.get('error'))
+            context = ssl.create_default_context(cafile=status['ca_path'])
+            base = 'https://localhost:' + str(status['port'])
+            setup = 'http://localhost:' + status['setup_url'].rsplit(':',1)[1]
+            def fetch(url, data=None, cookie=None):
+                headers = {'X-Pr0former':'1','Content-Type':'application/json'}
+                if cookie: headers['Cookie'] = cookie
+                req = urllib.request.Request(url, headers=headers, data=None if data is None else json.dumps(data).encode())
+                try:
+                    with urllib.request.urlopen(req, context=context, timeout=10) as response:
+                        return response.status, response.read(), response.headers
+                except urllib.error.HTTPError as error:
+                    with error: return error.code, error.read(), error.headers
+            self.assertEqual(fetch(base + '/api/me')[0], 401)
+            self.assertEqual(fetch(base + '/api/me', cookie='pr0_session=' + ready['session'])[0], 403)
+            self.assertEqual(fetch(setup + '/api/me')[0], 404)
+            code, profile, _ = fetch(setup + '/pr0former.mobileconfig')
+            self.assertEqual(code, 200)
+            ca = plistlib.loads(profile)['PayloadContent'][0]['PayloadContent']
+            fingerprint = ':'.join(f'{byte:02X}' for byte in hashlib.sha256(ca).digest())
+            self.assertEqual(fingerprint, status['ca_fingerprint'])
+            self.assertEqual(fetch(setup + '/pr0former-ca.cer')[1], ca)
+            self.assertEqual(fetch(base + '/api/register', {'username':'ipad','password':'test-only-password'})[0], 403)
+            _, project = self.request(ready, '/api/projects', {'name':'LAN test','mode':'freeform'})
+            _, invite = self.request(ready, '/api/projects/' + project['id'] + '/invite', {'role':'performer'})
+            code, _, headers = fetch(base + '/api/register', {'username':'ipad','password':'test-only-password','invite':invite['token']})
+            self.assertEqual(code, 200)
+            cookie = headers.get('Set-Cookie')
+            self.assertIn('Secure', cookie)
+            cookie = cookie.split(';',1)[0]
+            self.assertEqual(fetch(base + '/api/me',cookie=cookie)[0], 200)
+            self.assertEqual(fetch(base + '/api/join', {'token':invite['token']},cookie)[0], 200)
+            self.assertEqual(fetch(base + '/api/projects/' + project['id'],cookie=cookie)[0], 200)
+            self.assertFalse(host(False)['enabled'])
+            with self.assertRaises(urllib.error.URLError): fetch(base + '/')
+            self.assertEqual(self.request(ready, '/api/me')[0], 200)
+            again = host(True)
+            self.assertEqual(again['ca_fingerprint'], status['ca_fingerprint'])
+            proc.stdin.close()
+            self.assertEqual(proc.wait(15), 0)
 
     def test_private_login_persistence_and_shutdown_finalizes_recording(self):
         with tempfile.TemporaryDirectory(prefix='pr0-desktop-test-') as directory:

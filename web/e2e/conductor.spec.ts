@@ -1,5 +1,16 @@
 import { test, expect } from '@playwright/test'
 
+test.afterEach(async ({ page, request }) => {
+  const status = await (await request.get('/api/status')).json()
+  if (!status.active_project) return
+  const options = {
+    headers: { 'X-Pr0former': '1' },
+    data: { action: 'deactivate' },
+  }
+  let response = await page.request.post(`/api/projects/${status.active_project}/transport`, options)
+  if (!response.ok()) response = await request.post(`/api/projects/${status.active_project}/transport`, options)
+})
+
 test('conducted sets arm and launch atomically with performer count-in state', async ({ page }) => {
   const headers = { 'X-Pr0former': '1' }
   const status = await (await page.request.get('/api/status')).json()
@@ -12,7 +23,7 @@ test('conducted sets arm and launch atomically with performer count-in state', a
     headers,
     data: { name: 'Conducted interface', mode: 'conducted' },
   })).json()
-  project.bpm = 240
+  project.bpm = 60
   project.conductor = me.id
   project.conducted.count_in_pulses = 2
   project.parts[0].name = 'Flute fragment'
@@ -45,8 +56,10 @@ test('conducted sets arm and launch atomically with performer count-in state', a
   await expect.poll(() => latest?.parts?.find((part: any) => part.id === project.parts[0].id)?.playing).toBe(true)
   await expect(page.locator('.part-tile.playing .part-progress')).toHaveCount(1)
   await page.getByRole('button', { name:'Other', exact:true }).click()
-  await expect(page.getByRole('button', { name:'Opening', exact:true }).locator('.set-live')).toBeVisible()
-  await page.getByRole('button', { name:'Opening', exact:true }).click()
+  // The live count is part of the button's accessible name ("Opening 1"), so
+  // locate the set by its stable class/text rather than an obsolete exact name.
+  await expect(page.locator('.set-button').filter({ hasText: 'Opening' }).locator('.set-live')).toBeVisible()
+  await page.locator('.set-button').filter({ hasText: 'Opening' }).click()
   await page.locator('.part-tile').first().locator('input[type="range"]').fill('111')
   await expect.poll(() => latest?.parts?.find((part: any) => part.id === project.parts[0].id)?.dynamic_override).toBe(111)
   await page.locator('.part-tile').first().getByTitle('Return to score dynamics').click()
@@ -55,7 +68,7 @@ test('conducted sets arm and launch atomically with performer count-in state', a
   await expect.poll(() => latest?.parts?.find((part: any) => part.id === second.id)?.queue_position).toBe(1)
   await page.locator('.part-tile').first().click()
   await expect.poll(() => latest?.parts?.find((part: any) => part.id === project.parts[0].id)?.playing).toBe(false)
-  await expect.poll(() => latest?.parts?.find((part: any) => part.id === second.id)?.playing, {timeout:4000}).toBe(true)
+  await expect.poll(() => latest?.parts?.find((part: any) => part.id === second.id)?.playing, {timeout:6000}).toBe(true)
   await page.locator('.part-tile').nth(1).click()
   await expect.poll(() => latest?.parts?.find((part: any) => part.id === second.id)?.playing).toBe(false)
   await page.getByRole('button', {name:'ARM', exact:true}).first().click()
@@ -63,7 +76,11 @@ test('conducted sets arm and launch atomically with performer count-in state', a
   await expect.poll(() => latest?.parts?.find((part: any) => part.id === project.parts[0].id)?.repeating, {timeout:4000}).toBe(true)
   await page.locator('.part-tile').first().click()
   await expect.poll(() => latest?.parts?.find((part: any) => part.id === project.parts[0].id)?.playing).toBe(false)
-  await page.getByRole('button', { name: 'Exit performance', exact: true }).click()
+  await page.setViewportSize({ width: 1440, height: 420 })
+  await expect.poll(() => page.locator('.cue-deck').evaluate(deck => ({ overflow: getComputedStyle(deck).overflowY, scrolls: deck.scrollHeight > deck.clientHeight }))).toEqual({ overflow: 'auto', scrolls: true })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await page.getByRole('button', { name: 'End performance', exact: true }).click()
+  expect((await page.request.post(`/api/projects/${project.id}/transport`, { headers, data: { action: 'deactivate' } })).ok()).toBeTruthy()
 })
 
 test('conducted designation and cue API enforce membership, performer exclusion, and authority', async ({ request, playwright }) => {

@@ -4,49 +4,67 @@ export interface Point { x: number; y: number }
 export type Handle = 'attack' | 'decay' | 'release'
 
 export const TIME_LIMIT = 10000
-/** Time axis steps: 250 ms doubling up to 64 s, so the plot only rescales when the envelope outgrows it. */
-const SCALES = Array.from({ length: 9 }, (_, i) => 250 * 2 ** i)
-/** The timed stages never take more than this share of the axis; the rest is the sustain plateau. */
-const FILL = 0.8
+/** Knee of the logarithmic time axis in ms: durations near it and below stay roughly linear. */
+const T0 = 1
+/** Smallest plateau share of the graph; drags are clamped so it never shrinks below this. */
+export const MIN_HOLD = 0.08
+/** Plateau share the automatic zoom leaves free. */
+const AUTO_HOLD = 0.2
 
-export function timedStages(e: Envelope) { return e.attack + e.decay + e.release }
-/** Milliseconds spanned by the whole graph: the smallest step that leaves room for a plateau. */
-export function timeScale(e: Envelope) {
-  const needed = timedStages(e) / FILL
-  return SCALES.find(scale => scale >= needed) ?? SCALES[SCALES.length - 1]!
-}
-/** Width of the drawn sustain plateau at a given time scale. */
-export function holdTime(e: Envelope, total = timeScale(e)) { return Math.max(0, total - timedStages(e)) }
+/**
+ * Each timed stage is drawn with a width proportional to the log of its
+ * duration, so short attacks and long releases are both visible. The whole
+ * envelope always fits: the sustain plateau absorbs whatever width the timed
+ * stages leave over. `scale` is the log width that spans the graph, the
+ * zoom the user controls.
+ */
+export function logWidth(ms: number) { return Math.log2(1 + Math.max(0, ms) / T0) }
+export function logTime(width: number) { return T0 * (2 ** Math.max(0, width) - 1) }
+export function timedWidth(e: Envelope) { return logWidth(e.attack) + logWidth(e.decay) + logWidth(e.release) }
 
-/** Envelope polyline in unit space: x over `total` ms (0–1), y as level (0–1, 1 at the top). The release always ends at x = 1. */
-export function envelopePoints(e: Envelope, total = timeScale(e)): Point[] {
-  const hold = holdTime(e, total), x = (ms: number) => Math.min(1, ms / Math.max(1e-9, total))
+/** Log width of a graph that shows the full parameter range three times over: the zoom slider's upper end. */
+export const MAX_SCALE = Math.ceil(3 * logWidth(TIME_LIMIT) / (1 - MIN_HOLD))
+/** Log width of a graph for very short envelopes (about a quarter second per stage). */
+const MIN_SCALE = 3 * logWidth(60) / (1 - AUTO_HOLD)
+/** Smallest zoom at which this envelope still leaves the minimum plateau. */
+export function minScale(e: Envelope) { return Math.max(MIN_SCALE, timedWidth(e) / (1 - MIN_HOLD)) }
+/** Automatic zoom: the timed stages take four fifths of the graph. */
+export function autoScale(e: Envelope) { return Math.max(MIN_SCALE, timedWidth(e) / (1 - AUTO_HOLD)) }
+/** The zoom actually used: never tighter than the envelope needs. */
+export function fitScale(e: Envelope, scale: number) { return Math.max(scale, minScale(e)) }
+
+/** Envelope polyline in unit space: x over the graph (0–1), y as level (0–1, 1 at the top). The release always ends at x = 1. */
+export function envelopePoints(e: Envelope, scale = autoScale(e)): Point[] {
+  const s = fitScale(e, scale), x = (w: number) => w / s
+  const a = logWidth(e.attack), d = logWidth(e.decay), r = logWidth(e.release)
   return [
     { x: 0, y: 0 },
-    { x: x(e.attack), y: 1 },
-    { x: x(e.attack + e.decay), y: e.sustain },
-    { x: x(e.attack + e.decay + hold), y: e.sustain },
+    { x: x(a), y: 1 },
+    { x: x(a + d), y: e.sustain },
+    { x: 1 - x(r), y: e.sustain },
     { x: 1, y: 0 },
   ]
 }
 
 /**
  * Parameters implied by dragging a handle to a unit-space position, where
- * `unit.y` is 0 at the top of the graph. The time scale is frozen by the
- * caller for the duration of a drag so the graph does not rescale under the
- * pointer. The release handle measures back from the right edge, so dragging
- * it left lengthens the release.
+ * `unit.y` is 0 at the top of the graph. The zoom is frozen by the caller for
+ * the duration of a drag, and drags are clamped so the plateau keeps its
+ * minimum width: the graph never rescales because of a drag. The release
+ * handle measures back from the right edge, so dragging it left lengthens
+ * the release.
  */
-export function dragHandle(e: Envelope, handle: Handle, unit: Point, total: number): Partial<Envelope> {
-  const ms = Math.min(1, Math.max(0, unit.x)) * total
+export function dragHandle(e: Envelope, handle: Handle, unit: Point, scale: number): Partial<Envelope> {
+  const w = Math.min(1, Math.max(0, unit.x)) * scale
   const level = Math.round(Math.min(1, Math.max(0, 1 - unit.y)) * 100) / 100
-  const time = (value: number) => Math.round(Math.min(TIME_LIMIT, Math.max(0, value)))
+  const time = (width: number) => Math.round(Math.min(TIME_LIMIT, Math.max(0, logTime(width))))
+  const a = logWidth(e.attack), d = logWidth(e.decay), r = logWidth(e.release), room = scale * (1 - MIN_HOLD)
   switch (handle) {
-    case 'attack': return { attack: time(ms) }
-    case 'decay': return { decay: time(ms - e.attack), sustain: level }
-    case 'release': return { release: time(total - ms), sustain: level }
+    case 'attack': return { attack: time(Math.min(w, room - d - r)) }
+    case 'decay': return { decay: time(Math.min(w - a, room - a - r)), sustain: level }
+    case 'release': return { release: time(Math.min(scale - w, room - a - d)), sustain: level }
   }
 }
 
-/** Short label for the time axis span, e.g. "500 ms" or "2 s". */
-export function scaleLabel(total: number) { return total >= 1000 ? `${total / 1000} s` : `${total} ms` }
+/** Short label for a duration, e.g. "120 ms" or "2.4 s". */
+export function timeLabel(ms: number) { return ms >= 1000 ? `${(ms / 1000).toPrecision(ms >= 10000 ? 3 : 2)} s` : `${Math.round(ms)} ms` }

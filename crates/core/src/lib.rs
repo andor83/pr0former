@@ -740,7 +740,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "Piano",
         "♬",
         "Control",
-        "Playable MIDI keyboard with a selectable 1–8 octave span. Receives and forwards pitch, velocity, gate, trigger and note_off, including notes outside the displayed octave. Held received notes light matching keys. Enable the audio engine to test outputs without playing the show; keys send velocity 100. Choose the starting octave and octave span in the modal. Display stops at MIDI 127.",
+        "Playable MIDI keyboard with a selectable 1–8 octave span. Receives and forwards pitch, velocity, gate, trigger and note_off, including notes outside the displayed octave. Held received notes light matching keys. Enable the audio engine to test outputs without playing the show; keys send velocity 100. Drag vertically to send pitch bend (centered on release), or horizontally across keys for glissando. Use the MIDI cable for bending internal instruments (±2 semitones); external instruments set their own bend range. Choose the starting octave and octave span in the modal. Display stops at MIDI 127.",
         ["pitch", "velocity", "gate", "trigger", "note_off"]
             .into_iter()
             .map(|id| port(id, Control))
@@ -808,6 +808,126 @@ pub fn catalog() -> Vec<Descriptor> {
         pad_parameters,
         &["drums", "pads", "percussion", "midi test"],
     );
+    let controller_parameters = |sliders: bool| {
+        let mut parameters = vec![Parameter {
+            structural: true,
+            ..param(
+                "count",
+                if sliders { "Sliders" } else { "Knobs" },
+                "",
+                1.,
+                8.,
+                4.,
+            )
+        }];
+        if sliders {
+            parameters.extend([
+                Parameter {
+                    structural: true,
+                    ..param(
+                        "orientation",
+                        "Orientation (0 vertical, 1 horizontal)",
+                        "",
+                        0.,
+                        1.,
+                        0.,
+                    )
+                },
+                Parameter {
+                    structural: true,
+                    ..param("min", "Minimum", "", -100000., 100000., 0.)
+                },
+                Parameter {
+                    structural: true,
+                    ..param("max", "Maximum", "", -100000., 100000., 1.)
+                },
+                Parameter {
+                    structural: true,
+                    ..param("step", "Step (0 unlocked)", "", 0., 100000., 0.)
+                },
+                Parameter {
+                    structural: true,
+                    ..param("decimals", "Decimal places", "", 0., 8., 2.)
+                },
+            ]);
+        }
+        for index in 1..=8 {
+            parameters.push(Parameter {
+                structural: true,
+                ..param(
+                    &format!("channel_{index}"),
+                    &format!("{index} · MIDI channel"),
+                    "",
+                    if sliders { 1. } else { 0. },
+                    16.,
+                    1.,
+                )
+            });
+            parameters.push(Parameter {
+                structural: true,
+                ..param(
+                    &format!("controller_{index}"),
+                    &format!("{index} · MIDI controller"),
+                    "CC",
+                    0.,
+                    127.,
+                    index as f64,
+                )
+            });
+        }
+        parameters
+    };
+    add(
+        "knobs",
+        "Knobs",
+        "◔",
+        "Control",
+        "One to eight assignable MIDI CC knobs. Incoming MIDI passes through and matching CC messages update individual normalized control outputs. Channel 0 means unassigned. Double-click a knob to clear its binding. Drag vertically to change an assigned knob and send its CC; click without dragging, then turn a hardware control to learn its MIDI channel and controller.",
+        vec![],
+        (1..=8)
+            .map(|i| {
+                let mut p = port(&format!("knob_{i}"), Control);
+                p.label = format!("Knob {i}");
+                p
+            })
+            .collect(),
+        controller_parameters(false),
+        &["midi controller", "rotary", "cc"],
+    );
+    add(
+        "sliders",
+        "Sliders",
+        "▥",
+        "Control",
+        "One to eight assignable MIDI CC sliders with matching control inputs and outputs. Choose horizontal or vertical display, range, step and decimal rounding in the modal. Incoming MIDI passes through; drag a slider to send its assigned CC, or click without dragging and turn a hardware control to learn it.",
+        (1..=8)
+            .map(|i| {
+                let mut p = port(&format!("slider_{i}"), Control);
+                p.label = format!("Slider {i}");
+                p
+            })
+            .collect(),
+        (1..=8)
+            .map(|i| {
+                let mut p = port(&format!("slider_{i}"), Control);
+                p.label = format!("Slider {i}");
+                p
+            })
+            .collect(),
+        controller_parameters(true),
+        &["midi controller", "fader", "cc"],
+    );
+    add(
+        "local_midi_input",
+        "Local MIDI Input",
+        "♪",
+        "External",
+        "Select a MIDI device connected to this browser or app session in the modal. Enable the engine and connect to forward MIDI channel messages to the server. Connect the MIDI outlet to Knobs/Sliders for MIDI Learn. Requires Web MIDI and trusted HTTPS or localhost; device selection stays local to this session.",
+        vec![],
+        vec![midi_port()],
+        vec![],
+        &["browser midi", "web midi", "controller"],
+    );
     for input in [true, false] {
         let structural = |mut p: Parameter| {
             p.structural = true;
@@ -819,7 +939,7 @@ pub fn catalog() -> Vec<Descriptor> {
             "♪",
             "External",
             if input {
-                "Physical MIDI keyboard Note or CC input. Select a port, message type and channel in the modal. Note outputs match Part MIDI: pitch, velocity, held gate, note-on trigger and note-off trigger; number/value are legacy aliases. Chords are serialized at one event per two engine samples."
+                "MIDI input from a device attached to the server. Select its port and channel in the modal. The MIDI outlet forwards all channel messages, including CC and pitch bend; connect it to Knobs/Sliders for MIDI Learn. The mode selects only scalar decoding. Note outputs match Part MIDI: pitch, velocity, held gate, note-on trigger and note-off trigger; number/value are legacy aliases. Chords are serialized at one event per two engine samples."
             } else {
                 "Send note-on/off events to a physical MIDI port using pitch, velocity, gate, trigger and note_off. Connect trigger and note_off for polyphony. Number/value are legacy aliases; CC mode sends controller/value on trigger."
             },
@@ -850,14 +970,25 @@ pub fn catalog() -> Vec<Descriptor> {
                 vec![]
             },
             vec![
-                structural(param("mode", "Message type (0 Note, 1 CC)", "", 0., 1., 0.)),
+                structural(param(
+                    "mode",
+                    if input {
+                        "Scalar decode (0 Note, 1 CC)"
+                    } else {
+                        "Message type (0 Note, 1 CC)"
+                    },
+                    "",
+                    0.,
+                    1.,
+                    0.,
+                )),
                 structural(param(
                     "channel",
                     "MIDI channel (0 all inputs)",
                     "",
                     if input { 0. } else { 1. },
                     16.,
-                    1.,
+                    if input { 0. } else { 1. },
                 )),
             ],
             &[],
@@ -1017,10 +1148,10 @@ pub fn catalog() -> Vec<Descriptor> {
     );
     add(
         "browser_input",
-        "Browser input",
+        "Local audio input",
         "◉",
         "Audio",
-        "WebRTC microphone source assigned to a performer.",
+        "Audio input captured on this device in a browser or desktop app session and sent to the server over WebRTC. Assigned to a performer.",
         vec![],
         vec![port("out", Audio)],
         vec![],
@@ -1852,10 +1983,18 @@ pub fn catalog() -> Vec<Descriptor> {
                 | "granular_synth"
                 | "piano"
                 | "drum_pads"
+                | "knobs"
+                | "sliders"
         );
         let midi_output = matches!(
             descriptor.kind.as_str(),
-            "part_midi" | "midi_input" | "osc_to_midi" | "piano" | "drum_pads"
+            "part_midi"
+                | "midi_input"
+                | "osc_to_midi"
+                | "piano"
+                | "drum_pads"
+                | "knobs"
+                | "sliders"
         );
         if midi_input {
             descriptor.inputs.retain(|p| p.signal != Midi);
@@ -2040,6 +2179,30 @@ impl Graph {
             }
             if n.kind == "drum_pads" && n.parameters.values().any(|v| v.fract() != 0.) {
                 return Err("Drum pad notes and channel must be whole numbers".into());
+            }
+            if matches!(n.kind.as_str(), "knobs" | "sliders") {
+                let whole = n.parameters.iter().any(|(key, value)| {
+                    (key == "count"
+                        || key == "orientation"
+                        || key == "decimals"
+                        || key.starts_with("channel_")
+                        || key.starts_with("controller_"))
+                        && value.fract() != 0.
+                });
+                let min = n.parameters.get("min").copied().unwrap_or(0.);
+                let max = n.parameters.get("max").copied().unwrap_or(1.);
+                if whole || min > max {
+                    return Err("Controller counts, display options and MIDI assignments must be whole numbers, with minimum no greater than maximum".into());
+                }
+                if n.kind == "sliders" {
+                    let scale = 10_f64.powf(n.parameters.get("decimals").copied().unwrap_or(2.));
+                    if (min * scale).ceil() > (max * scale).floor() {
+                        return Err(
+                            "Slider range must contain a value at the selected decimal precision"
+                                .into(),
+                        );
+                    }
+                }
             }
             if let Some(part) = &n.part_id {
                 if !matches!(n.kind.as_str(), "part_midi" | "monitor_output")
@@ -2248,6 +2411,32 @@ impl Graph {
                     .any(|p| p.id == edge.source_port)
             {
                 return Err("Pitch tracker output slot is not enabled".into());
+            }
+            if matches!(self.nodes[s].kind.as_str(), "knobs" | "sliders")
+                && edge.source_port != "midi"
+                && edge
+                    .source_port
+                    .rsplit('_')
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .is_some_and(|slot| {
+                        slot > self.nodes[s].parameters.get("count").copied().unwrap_or(4.) as usize
+                    })
+            {
+                return Err("Controller output is not enabled".into());
+            }
+            if self.nodes[t].kind == "sliders"
+                && edge.target_port != "midi"
+                && edge
+                    .target_port
+                    .rsplit('_')
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .is_some_and(|slot| {
+                        slot > self.nodes[t].parameters.get("count").copied().unwrap_or(4.) as usize
+                    })
+            {
+                return Err("Slider input is not enabled".into());
             }
             let signal = sd
                 .outputs

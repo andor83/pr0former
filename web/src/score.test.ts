@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   changeNote,
+  entryBeat,
+  fitEntry,
+  insertEntry,
   metadata,
   performanceParts,
   pitchAt,
@@ -134,5 +137,107 @@ describe('shared score geometry', () => {
         beat,
         10,
       )
+  })
+})
+describe('entryBeat', () => {
+  const at = (beat: number, duration: number, voice = 1, extra: Partial<Note> = {}): Note => ({
+    ...n,
+    id: `${beat}-${voice}`,
+    beat,
+    duration,
+    notation: {
+      staff: 'main',
+      step: 34,
+      alter: 0,
+      voice,
+      base: duration,
+      dots: 0,
+      tuplet_actual: 1,
+      tuplet_normal: 1,
+    },
+    ...extra,
+  })
+  const part = { ...p, staves: [{ id: 'main', name: 'Main', clef: 'treble', transpose: 0 }] }
+  it('uses the earliest open position instead of the clicked gap', () => {
+    expect(entryBeat([at(0, 1), at(1, 0.5)], part, 'main', 1, undefined, 6.25)).toBe(1.5)
+    expect(entryBeat([at(0, 1), at(4, 1)], part, 'main', 1, undefined, 2)).toBe(1)
+  })
+  it('starts at the selected bar and fills after entries already at its left edge', () => {
+    expect(entryBeat([at(0, 1), at(4, 1)], part, 'main', 1, undefined, 6, 4, 8)).toBe(5)
+    expect(entryBeat([at(5, 1)], part, 'main', 1, undefined, 7, 4, 8)).toBe(6)
+  })
+  it('starts at the bar boundary on an empty staff or voice', () => {
+    expect(entryBeat([], part, 'main', 1, undefined, 3)).toBe(0)
+    expect(entryBeat([at(0, 1, 2)], part, 'main', 1, undefined, 3)).toBe(0)
+    expect(entryBeat([at(0, 1)], part, 'other', 1, undefined, 3)).toBe(0)
+  })
+  it('counts hidden rests as entries and ignores grace notes', () => {
+    expect(entryBeat([at(0, 1)], part, 'main', 1, [{ beat: 1, duration: 1, voice: 1 }], 7)).toBe(2)
+    const grace = at(3, 0.25, 1)
+    grace.notation = { ...grace.notation!, grace_to: '0-1' }
+    expect(entryBeat([at(0, 1), grace], part, 'main', 1, undefined, 7)).toBe(1)
+  })
+  it('places a click inside a note at its release and a click before a note at the preceding release', () => {
+    expect(entryBeat([at(0,2),at(3,1)],part,'main',1,undefined,1,0,4)).toBe(2)
+    expect(entryBeat([at(0,1),at(2,1)],part,'main',1,undefined,1.75,0,4)).toBe(1)
+    expect(entryBeat([at(1,1)],part,'main',1,undefined,0.5,0,4)).toBe(0)
+  })
+  it('shifts later chords together, consumes gaps, and rejects overflow without mutation', () => {
+    const source={...part,notes:[at(0,1),at(1,1),{...at(1,1),id:'chord',pitch:67},at(3,1)]}
+    const result=insertEntry(source,'main',1,1,0.5,4)
+    expect(typeof result).toBe('object')
+    if(typeof result!=='string')expect(result.notes.map(n=>n.beat)).toEqual([0,1.5,1.5,3])
+    expect(insertEntry(source,'main',1,1,2,4)).toMatch(/overflow/)
+    expect(source.notes.map(n=>n.beat)).toEqual([0,1,1,3])
+    expect(insertEntry({...part,notes:[]},'main',1,3.5,1,4)).toMatch(/overflow/)
+  })
+})
+describe('fitEntry', () => {
+  const at = (beat: number, duration: number, rest = false, voice = 1): Note => ({
+    ...n,
+    id: `${beat}-${rest ? 'r' : 'n'}-${voice}`,
+    beat,
+    duration,
+    rest,
+    notation: {
+      staff: 'main',
+      step: 34,
+      alter: 0,
+      voice,
+      base: duration,
+      dots: 0,
+      tuplet_actual: 1,
+      tuplet_normal: 1,
+    },
+  })
+  const part = { ...p, staves: [{ id: 'main', name: 'Main', clef: 'treble', transpose: 0 }] }
+  it('leaves a fitting entry alone', () => {
+    expect(fitEntry([at(0, 1), at(3, 1)], part, 'main', 1, 1, 1)).toEqual({ remove: [], shorten: null })
+    expect(fitEntry([at(0, 1)], part, 'main', 1, 1, 4)).toEqual({ remove: [], shorten: null })
+  })
+  it('replaces rests the entry covers', () => {
+    expect(fitEntry([at(0, 1), at(1, 1, true), at(2, 2)], part, 'main', 1, 1, 1)).toEqual({
+      remove: ['1-r-1'],
+      shorten: null,
+    })
+    // A longer rest under the onset goes too; the remainder becomes an automatic rest.
+    expect(fitEntry([at(0, 2, true)], part, 'main', 1, 1, 0.5)).toEqual({ remove: ['0-r-1'], shorten: null })
+  })
+  it('shortens to the room before the next pitched onset', () => {
+    expect(fitEntry([at(3, 0.5), at(3.75, 0.25), at(4, 1)], part, 'main', 1, 3.5, 1)).toEqual({
+      remove: [],
+      shorten: { base: 0.25, dots: 0 },
+    })
+    expect(fitEntry([at(0, 1), at(2.5, 0.5)], part, 'main', 1, 1, 2)).toEqual({
+      remove: [],
+      shorten: { base: 1, dots: 1 },
+    })
+  })
+  it('reports onsets inside another note or gaps nothing fits', () => {
+    expect(fitEntry([at(0, 2)], part, 'main', 1, 1, 1)).toMatch(/inside another note/)
+    expect(fitEntry([at(0, 1), at(1 + 1 / 3, 1)], part, 'main', 1, 1, 1)).toMatch(/Nothing fits/)
+  })
+  it('ignores other voices and staves', () => {
+    expect(fitEntry([at(0, 4, false, 2)], part, 'main', 1, 1, 1)).toEqual({ remove: [], shorten: null })
   })
 })

@@ -20,6 +20,10 @@ The WebRTC adapter encodes the selected master mix or dedicated monitor output a
 
 ## Graph contracts
 
+Knobs and Sliders contain 1–8 MIDI CC controls. Each control has a channel and CC number, a numeric outlet, and (for Sliders) a matching numeric input. Received MIDI is forwarded unchanged; GUI gestures emit assigned CCs. Slider values apply range, step and decimal rounding in DSP. Connected slider inputs are read-only in the UI and controller API. Live values and learn state use fixed prepared arrays; telemetry serialization occurs outside rendering. MIDI Learn captures the next incoming CC and the initiating browser saves its channel/number as configuration. GUI values are transient; learned assignments and display options are project data.
+
+Local audio input device selection does not start capture. The node modal's connection button starts the shared browser monitor session with that node as its microphone destination. This uses the same validated WebRTC/Opus uplink as the Monitor panel; changing the destination reconnects the session.
+
 - Node IDs and edge IDs are unique. Unknown node kinds/ports/parameters are rejected.
 - Widths are 1–8 channels; audio edges require matching per-port widths. Ports normally inherit node width; catalog `fixed_channels` overrides it for mono split outputs and merge inputs. Split/merge ports beyond the active bundle width are silent/ignored.
 - Control inputs, parameters and MIDI inputs accept multiple sources; audio and spectral inputs accept one source. See the control-routing and MIDI-source rules below.
@@ -78,6 +82,8 @@ Manual `--start` launches record their PID, owner, and process start time under 
 
 ## Score editor and scheduling
 
+Write-tool clicks choose an insertion point relative to note onsets in the selected measure/staff/voice. Entry starts at the measure boundary or immediately after the preceding note group, avoiding implied leading rests from pointer coordinates. Later chord groups shift right only as needed, consuming existing gaps. The insertion is planned before committing, and any resulting measure overflow rejects the complete edit without shortening the entered duration. Explicit chord entry remains a separate operation. Clicking after a full measure's final note rejects overflow; keyboard entry at the next measure remains available.
+
 `pr0-core::score` owns the optional version-1 score timeline, staff configuration, written note metadata, dynamics, and MIDI lanes. Existing schema-1 projects remain readable: absent timeline means legacy independent part loops; absent staff/notation data receives a presentation default without rewriting stored notes. Converting to a shared score is explicit. Authored note metadata records rational onset/duration (denominator bounded to 1,000,000,000), diatonic spelling, accidental, staff, voice, base value, dots and tuplet ratio alongside compatible numeric playback fields. The server checks agreement, reference integrity, staff routing, MIDI ranges and rhythmic overlaps. Four voices and eight staves are supported per part; different onsets that overlap need separate voices. Equal-onset chords are allowed. Legacy unnotated overlap is retained.
 
 `ScoreWorkspace` renders selected parts in one continuous horizontal viewport, with a collapsible part list. `ScoreStaff` uses local VexFlow SVG glyphs, measures, automatic display rests, chords, ties, tuplets, grace notes, articulations and octave lines. Beat anchors are shared across parts, signatures, automation and playheads; minimum spacing and signature reservations expand dense sections without changing musical time. Horizontal overscan and vertical visibility reduce engraving work. This is scrolling notation, without pagination or a full collision-optimized engraving engine. The piano roll uses a uniform beat grid with drag-to-draw, move and resize gestures; overlapping entries choose available notation voices. A floating palette, modal settings and collapsible MIDI inspectors keep the viewer dominant. Semantic SVG targets distinguish marks from note hit boxes. Staff hidden-rest ranges are bounded and server-validated display metadata, ignored by playback; editing a generated rest materializes a native note. Browser following is presentation only.
@@ -130,7 +136,7 @@ Analysis size (256–8192 samples) and spectral overlap (2 or 4) are structural 
 
 Right-click a node to open Edit/Delete; native keyboard context-menu invocation works on focused nodes. Edit opens the parameter modal, including read-only effective values for connected parameters. Delete removes attached connections and clears instrument references to the removed node. Backspace/Delete removes selected nodes and connections in the graph. Ctrl/Cmd+Z restores the previous saved revision's graph, including structure, through server validation and preparation. Failed full-project saves do not create undo entries. Pending parameter gestures prevent concurrent structural writes.
 
-Space activates an inactive show and then plays it; once active it toggles play/pause. The Play button uses the same sequence. Transport commands remain limited to owners/conductors, held-key repeats are ignored, and activation failure prevents Play. Shortcuts do not consume input in dialogs, editable fields, links, or buttons. VueFlow's Space-to-pan binding is disabled to avoid competing transport actions. Native button keyboard activation remains available.
+Space activates an inactive show and then plays it; once active it toggles play/pause. The Play button uses the same sequence. The adjacent Play + Repeat button applies a runtime-only repeat override: structured autoplay lanes loop their prepared traversal, and a non-structured score-editor preview relaunches the focused part with its existing repeat override. Stop clears the temporary override without changing the saved whole-score loop setting. Transport commands remain limited to owners/conductors, held-key repeats are ignored, and activation failure prevents Play. Shortcuts do not consume input in dialogs, editable fields, links, or buttons. VueFlow's Space-to-pan binding is disabled to avoid competing transport actions. Native button keyboard activation remains available.
 
 ## FM and spectral processing
 
@@ -149,7 +155,7 @@ Six `subgraph_input_*` / `subgraph_output_*` node kinds expose named control, au
 
 The Global clock `tempo` control input sets engine BPM at sample time, clamped to 1–400, before advancing the clock; beat/sample phase is preserved. Only one clock tempo input can be connected across the entire flattened project. With a driver, transport tempo is read-only and manual API tempo edits are rejected. Disconnecting retains the last engine BPM for the current activation. Telemetry is not persisted as project tempo. Scheduling reads engine beat positions; browser interpolation remains presentation only.
 
-Browser input device discovery uses `enumerateDevices`, refresh/device-change notifications, and an explicit microphone-permission button that stops its temporary stream immediately. Device IDs and per-node selections stay in local browser session state. Monitor capture uses the selected exact device ID, avoiding silent fallback if it disappears. Inputs are locked while capture/connection is in use; disconnect to change the selection. UI messages distinguish unsupported/insecure contexts, permission or policy denial, unavailable devices, and native input enablement/capture state. Physical device paths remain manual validation.
+Local audio input device discovery uses `enumerateDevices`, refresh/device-change notifications, and an explicit microphone-permission button that stops its temporary stream immediately. Device IDs and per-node selections stay in local browser session state. Monitor capture uses the selected exact device ID, avoiding silent fallback if it disappears. Inputs are locked while capture/connection is in use; disconnect to change the selection. UI messages distinguish unsupported/insecure contexts, permission or policy denial, unavailable devices, and native input enablement/capture state. Physical device paths remain manual validation.
 
 
 ## Versioned subgraph library
@@ -169,7 +175,7 @@ The subgraph library sits below the node library and hides with it. Both support
 
 `PUT /api/projects/:id/control` validates role, revision, type/range, and flattened connectivity. Manual value changes save a revision and send a small prepared-value command to the orchestration worker without recompiling the graph. Bang requires an active show, emits a single engine-sample pulse, and is not persisted. Telemetry remains outside revisions and undo history. Browser edits queue the latest pending value during a save.
 
-D duplicates the whole selection and its internal wires, including nested subgraphs. A selects every node in the current graph. Right-clicking multiple selected nodes offers Auto-space, Make subgraph, Duplicate, and Delete. Auto-space (L) lays the selection out in signal-flow columns: ranks follow the longest path through the selection's own connections, each column is ordered to reduce wire crossings with port-aware weights and a pairwise transpose pass, rows are pulled toward the ports they connect so multi-input nodes get straight wires, and the selection keeps its original top-left corner. It is one undoable save; nodes outside the selection do not move. The ADSR node draws its envelope on the canvas (attack, decay, a sustain plateau and release on an orange grid, with the live output level as a dotted line); its modal shows a larger copy with draggable handles for attack, decay/sustain and release/sustain that emit ordinary parameter edits, with keyboard nudging and locked handles for connected parameters. The time axis is a stepped scale (250 ms doubling to 64 s, chosen so the timed stages fill at most 80% of it) that freezes during a drag, so the release always ends at the right edge and its handle, the start of the release ramp, lengthens the release when dragged left. The ADSR node itself is edge triggered: a rising `gate` or `retrigger` starts or restarts the attack, and a falling `gate` or rising `note_off` releases, even when the gate parameter is left high, so pulse sources such as Piano wire trigger→retrigger and note_off→note_off while held sources wire gate→gate. Attacks ramp from the current level unless the structural `reset` option (Retrigger from zero) is on, in which case every attack drops to 0 first. The Meter node is a pass-through whose runtime keeps one peak follower per channel (instant rise, exponential fall over its fall-time parameter) in its control outputs `level_1`…`level_8`; telemetry publishes them as `_level1`…`_levelN` for the node's thin per-channel dBFS strips, which reuse the monitor tab's scale and colour zones, and the descriptor only exposes as many Level outputs as the node has channels (narrowing the node drops cables from the removed outputs). The Drum Sampler library subgraph mirrors the FM Drum Machine with six one-shot `poly_sampler` voices preloaded with a bundled CC0 acoustic kit (see [SAMPLE_CREDITS.md](SAMPLE_CREDITS.md)). The server seeds that kit into the shared sample library as global samples on every start, so all accounts can browse and add them; inserting the subgraph links the project to those global samples (falling back to embedded copies if an administrator removed them), and each voice's sample can be swapped from its modal. Sample tags are the comma-separated `tags` field parsed into trimmed, case-insensitively unique chips; the project sample list, the full sample browser and the organizer show each sample's tags as chips and a usage-counted tag bar, clicking a chip filters (every selected tag must match), and the metadata editor replaces the tags text box with a chip editor plus a tag cloud of every tag the user can see, sized by use, where clicking adds or removes the tag. Grouping creates typed, named boundaries for crossing connections and preserves existing outer boundary connections through proxies when selected boundary nodes move inward. The server validates the resulting graph through the normal revision endpoint. Node and subgraph libraries share a single-open accordion; the open library fills the sidebar.
+D duplicates the whole selection and its internal wires, including nested subgraphs. A selects every node in the current graph. Right-clicking multiple selected nodes offers Auto-space, Make subgraph, Duplicate, and Delete. Auto-space (L) lays the selection out in signal-flow columns: ranks follow the longest path through the selection's own connections, each column is ordered to reduce wire crossings with port-aware weights and a pairwise transpose pass, rows are pulled toward the ports they connect so multi-input nodes get straight wires, and the selection keeps its original top-left corner. It is one undoable save; nodes outside the selection do not move. The ADSR node draws its envelope on the canvas (attack, decay, a sustain plateau and release on an orange grid, with the live output level as a dotted line); its modal shows a larger copy with draggable handles for attack, decay/sustain and release/sustain that emit ordinary parameter edits, with keyboard nudging and locked handles for connected parameters. The time axis is a stepped scale (50 ms doubling to 51.2 s, auto-chosen so the timed stages fill at most 80% of it) that freezes during a drag, so the release ends at the right edge and its handle, the start of the release ramp, lengthens the release when dragged left. The editable graph has a Time span slider that overrides the auto scale (remembered for the session, Auto restores it); zoomed in past the release, the curve is clipped at the frame with an overflow label, the plateau keeps an 8% minimum width and the release handle edits only sustain. The ADSR node itself is edge triggered: a rising `gate` or `retrigger` starts or restarts the attack, and a falling `gate` or rising `note_off` releases, even when the gate parameter is left high, so pulse sources such as Piano wire trigger→retrigger and note_off→note_off while held sources wire gate→gate. Attacks ramp from the current level unless the structural `reset` option (Retrigger from zero) is on, in which case every attack drops to 0 first. The Meter node is a pass-through whose runtime keeps one peak follower per channel (instant rise, exponential fall over its fall-time parameter) in its control outputs `level_1`…`level_8`; telemetry publishes them as `_level1`…`_levelN` for the node's thin per-channel dBFS strips, which reuse the monitor tab's scale and colour zones, and the descriptor only exposes as many Level outputs as the node has channels (narrowing the node drops cables from the removed outputs). The Drum Sampler library subgraph mirrors the FM Drum Machine with six one-shot `poly_sampler` voices preloaded with a bundled CC0 acoustic kit (see [SAMPLE_CREDITS.md](SAMPLE_CREDITS.md)). The server seeds that kit into the shared sample library as global samples on every start, so all accounts can browse and add them; inserting the subgraph links the project to those global samples (falling back to embedded copies if an administrator removed them), and each voice's sample can be swapped from its modal. Sample tags are the comma-separated `tags` field parsed into trimmed, case-insensitively unique chips; the project sample list, the full sample browser and the organizer show each sample's tags as chips and a usage-counted tag bar, clicking a chip filters (every selected tag must match), and the metadata editor replaces the tags text box with a chip editor plus a tag cloud of every tag the user can see, sized by use, where clicking adds or removes the tag. Grouping creates typed, named boundaries for crossing connections and preserves existing outer boundary connections through proxies when selected boundary nodes move inward. The server validates the resulting graph through the normal revision endpoint. Node and subgraph libraries share a single-open accordion; the open library fills the sidebar. Explanatory notes across modals, settings and dialogs are `HelpNote` components: with help shown they render as ordinary notes, and with help hidden (the `i` key anywhere outside a text field, or the topbar info button, persisted per browser) each collapses to a small info icon whose text appears in a body-teleported tooltip on hover or focus. Status messages and empty states stay visible in both modes. The ADSR graph's zoom is sticky: dragging or nudging a handle never rescales the graph, and it refits only when the parameters change from outside the graph.
 
 ## Compiled version identity
 
@@ -198,7 +204,7 @@ The header shows the saved revision count and Saved/Unsaved changes beneath the 
 
 ## Monitor workspace and process statistics
 
-The Monitor tab uses a scrollable left sidebar for clock snapshot age, server CPU/resident-memory measurements, browser audio controls and device diagnostics. The remaining area has two meter rows grouped by physical device, with one vertical bar per physical channel. Inputs include every discovered channel, independent of graph input nodes; disabled or unavailable capture shows no data. Outputs show only channels routed from connected native Output nodes in the active graph to enabled physical devices, retaining sparse physical channel numbering. Browser input and dedicated monitor nodes do not appear as hardware meters. Wide groups scroll horizontally.
+The Monitor tab uses a scrollable left sidebar for clock snapshot age, server CPU/resident-memory measurements, browser audio controls and device diagnostics. The remaining area has two meter rows grouped by physical device, with one vertical bar per physical channel. Inputs include every discovered channel, independent of graph input nodes; disabled or unavailable capture shows no data. Outputs show only channels routed from connected native Output nodes in the active graph to enabled physical devices, retaining sparse physical channel numbering. Local audio input and dedicated monitor nodes do not appear as hardware meters. Wide groups scroll horizontally.
 
 Global `hardware_levels` events publish per-device/channel sample peaks at 20 Hz on the orchestration worker. Input peaks are collected before graph routing, including channels unused by any graph. Output peaks are collected after summing all graph contributions to each physical channel, before the output delay/ring. Fixed peak arrays observe every worker frame between updates; serialization occurs outside DSP render and device callbacks. Paused graph outputs are silent; enabled capture can continue during pause or with no graph loaded. This measures captured inputs and the active graph's outgoing signal, not OS loopback, other applications, true peaks, or analog hardware levels. Physical device verification remains manual.
 
@@ -341,9 +347,27 @@ or previously initialized desktop database. A `desktop_owner` identity mapping
 is created only in desktop mode. It never upgrades an existing server user into
 an administrator. A random expiring session crosses the private stdout pipe and
 is installed as an HttpOnly cookie by the native shell; HTTP authorization remains
-unchanged. The frontend has no Tauri capabilities. Host checks restrict requests
+unchanged. The performance frontend has no Tauri capabilities. Host checks restrict requests
 to the assigned loopback authority. Frontend and FFmpeg locations can be set with
 `PR0_WEB_ROOT` and `PR0_FFMPEG` while standalone defaults remain unchanged.
+
+Opt-in desktop hosting adds a separate HTTPS LAN listener over the same router
+and engine. Private pipe commands start/stop it; remote webviews have no hosting
+capability. The LAN listener rejects the launcher's private session and preserves
+normal account/project authorization. A persistent profile-local CA signs host
+certificates; a separate HTTP listener serves only public certificate bootstrap
+resources. Certificate generation, TLS, mDNS advertisement and discovery run off
+audio threads. The local listener remains private and available when hosting stops.
+A future iPad Tauri shell is client-only and must omit the server sidecar and host
+controls; no mobile build is supplied here.
+
+Packaged connection/hosting dialogs have narrowly scoped native permissions and
+validate their actual local origin. Performance webviews have no native IPC
+capabilities. The macOS connection workflow can remember per-origin SHA-256 leaf
+certificate pins, checked again by WKWebView's server-trust challenge. The OS
+trust store is unchanged. Native window metadata is derived from the current
+server/project URL and saved outside project state; same-project windows copy
+only that server's cookies. Remote sessions use private storage.
 
 The launcher owns a per-profile OS file lock and child stdin. Pipe EOF requests a
 new orchestration Shutdown command; outside render/device callbacks, it closes
@@ -514,3 +538,72 @@ A bounded persistence queue (eight jobs plus one retained job) serializes archiv
 Dedicated monitor subscriptions are refreshed by active WebRTC senders every two seconds and expire after eight seconds. Only selected dedicated feeds are collected, while the master packet timeline continues. Removal of a selected node still yields silence. Monitor conversion, telemetry serialization, routing configuration and sequencer replacement still execute on the orchestration worker. `worker_max_work_us` measures maximum observed command/block work up to telemetry generation; `worker_max_block_gap_us` measures the maximum interval between rendered block starts, including ordinary pacing. Neither establishes native callback deadlines.
 
 The playback metronome reads the sequencer’s written position and prepared meter map. Each meter entry sets the bar origin; denominator beats determine click spacing and the numerator determines accents. Repeated written ranges restart their appropriate clicks. Count-in remains its separate pre-performance clock and monitor-only routing contract.
+
+
+Piano pointer gestures send ordered transient notes and 14-bit channel-one pitch
+bend through the existing authorized piano endpoint. Vertical travel of one displayed
+keyboard height spans center to either bend limit; horizontal moves over white or
+black keys send the previous note-off before the next note-on. Release, cancellation,
+focus loss, and component cleanup release held notes and recenter bend. Unsent bend
+moves are coalesced without crossing note boundaries. Gestures never save revisions.
+Pitch bend travels over typed MIDI cables; the five legacy scalar note outlets retain
+integer note identity. Internal synth/FM, sampler, and granular MIDI decoders use a
+fixed ±2-semitone range shared across their merged MIDI input (not MPE/per-channel
+voices); granular pitch updates apply to newly launched grains. External MIDI receivers
+choose their own bend range. Multiple pointers share the piano's channel bend.
+
+
+The `browser_input` node is displayed as **Local audio input** in the catalog and
+capture UI. Its persisted kind and graph contract are unchanged, so existing
+projects still load. Capture is local to the current browser or Tauri session and
+uses the same WebRTC uplink to whichever pr0former server the session has loaded.
+The Tauri Server menu opens a packaged connection dialog with one scoped native
+command. Valid HTTP(S) server origins open in separate private webviews with no
+native command permissions and no bundled-engine session cookie. The bundled engine
+continues in its own window; its normal shutdown protocol is unchanged.
+
+
+## Local MIDI and controller assignment (2026-09-12)
+
+`local_midi_input` is a typed MIDI source for devices on the client. Its modal
+requests Web MIDI access, lists connected inputs, and explicitly connects one.
+The device ID and capture state belong to the client session, not project data.
+Listeners coexist with score MIDI input, continue while the modal is closed, and
+detach on explicit disconnect, device loss, project/role change, socket loss,
+engine disablement, or app unmount. Unsupported browser/webview sessions show an
+availability message; this does not provide native Web MIDI support to WebKit.
+
+Local channel messages use the authenticated project WebSocket, with server-side
+editor-role, loaded-project, node-kind and byte validation. SysEx/system messages
+are excluded; two-byte program/pressure and three-byte channel messages are
+accepted. Authorization caches invalidate on project/member updates. Each source
+node has one socket owner; disconnect releases it and sends all-notes-off on all
+16 channels. A per-socket 2,048-message/second limit bounds ingress. This path is
+best effort over the network, not sample-timestamped device scheduling.
+
+Server `midi_input` callbacks now admit every valid MIDI 1.0 channel message.
+The selected channel still filters input, while Notes/CC mode affects only scalar
+decoding. The typed outlet forwards CC, pitch bend, pressure and program changes
+in either mode. New nodes default to channel 0 (all); existing explicit channel
+settings remain respected. Both input kinds report received message count and
+last status/data bytes in transient telemetry. Nodes show a 200 ms activity light
+and a last-message tooltip, with no message count. Input modals decode note, CC,
+pitch bend, program and pressure messages, show raw bytes/counts/drops and retain
+at most 64 observations locally. These are sampled at 20 Hz, after channel filtering;
+intermediate messages can be missed. History freezes when telemetry is stale or
+the engine is off, and never enters project state or undo history.
+
+Controller learn cancellation is an explicit transient command, not a synthetic
+CC or parameter edit. Escape, a pointer press outside the selected control, and
+component cleanup cancel the pending learn. Ordinary controller gestures also
+cancel it. Channel-mode all-notes-off/all-sound-off messages cannot become learned
+assignments. Only successfully learned channel/controller metadata is persisted;
+input activity and cancellation never enter revision or undo history.
+
+Knob bindings use persisted `channel_N = 0` for unassigned (1–16 for assigned).
+Prepared controller channels use 255 as the unassigned sentinel, which cannot
+match a MIDI channel. The controller API and engine reject GUI values for an
+unassigned knob, while raw MIDI still passes through and MIDI Learn remains
+available. Double-click clears the binding through ordinary graph validation/save;
+it cancels pending learn first. The options channel selector can explicitly
+unassign or reassign; default and existing bindings retain their previous values.

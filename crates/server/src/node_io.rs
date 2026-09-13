@@ -453,13 +453,10 @@ fn open_input(port: &str) -> Result<Input, String> {
             &target,
             "pr0former graph input",
             move |_, bytes, _| {
-                if bytes.len() == 3
-                    && matches!(bytes[0] & 0xf0, 0x80 | 0x90 | 0xb0)
-                    && bytes[1] < 128
-                    && bytes[2] < 128
-                    && producer.push([bytes[0], bytes[1], bytes[2]]).is_err()
-                {
-                    callback_dropped.fetch_add(1, Ordering::Relaxed);
+                if let Some(message) = channel_message(bytes) {
+                    if producer.push(message).is_err() {
+                        callback_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             },
             (),
@@ -473,31 +470,36 @@ fn open_input(port: &str) -> Result<Input, String> {
         last_dropped: 0,
     })
 }
+fn channel_message(bytes: &[u8]) -> Option<[u8; 3]> {
+    let status = *bytes.first()?;
+    let length = if matches!(status >> 4, 12 | 13) { 2 } else { 3 };
+    if bytes.len() != length {
+        return None;
+    }
+    let message = pr0_core::midi::Message {
+        status,
+        data1: bytes[1],
+        data2: if length == 3 { bytes[2] } else { 0 },
+    };
+    message
+        .valid()
+        .then_some([message.status, message.data1, message.data2])
+}
 pub fn route_midi(node: &Node, message: [u8; 3], engine: &mut Engine) {
     if message[1] > 127 || message[2] > 127 {
         return;
     }
-    let channel = node.parameters.get("channel").copied().unwrap_or(1.) as u8;
+    let channel = node.parameters.get("channel").copied().unwrap_or(0.) as u8;
     if channel != 0 && channel != (message[0] & 0x0f) + 1 {
         return;
     }
-    let cc = node.parameters.get("mode") == Some(&1.);
-    // Forward the raw message with its channel nibble; the node decodes its own
-    // scalar outlets from the same frame that its typed output carries.
-    let forward = match message[0] & 0xf0 {
-        0x80 | 0x90 => !cc,
-        0xb0 => cc || matches!(message[1], 120 | 123),
-        _ => false,
+    let message = pr0_core::midi::Message {
+        status: message[0],
+        data1: message[1],
+        data2: message[2],
     };
-    if forward {
-        engine.node_midi_message(
-            &node.id,
-            pr0_core::midi::Message {
-                status: message[0],
-                data1: message[1],
-                data2: message[2],
-            },
-        );
+    if message.valid() {
+        engine.node_midi_message(&node.id, message);
     }
 }
 /// A single numeric or short text argument for `osc_input` nodes.
@@ -530,6 +532,65 @@ pub fn osc_note(message: &rosc::OscMessage) -> Option<NoteEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hardware_callback_accepts_all_channel_messages_and_rejects_system_or_malformed_data() {
+        for bytes in [
+            &[0xb3, 74, 100][..],
+            &[0xe3, 0, 64],
+            &[0xa3, 60, 30],
+            &[0xc3, 22],
+            &[0xd3, 33],
+        ] {
+            assert!(channel_message(bytes).is_some());
+        }
+        for bytes in [
+            &[][..],
+            &[0xf8],
+            &[0xf0, 1, 2],
+            &[0x90, 60],
+            &[0xc0, 20, 2],
+            &[0xb0, 128, 2],
+        ] {
+            assert!(channel_message(bytes).is_none());
+        }
+    }
+    #[test]
+    fn default_note_mode_cc_reaches_knobs_and_cancel_keeps_assignment() {
+        let p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
+        let mut source = p.graph.nodes[0].clone();
+        source.id = "in".into();
+        source.kind = "midi_input".into();
+        source.parameters.clear();
+        let mut knobs = source.clone();
+        knobs.id = "knobs".into();
+        knobs.kind = "knobs".into();
+        let mut engine = Engine::prepare(
+            Graph {
+                nodes: vec![source.clone(), knobs],
+                edges: vec![pr0_core::Edge {
+                    id: "midi".into(),
+                    source: "in".into(),
+                    source_port: "midi".into(),
+                    target: "knobs".into(),
+                    target_port: "midi".into(),
+                }],
+            },
+            48000.,
+        )
+        .unwrap();
+        engine.controller("knobs", 0, None);
+        route_midi(&source, [0xb0, 74, 100], &mut engine);
+        engine.render(&[], &mut [[0.; 8]; 16]);
+        assert_eq!(engine.telemetry()["knobs"]["_learn_controller"], 74.);
+        assert_eq!(engine.telemetry()["knobs"]["_control_1"], 100. / 127.);
+        engine.controller("knobs", 0, None);
+        engine.cancel_controller_learn("knobs", 0);
+        route_midi(&source, [0xb0, 12, 60], &mut engine);
+        engine.render(&[], &mut [[0.; 8]; 16]);
+        assert_eq!(engine.telemetry()["knobs"]["_learning"], 0.);
+        assert_eq!(engine.telemetry()["knobs"]["_learn_controller"], 74.);
+        assert_eq!(engine.telemetry()["in"]["_midi_received"], 2.);
+    }
     #[test]
     fn osc_output_route_carries_destination_address_and_rate() {
         let p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Freeform);
@@ -612,10 +673,10 @@ mod tests {
         assert_eq!(engine.telemetry()["keys"]["pitch"], 60.);
         assert_eq!(engine.telemetry()["keys"]["gate"], 1.);
         engine.render(&[], &mut [[0.; 8]]);
-        // Note mode drops ordinary controllers before they reach the graph.
+        // Notes mode affects scalar decoding only; raw CC still reaches the graph.
         route_midi(&node, [0xb3, 7, 99], &mut engine);
         engine.render(&[], &mut [[0.; 8]]);
-        assert_eq!(engine.take_midi_message("sink"), None);
+        assert_eq!(engine.take_midi_message("sink"), Some(message(0xb3, 7, 99)));
         // All-notes-off is forwarded and releases the decoded note.
         route_midi(&node, [0xb3, 123, 0], &mut engine);
         engine.render(&[], &mut [[0.; 8]]);
@@ -654,7 +715,7 @@ mod tests {
         assert_eq!(engine.telemetry()["keyboard"]["note_off"], 1.);
         assert_eq!(engine.telemetry()["keyboard"]["gate"], 0.);
         engine.render(&[], &mut [[0.; 8]]);
-        // In Note mode ordinary controllers never reach the graph.
+        // In Notes mode CC does not replace scalar note identity.
         route_midi(&node, [0xb1, 7, 99], &mut engine);
         engine.render(&[], &mut [[0.; 8]]);
         assert_eq!(engine.telemetry()["keyboard"]["pitch"], 64.);

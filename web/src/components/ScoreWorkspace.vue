@@ -2,6 +2,7 @@
 import { previewCurveGesture } from '../scoreCurveGesture'
 import { useScoreMidiInput } from '../scoreMidiInput'
 import { createScoreDraft, type ScoreDraft } from '../scoreDraft'
+import { readView, restoreScoreParts, scoreViewKey, writeView, type ScoreView } from '../viewMemory'
 import {
   computed,
   nextTick,
@@ -22,7 +23,6 @@ import type {
 import { newId } from '../id'
 import { ApiError } from '../api'
 import {
-  durationSymbols,
   atBeat,
   scoreAnchors,
   scoreMeasures,
@@ -44,11 +44,15 @@ import {
   withNotation,
   caretStops,
   nextCaretStop,
+  entryBeat,
+  fitEntry,
+  insertEntry,
   nearestLetterStep,
   writtenDuration,
   type NoteCommand,
 } from '../score'
 import ScoreStaff from './ScoreStaff.vue'
+import ScoreGhostNote, { GHOST_PAD } from './ScoreGhostNote.vue'
 import ScoreToolMenu from './ScoreToolMenu.vue'
 import ScoreRestIcon from './ScoreRestIcon.vue'
 import {
@@ -418,13 +422,24 @@ watch(session.accepted, () => {
   for (const a of ready) for (const n of a.notes) emit('audition', a.part, n)
 })
 watch(conflict, value => { if (value) { pendingAuditions = [] } })
-const selected = ref(new Set<string>()),
-  visible = ref(new Set(doc.value.parts.map((p) => p.id))),
-  focused = ref(
-    doc.value.parts.find((p) => p.performer === props.userId)?.id ||
+/** Where this project's score was left (parts, sidebar, scroll); the performance view never reads or writes it. */
+const savedView: ScoreView | null = props.performance
+  ? null
+  : readView<ScoreView>(scoreViewKey(props.project.id))
+const restoredParts = restoreScoreParts(
+  savedView,
+  doc.value.parts.map((p) => p.id),
+  {
+    focused:
+      doc.value.parts.find((p) => p.performer === props.userId)?.id ||
       doc.value.parts[0]?.id ||
       '',
-  )
+    visible: new Set(doc.value.parts.map((p) => p.id)),
+  },
+)
+const selected = ref(new Set<string>()),
+  visible = ref(restoredParts.visible),
+  focused = ref(restoredParts.focused)
 const performanceSelection = computed(() =>
   props.performance ? new Set<string>() : selected.value,
 )
@@ -527,7 +542,7 @@ function wheel(event: WheelEvent) {
     y: event.clientY,
   })
 }
-const collapsed = ref(false),
+const collapsed = ref(savedView?.collapsed ?? false),
   showAll = ref(false),
   tool = ref<'select' | 'write'>('select'),
   scale = ref(90),
@@ -590,9 +605,42 @@ onMounted(() => {
   if (viewport.value) resize.observe(viewport.value)
   if (palette.value) resize.observe(palette.value)
   updateViewport()
+  if (savedView) {
+    if (focused.value) emit('focus', focused.value)
+    void nextTick(() => {
+      const v = viewport.value
+      if (!v) return
+      if (Number.isFinite(savedView.scrollLeft)) v.scrollLeft = savedView.scrollLeft!
+      if (Number.isFinite(savedView.scrollTop)) v.scrollTop = savedView.scrollTop!
+      updateViewport()
+    })
+  }
 })
+let rememberTimer = 0
+function persistView() {
+  if (props.performance || !viewport.value) return
+  writeView(scoreViewKey(props.project.id), {
+    focused: focused.value,
+    visible: [...visible.value],
+    collapsed: collapsed.value,
+    scrollLeft: viewport.value.scrollLeft,
+    scrollTop: viewport.value.scrollTop,
+  } satisfies ScoreView)
+}
+/** Persist the score view; scrolls are debounced so a fling writes once. */
+function rememberView(delay: number) {
+  clearTimeout(rememberTimer)
+  rememberTimer = window.setTimeout(persistView, delay)
+}
+watch([focused, visible, collapsed], persistView)
+function scrolled() {
+  updateViewport()
+  rememberView(200)
+}
 onBeforeUnmount(() => {
   resize?.disconnect()
+  clearTimeout(rememberTimer)
+  persistView()
   cancelGesture()
   void flushNow().catch(() => {})
 })
@@ -1209,6 +1257,8 @@ interface EntryHead {
   alter?: number
 }
 interface EntryOptions {
+  barEnd?: number
+  chord?: boolean
   rest?: boolean
   base?: number
   dots?: number
@@ -1238,11 +1288,39 @@ function enterNotes(
         doc.value.score?.keys.filter((k) => k.beat <= beat).at(-1)?.key ??
         p.key_signature,
     )
-  const asRest = options.rest ?? rest.value,
-    baseValue = options.base ?? base.value,
+  const asRest = options.rest ?? rest.value
+  let baseValue = options.base ?? base.value,
     dotCount = options.dots ?? dots.value,
     tupletActual = options.actual ?? actual.value,
     tupletNormal = options.normal ?? normal.value
+  // Plan ordinary insertion before editing any notes. Explicit chord entry keeps
+  // the existing onset and uses its separate overlap/rest checks.
+  const bar = measures(doc.value).find(m => m.start <= beat + 1e-9 && m.end > beat + 1e-9)
+  if (!options.chord) {
+    const insertion = insertEntry(p, staffId, options.voice ?? voice.value, beat,
+      writtenDuration(baseValue, dotCount, tupletActual, tupletNormal), options.barEnd ?? bar?.end ?? beat)
+    if (typeof insertion === 'string') { error.value = insertion; return [] }
+    p.notes = insertion.notes
+  }
+  const fit = options.chord ? fitEntry(
+    p.notes,
+    p,
+    staffId,
+    options.voice ?? voice.value,
+    beat,
+    writtenDuration(baseValue, dotCount, tupletActual, tupletNormal),
+  ) : {remove: [], shorten: null}
+  if (typeof fit === 'string') {
+    error.value = fit
+    return []
+  }
+  if (fit.remove.length) p.notes = p.notes.filter((n) => !fit.remove.includes(n.id))
+  if (fit.shorten) {
+    baseValue = fit.shorten.base
+    dotCount = fit.shorten.dots
+    tupletActual = 1
+    tupletNormal = 1
+  }
   const added: Note[] = []
   for (const head of asRest ? heads.slice(0, 1) : heads) {
     const acc = head.alter ?? alter.value ?? keyAt(head.step)
@@ -1333,6 +1411,26 @@ const caretDuration = () =>
 function clefAt(s: Staff, beat: number) {
   return s.clef_changes?.filter((c) => c.beat <= beat).at(-1)?.clef || s.clef
 }
+/** Staff step under a pointer, from its y offset within the 190px staff row. */
+function stepAtY(clef: string, y: number) {
+  return Math.max(0, Math.min(70, bottomStep(clef) + Math.round((118 - y) / 5)))
+}
+/** A write click abuts the preceding note group within the chosen bar. */
+function writeBeat(p: Part, s: Staff, clicked: number) {
+  const bar = measures(doc.value).find(
+    (m) => m.start <= clicked + 1e-9 && m.end > clicked + 1e-9,
+  )
+  return entryBeat(
+    p.notes,
+    p,
+    s.id,
+    voice.value,
+    s.hidden_rests,
+    clicked,
+    bar?.start ?? 0,
+    bar?.end ?? Infinity,
+  )
+}
 function caretTop(s: Staff) {
   const c = caret.value!
   return 118 - (c.step - bottomStep(clefAt(s, c.beat))) * 5
@@ -1365,7 +1463,7 @@ function scrollToCaret() {
     v.scrollLeft = Math.max(0, x - v.clientWidth * 0.3)
 }
 /** Insert at the caret and advance it by the written duration (Finale Speedy Entry). */
-function insertAtCaret(heads: EntryHead[], options: { rest?: boolean } = {}) {
+function insertAtCaret(heads: EntryHead[], options: { rest?: boolean; barEnd?:number } = {}) {
   const c = caret.value
   if (!c || !canQueue.value || !heads.length) return
   const at = { ...c },
@@ -1380,17 +1478,21 @@ function insertAtCaret(heads: EntryHead[], options: { rest?: boolean } = {}) {
     }
   tieNext.value = null
   lastEntry = { part: at.part, staff: at.staff, voice: at.voice, beat: at.beat, ...entry }
-  caret.value = { ...c, beat: c.beat + duration, step: heads[0]!.step }
   selected.value = new Set()
   selectedElement.value = null
-  enqueue(() =>
-    enterNotes(at.part, at.staff, at.beat, heads, {
-      ...entry,
-      rest: asRest,
-      voice: at.voice,
-      tie,
-    }),
-  )
+  const added = enterNotes(at.part, at.staff, at.beat, heads, {
+    ...entry,
+    barEnd: options.barEnd,
+    rest: asRest,
+    voice: at.voice,
+    tie,
+  })
+  // Advance only after a successful insertion; overflow leaves the caret in place.
+  caret.value = {
+    ...c,
+    beat: c.beat + (added[0]?.duration ?? (added.length ? duration : 0)),
+    step: heads[0]!.step,
+  }
   nextTick(scrollToCaret)
 }
 /** Stack another pitch onto the most recent entry without advancing. */
@@ -1408,6 +1510,7 @@ function addToChord(head: EntryHead | number) {
       normal: at.normal,
       voice: at.voice,
       rest: false,
+      chord: true,
     }),
   )
 }
@@ -1741,6 +1844,7 @@ const gesture = ref<{
   step: number
   beat: number
   pointer: number
+  barEnd?: number
   move?: boolean
 } | null>(null)
 const marquee = ref<{
@@ -1749,9 +1853,23 @@ const marquee = ref<{
   width: number
   height: number
 } | null>(null)
-const ghost = ref<{ left: number; top: number; kind?: string; label?: string } | null>(
-  null,
-)
+interface GhostNote {
+  clef: string
+  step: number
+  alter: number | null
+  base: number
+  dots: number
+  rest: boolean
+  voice: number
+}
+const ghost = ref<{
+  left: number
+  top: number
+  kind?: string
+  label?: string
+  /** Write tool: engraved with VexFlow instead of a text glyph. */
+  note?: GhostNote
+} | null>(null)
 const clefGlyphs: Record<string, string> = { treble: '𝄞', bass: '𝄢', alto: '𝄡', tenor: '𝄡' }
 /** Preview of what a placement tool will put on the staff at the pointer. */
 function toolGhost(row: HTMLElement, pos: { x: number; y: number }) {
@@ -1761,12 +1879,25 @@ function toolGhost(row: HTMLElement, pos: { x: number; y: number }) {
     x = xAt(beat),
     chosen = placement.value
   if (!chosen) {
-    const index = durationKeys.indexOf(base.value)
+    const p = doc.value.parts.find((p) => p.id === row.dataset.partId),
+      s = p && staves(p).find((s) => s.id === row.dataset.staffId)
+    if (!p || !s) return null
+    // Same onset and step the click will use, so the preview is what gets entered.
+    const at = writeBeat(p, s, beat),
+      clef = clefAt(s, at)
     return {
-      left: x,
-      top: Math.round(pos.y / 5) * 5,
+      left: xAt(at) - GHOST_PAD,
+      top: rowTop,
       kind: rest.value ? 'rest' : 'note',
-      label: rest.value ? '𝄽' : (durationSymbols[index] ?? '♩') + '.'.repeat(dots.value),
+      note: {
+        clef,
+        step: stepAtY(clef, pos.y - rowTop),
+        alter: alter.value,
+        base: base.value,
+        dots: dots.value,
+        rest: rest.value,
+        voice: voice.value,
+      },
     }
   }
   switch (chosen.kind) {
@@ -2163,12 +2294,15 @@ function pointerDown(event: PointerEvent) {
   const pos = point(event),
     rect = row.getBoundingClientRect()
   const snap = onsetSnap.value
-  const at = Math.max(0, Math.round(beatAt(pos.x) / snap) * snap),
-    staff = staves(
-      doc.value.parts.find((p) => p.id === row.dataset.partId)!,
-    ).find((s) => s.id === row.dataset.staffId)!,
-    clef =
-      staff.clef_changes?.filter((c) => c.beat <= at).at(-1)?.clef || staff.clef
+  const clicked = Math.max(0, Math.round(beatAt(pos.x) / snap) * snap),
+    rowPart = doc.value.parts.find((p) => p.id === row.dataset.partId)!,
+    staff = staves(rowPart).find((s) => s.id === row.dataset.staffId)!,
+    // Writing abuts the preceding group and preserves the clicked bar boundary.
+    at =
+      tool.value === 'write' && !placement.value
+        ? writeBeat(rowPart, staff, clicked)
+        : clicked,
+    clef = clefAt(staff, at)
   gesture.value = {
     ...pos,
     cx: event.clientX,
@@ -2177,10 +2311,9 @@ function pointerDown(event: PointerEvent) {
     extend: event.shiftKey,
     part: row.dataset.partId!,
     staff: row.dataset.staffId!,
-    step:
-      bottomStep(clef) +
-      Math.round((118 - (event.clientY - rect.top) / zoom.value) / 5),
-    beat: Math.max(0, Math.round(beatAt(pos.x) / snap) * snap),
+    step: stepAtY(clef, (event.clientY - rect.top) / zoom.value),
+    beat: at,
+    barEnd: measures(doc.value).find(m=>m.start<=clicked+1e-9&&m.end>clicked+1e-9)?.end,
     pointer: event.pointerId,
   }
   viewport.value?.setPointerCapture(event.pointerId)
@@ -2355,7 +2488,7 @@ function pointerUp(event: PointerEvent) {
   } else if (tool.value === 'write') {
     region.value = null
     placeCaret(g.part, g.staff, g.beat, g.step)
-    insertAtCaret([{ step: g.step }])
+    insertAtCaret([{ step: g.step }],{barEnd:g.barEnd})
   } else if (!g.add) {
     selected.value = new Set()
     placeCaret(g.part, g.staff, g.beat, g.step)
@@ -3321,7 +3454,7 @@ watch(
           :style="{
             paddingTop: performance ? '0px' : `${paletteHeight + 16}px`,
           }"
-          @scroll.passive="updateViewport"
+          @scroll.passive="scrolled"
           @dblclick="inspectElement"
           @pointerdown="pointerDown"
           @pointermove="pointerMove"
@@ -3544,8 +3677,14 @@ watch(
               @keydown.stop
               @pointerdown.stop
             />
+            <ScoreGhostNote
+              v-if="ghost && ghost.note && !gesture && !phraseDrag"
+              v-bind="ghost.note"
+              data-entry-ghost
+              :style="{ left: `${ghost.left}px`, top: `${ghost.top}px` }"
+            />
             <span
-              v-if="ghost && !gesture && !phraseDrag"
+              v-else-if="ghost && !gesture && !phraseDrag"
               class="entry-ghost"
               :class="ghost.kind"
               :style="{ left: `${ghost.left}px`, top: `${ghost.top}px` }"

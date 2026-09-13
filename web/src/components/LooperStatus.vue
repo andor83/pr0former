@@ -12,8 +12,8 @@ async function clear(track:number){if(!props.projectId)return;busy.value=true;er
   <h3>Loop tracks</h3>
   <table><thead><tr><th>Track</th><th>Status</th><th>Length</th><th>Clear</th></tr></thead><tbody><tr v-for="track in 8" :key="track" :aria-label="`Loop track ${track}`"><th>{{track}}</th><td>{{state(track)}}<small v-if="active&&!stale&&value(track,'full')">Capacity reached</small></td><td>{{active&&!stale?`${value(track,'seconds').toFixed(2)} s`:'—'}}</td><td><button :aria-label="`Clear loop track ${track}`" :disabled="!editable||busy||!projectId" @click="clear(track)">Clear</button></td></tr></tbody></table>
   <p v-if="error" role="alert">{{error}}</p>
-  <p class="feature-note">Send track numbers 1–8; return the command input to 0 before repeating that track. Freeform starts immediately. Beat mode waits for the next bar of the running graph clock. Stops are immediate.</p>
-  <p class="feature-note">Stopping recording does not automatically play it. Start playback to loop the captured audio. Recording again replaces that track. Completed recordings are saved on this server per project and node. Disabling the engine finishes and saves ongoing recordings. Clear stops the track and deletes its saved audio. Saved tracks load ready to play when the engine starts.</p>
+  <HelpNote>Send track numbers 1–8; return the command input to 0 before repeating that track. Freeform starts immediately. Beat mode waits for the next bar of the running graph clock. Stops are immediate.</HelpNote>
+  <HelpNote>Stopping recording does not automatically play it. Start playback to loop the captured audio. Recording again replaces that track. Completed recordings are saved on this server per project and node. Disabling the engine finishes and saves ongoing recordings. Clear stops the track and deletes its saved audio. Saved tracks load ready to play when the engine starts.</HelpNote>
 </section>
 </template>
 <style scoped>

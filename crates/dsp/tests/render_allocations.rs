@@ -57,6 +57,9 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
     let mut graph = Graph {
         nodes: [
             ("keys", "piano"),
+            ("local", "local_midi_input"),
+            ("knobs", "knobs"),
+            ("sliders", "sliders"),
             ("fm", "fm_synth"),
             ("sample", "poly_sampler"),
             ("grains", "granular_synth"),
@@ -99,11 +102,15 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
         })
     };
     for target in ["fm", "sample", "grains"] {
+        wire("keys", "midi", target, "midi");
         for port in ["pitch", "velocity", "gate", "trigger", "note_off"] {
             wire("keys", port, target, port);
         }
     }
     for (s, sp, t, tp) in [
+        ("knobs", "midi", "sliders", "midi"),
+        ("local", "midi", "sliders", "midi"),
+        ("one", "out", "sliders", "slider_2"),
         ("grains", "out", "shift", "in"),
         ("fm", "out", "convolve", "a"),
         ("tone", "out", "convolve", "b"),
@@ -127,9 +134,27 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
         engine.piano_note("keys", pitch, 100);
     }
     let mut output = vec![[0.; 8]; 1024];
+    engine.controller("sliders", 0, None);
+    engine.controller("knobs", 0, Some(0.333));
     CALLS.set(0);
     CHECK.set(true);
-    for _ in 0..64 {
+    for index in 0..64 {
+        engine.node_midi_message(
+            "local",
+            pr0_core::midi::Message {
+                status: 0xb0,
+                data1: 1,
+                data2: index,
+            },
+        );
+        engine.node_midi_message(
+            "keys",
+            pr0_core::midi::Message {
+                status: 0xe0,
+                data1: 0,
+                data2: if index % 2 == 0 { 96 } else { 32 },
+            },
+        );
         engine.render(&[], &mut output);
     }
     CHECK.set(false);

@@ -9,6 +9,8 @@ pub struct MidiControls {
     gap: bool,
     releasing: bool,
     pub dropped: u64,
+    pub bend: f64,
+    pub bend_ratio: f64,
 }
 impl MidiControls {
     pub fn new() -> Self {
@@ -19,6 +21,8 @@ impl MidiControls {
             gap: false,
             releasing: false,
             dropped: 0,
+            bend: 0.,
+            bend_ratio: 1.,
         }
     }
     pub fn note(&mut self, pitch: u8, velocity: u8) {
@@ -41,10 +45,17 @@ impl MidiControls {
     }
     /// Decode fixed channel messages into the serializer. Note on/off become
     /// `note`; CC 120/123 on any channel releases; other CC values reach `cc`
-    /// only when `cc_controls`. Everything else is ignored. No allocation.
+    /// only when `cc_controls`. Pitch bend uses a two-semitone range; like the
+    /// note decoder, it merges channels. Everything else is ignored. No allocation.
     pub fn feed(&mut self, events: &[pr0_core::midi::Message], cc_controls: bool) {
         for event in events {
             match event.status >> 4 {
+                14 => {
+                    let value = u16::from(event.data1) | (u16::from(event.data2) << 7);
+                    self.bend =
+                        (f64::from(value) - 8192.) / if value < 8192 { 8192. } else { 8191. } * 2.;
+                    self.bend_ratio = 2_f64.powf(self.bend / 12.);
+                }
                 9 => self.note(event.data1, event.data2),
                 8 => self.note(event.data1, 0),
                 11 if cc_controls => self.cc(event.data1, event.data2),
@@ -56,6 +67,8 @@ impl MidiControls {
     /// Cancel unsent attacks and release every note already emitted, by pitch.
     pub fn release(&mut self) {
         self.queue.clear();
+        self.bend = 0.;
+        self.bend_ratio = 1.;
         self.releasing = true;
     }
     pub fn held(&self, pitch: usize) -> bool {

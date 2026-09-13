@@ -17,6 +17,18 @@ pub fn monotonic_ms() -> f64 {
     START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.
 }
 pub enum Command {
+    LocalMidi {
+        project: String,
+        node: String,
+        message: Option<pr0_core::midi::Message>,
+    },
+    Controller {
+        project: String,
+        node: String,
+        index: usize,
+        value: Option<f64>,
+        cancel: bool,
+    },
     Shutdown(oneshot::Sender<Result<(), String>>),
     Osc {
         project: String,
@@ -92,14 +104,14 @@ pub enum Command {
     Piano {
         project: String,
         node: String,
-        pitch: u8,
-        velocity: u8,
+        message: pr0_core::midi::Message,
     },
     Devices(oneshot::Sender<Value>),
     Hardware(bool),
     Clip {
         part: String,
         playing: bool,
+        repeat: bool,
     },
     Arm {
         parts: Vec<String>,
@@ -386,9 +398,17 @@ fn run(
                     testing = value;
                     test_sample = 0;
                 }
-                Command::Clip { part, playing } => {
+                Command::Clip {
+                    part,
+                    playing,
+                    repeat,
+                } => {
                     if let (Some(seq), Some(e)) = (&mut sequencer, &mut engine) {
-                        seq.launch(&part, playing, e, &io);
+                        if repeat {
+                            seq.launch_repeat(&part, playing, true, e, &io);
+                        } else {
+                            seq.launch(&part, playing, e, &io);
+                        }
                     }
                 }
                 Command::Arm { parts, armed } => {
@@ -721,15 +741,66 @@ fn run(
                         }
                     }
                 }
-                Command::Piano {
+                Command::LocalMidi {
                     project: id,
                     node,
-                    pitch,
-                    velocity,
+                    message,
+                } => {
+                    if project.as_ref().is_some_and(|p| {
+                        p.id == id
+                            && p.graph
+                                .nodes
+                                .iter()
+                                .any(|n| n.id == node && n.kind == "local_midi_input")
+                    }) {
+                        if let Some(e) = engine.as_mut() {
+                            if let Some(message) = message {
+                                e.node_midi_message(&node, message);
+                            } else {
+                                e.node_midi_reset(&node);
+                                for channel in 1..16 {
+                                    e.node_midi_message(
+                                        &node,
+                                        pr0_core::midi::Message {
+                                            status: 0xb0 | channel,
+                                            data1: 123,
+                                            data2: 0,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Command::Controller {
+                    project: id,
+                    node,
+                    index,
+                    value,
+                    cancel,
                 } => {
                     if project.as_ref().is_some_and(|p| p.id == id) {
                         if let Some(e) = engine.as_mut() {
-                            e.piano_note(&node, pitch, velocity);
+                            if cancel {
+                                e.cancel_controller_learn(&node, index);
+                            } else {
+                                e.controller(&node, index, value);
+                            }
+                        }
+                    }
+                }
+                Command::Piano {
+                    project: id,
+                    node,
+                    message,
+                } => {
+                    if project.as_ref().is_some_and(|p| p.id == id) {
+                        if let Some(e) = engine.as_mut() {
+                            if message.status == 0xe0 {
+                                e.node_midi_message(&node, message);
+                            } else {
+                                e.piano_note(&node, message.data1, message.data2);
+                            }
                         }
                     }
                 }
@@ -1516,6 +1587,23 @@ fn apply_transport(
     io: &SyncSender<crate::performance::External>,
 ) {
     match action {
+        "repeat" => {
+            if let Some(seq) = sequencer {
+                seq.repeat_autoplay();
+            }
+            if !engine.clock.running && count_in.is_none() {
+                // Resume directly; count only when starting from rewind.
+                *count_in = if engine.clock.beat == 0. {
+                    pr0_dsp::count_in::CountIn::new(beats, beat_unit)
+                } else {
+                    None
+                };
+                engine.clock.running = count_in.is_none();
+                if engine.clock.running {
+                    align_graph_clock(engine);
+                }
+            }
+        }
         "play" if !engine.clock.running && count_in.is_none() => {
             // Resume directly; count only when starting from rewind.
             *count_in = if engine.clock.beat == 0. {

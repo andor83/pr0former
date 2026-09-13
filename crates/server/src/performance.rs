@@ -537,6 +537,18 @@ impl Sequencer {
         io: &SyncSender<External>,
     ) -> Self {
         let mut next = Self::new(p);
+        let repeating: std::collections::BTreeSet<_> = self
+            .lanes
+            .iter()
+            .filter(|lane| lane.repeat_override)
+            .map(|lane| lane.id.clone())
+            .collect();
+        for lane in &mut next.lanes {
+            if repeating.contains(&lane.id) && !lane.looping {
+                lane.looping = true;
+                lane.repeat_override = true;
+            }
+        }
         let mut owner = self.lanes.iter().map(|l| l.owner).max().unwrap_or(0) + 1;
         for lane in &mut next.lanes {
             lane.owner = owner;
@@ -561,12 +573,14 @@ impl Sequencer {
                     && old.address == lane.address
             }) {
                 let old = self.lanes.remove(index);
+                let repeat_override = lane.repeat_override;
                 let nodes: std::collections::BTreeSet<_> =
                     old.routes.iter().filter_map(|r| r.node.as_ref()).collect();
                 for node in nodes {
                     prepared.carry_note_voices(previous, node, old.owner);
                 }
                 *lane = old;
+                lane.repeat_override = repeat_override;
             }
         }
         // Changed/deleted parts release only their own external notes. A global
@@ -614,6 +628,25 @@ impl Sequencer {
         io: &SyncSender<External>,
     ) {
         self.cue(&[id.to_string()], playing, false, 0, engine, io);
+    }
+    pub fn launch_repeat(
+        &mut self,
+        id: &str,
+        playing: bool,
+        repeat: bool,
+        engine: &mut pr0_dsp::Engine,
+        io: &SyncSender<External>,
+    ) {
+        self.cue(&[id.to_string()], playing, repeat, 0, engine, io);
+    }
+    /// Temporarily repeat autoplay lanes without changing the saved score setting.
+    pub fn repeat_autoplay(&mut self) {
+        for lane in &mut self.lanes {
+            if !lane.independent && !lane.looping {
+                lane.looping = true;
+                lane.repeat_override = true;
+            }
+        }
     }
     pub fn arm(&mut self, ids: &[String], armed: bool) {
         for lane in &mut self.lanes {
@@ -937,6 +970,9 @@ impl Sequencer {
             lane.playing = self.autoplay;
             lane.pending = None;
             lane.armed = false;
+            if lane.repeat_override {
+                lane.looping = false;
+            }
             lane.repeat_override = false;
             lane.count_in_start = None;
             lane.pending_repeat = false;
@@ -1982,6 +2018,55 @@ mod score_tests {
         seq.tick(&mut e, &tx);
         assert_eq!(e.clock.beat, 0.);
         assert!(seq.lanes[0].active[0].is_some());
+    }
+    #[test]
+    fn transport_repeat_is_temporary_and_preserves_saved_score_looping() {
+        let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Structured);
+        p.score = Some(Timeline {
+            barlines: vec![],
+            version: 1,
+            length: 8.,
+            loop_score: false,
+            meters: vec![],
+            keys: vec![],
+            repeats: vec![],
+            navigation: None,
+            tempos: vec![],
+        });
+        let mut seq = Sequencer::new(&p);
+        assert!(!seq.lanes[0].looping);
+        seq.repeat_autoplay();
+        assert!(seq.lanes[0].looping);
+        assert!(seq.lanes[0].repeat_override);
+
+        let mut previous = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let mut prepared = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        let (tx, _) = sync_channel(16);
+        let mut seq = seq.replace(&p, &mut previous, &mut prepared, &tx);
+        assert!(seq.lanes[0].looping);
+        assert!(seq.lanes[0].repeat_override);
+
+        let mut engine = pr0_dsp::Engine::prepare(p.graph.clone(), 48000.).unwrap();
+        seq.reset(&mut engine, &tx);
+        assert!(!seq.lanes[0].looping);
+        assert!(!seq.lanes[0].repeat_override);
+
+        p.score.as_mut().unwrap().loop_score = true;
+        let mut saved_loop = Sequencer::new(&p);
+        saved_loop.repeat_autoplay();
+        saved_loop.reset(&mut engine, &tx);
+        assert!(saved_loop.lanes[0].looping);
+        assert!(!saved_loop.lanes[0].repeat_override);
+
+        p.mode = pr0_core::Mode::Freeform;
+        p.score.as_mut().unwrap().loop_score = false;
+        let mut independent = Sequencer::new(&p);
+        independent.launch_repeat(&p.parts[0].id, true, true, &mut engine, &tx);
+        assert!(independent.lanes[0].looping);
+        assert!(independent.lanes[0].repeat_override);
+        independent.reset(&mut engine, &tx);
+        assert!(!independent.lanes[0].looping);
+        assert!(!independent.lanes[0].repeat_override);
     }
     #[test]
     fn independent_parts_keep_launch_state_and_expand_their_local_ranges() {

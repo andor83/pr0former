@@ -14,7 +14,7 @@ pr0former is a development alpha. Software validation does not establish physica
 | Conducted performance | One designated non-performing conductor; ordered animated set/tile editor; locked touch stage; next-pulse single and armed-group cues; one-shot or forced-repeat playback; timed per-performer successor queues; continuous synthesized performer notation/rest lane; part-local polymeter; targeted cue clicks; conductor-authoritative dynamics; MIDI Learn; and authenticated performer Web MIDI ingress. | Scheduler/core/frontend and focused Chromium coverage. Physical touch/MIDI/iPad, browser MIDI reconnect behavior, multi-client latency and performance-scale acceptance remain manual/unverified. |
 | Editing and saves | Project-owned score draft survives tab unmounts; flush waits for current and newer edits. Export, Save revision, project switching, performance entry and sign-out use the barrier. Failures retain the newest draft for explicit reapplication/discard. | Delayed/rejected save unit and browser regressions. Drafts are in browser memory, not offline durable storage. |
 | Dynamics and phrasing | Staff overrides preserve part defaults for other staves. Ramp conversion preserves authored holds and curve shapes. New hairpins own an identifiable dynamics event and retain any authored starting mark for restoration; gesture previews are transient, with one commit/undo on release. Moving/removing owned playback updates its wedge. | Value-level ramp and hairpin tests plus browser editing. Hairpins crossing existing ramps/interior points are rejected instead of overwriting them; older wedges without owned events remain independent notation. |
-| UI | Custom graph node theme, paper score, visible save/conflict status, keyboard-focusable ramp points, coarse-pointer touch targets and reduced-motion support. Save coordination, MIDI device lifetime and curve gesture transforms are separate modules. | Frontend tests/build and browser tests. Physical touch/Safari validation remains manual. |
+| UI | Custom graph node theme, paper score, visible save/conflict status, keyboard-focusable ramp points, coarse-pointer touch targets and reduced-motion support. The footer offers transient Play + Repeat and swaps Performance mode for End performance in place; the conducted cue deck scrolls vertically in short viewports. Save coordination, MIDI device lifetime and curve gesture transforms are separate modules. | Frontend tests/build and browser tests. Physical touch/Safari validation remains manual. |
 | Ensemble | Member browser with profile summaries, direct existing-user addition, invitation links and self-service square avatars. Owners can remove non-owners; assigned parts become unassigned in the same server transaction. | Rust crop/assignment tests and isolated HTTPS/API workflow. Role editing and the broader user profile editor remain future work. |
 | MIDI/OSC | System settings and receiving/sending paths exist. Every graph MIDI source (Part MIDI, MIDI input, OSC-to-MIDI, Piano) receives raw channel messages and derives its five scalar outlets from the same frame that its typed `midi` output forwards, so the two paths cannot disagree. MIDI input keeps the channel byte; OSC-to-MIDI and Piano use channel 1. Piano decodes typed input (keys light, outlets move) and republishes scalar-driven notes. MIDI inputs accept several cables, concatenated in connection order per sample. A MIDI output forwards a typed cable raw and decodes scalar cables, never both. | Engine tests cover each source→sink pair over typed cables, fan-in order, reset propagation, scalar override and the single-send contract; external delivery remains best effort and physical MIDI hardware is unverified. |
 | Deployment/assets | Local fonts/assets, native HTTP/HTTPS and desktop packaging, Bash 3.2-compatible launcher. | Existing launcher/desktop validation is historical evidence; startup services are never installed/enabled by automated tests. |
@@ -27,6 +27,154 @@ pr0former is a development alpha. Software validation does not establish physica
 - Worker telemetry now includes maximum observed work and block-start gap in microseconds. These software measurements include scheduling/configuration effects and are not a hardware latency or deadline guarantee.
 
 ## Validation
+
+Help and documentation center (2026-09-12): the authenticated gear menu now
+opens a two-column documentation modal with getting-started, first-project,
+performance-mode, interface, and server-catalog-backed node reference sections.
+Every node entry exposes its description, typed ports, parameters and aliases,
+with an on-demand illustrative compatible graph; the artwork is explicitly a
+mock and not a running-engine claim. The modal opens in a browser tab on request,
+and the desktop Help menu creates a dedicated webview window at the same server
+origin. Frontend tests passed 97 cases, the production build passed with the
+existing large-chunk warning, all 7 desktop Rust tests passed, and the focused
+Chromium workspace case passed through the modal, navigation, node search,
+example graph and browser pop-out. The native Help menu/window was compiled and
+URL-tested but not manually exercised in a packaged Tauri app.
+
+MIDI debugging and knob unassignment (2026-09-12): MIDI input options now decode
+CC, pitch bend, program change, channel/poly pressure and notes, with raw bytes,
+received/drop counts and up to 64 locally observed messages. History samples the
+existing 20 Hz telemetry after channel filtering; it is not a complete event log.
+Nodes show only an activity light and a last-message tooltip. Double-clicking a
+knob clears its channel binding; unassigned knobs are dimmed and reject value
+changes in both the server API and DSP. Clicking starts MIDI Learn; the modal's
+channel selector also restores a binding. Existing bindings remain unchanged.
+The workspace Rust suite passed 234 tests (one opt-in ignored); frontend tests
+passed 97 cases and the production build passed with the existing chunk warning.
+Three focused Chromium cases passed, including debug decoding, activity flashing,
+history clearing without revisions, unassignment, blocked values and both manual
+and MIDI Learn reassignment. MIDI devices were simulated; physical Twister and
+Tauri/WebKit hardware behavior remain manual/unverified.
+
+Local MIDI / MIDI Learn correction (2026-09-12): added a Local MIDI Input node
+with session-local Web MIDI selection, explicit connect/disconnect and authenticated
+server ingress. Corrected native MIDI input's Notes-mode filter, which previously
+dropped ordinary CC messages before they could reach Knobs. Typed MIDI now forwards
+all channel-message types while scalar decoding retains its selected mode. New
+server MIDI inputs default to all channels; existing explicit filters are preserved.
+Both MIDI input kinds expose transient message count and last-message telemetry. Escape, clicking
+away, or control cleanup cancels MIDI Learn without changing its assignment.
+The workspace Rust suite passed 231 tests (one opt-in ignored), including native
+packet/routing and learn-cancel tests; render allocation guards include local MIDI.
+Frontend tests passed 92 cases and the production build passed with the existing
+large-chunk warning. Four focused Chromium cases passed, including a simulated
+Twister → real WebSocket/server → Knobs flow, assignment persistence, cancellation
+without revisions, exclusive input ownership, program messages and unplug note
+release. The physical MIDI Fighter Twister was not exercised. Physical Web MIDI,
+Tauri/WebKit MIDI availability, and network-overload timing remain unverified.
+
+
+Local audio input / desktop connections (2026-09-12): renamed the catalog title and
+capture/device UI; retained the persisted `browser_input` kind. The native Server
+menu offers Connect to Server and Bundled Engine. A restricted packaged dialog
+validates HTTP(S) base addresses, then opens a separate private remote session.
+Local automatic login is not forwarded. Core tests (18), desktop URL/origin tests
+(2), frontend tests (90), the frontend build and desktop debug build pass. Four
+focused Chromium cases pass, including the generated-audio WebRTC input regression.
+An isolated macOS native smoke check exercised the menu, shortcut, invalid-address
+feedback, connection to a second server, login isolation even at the bundled
+server's exact origin, and return to the bundled admin window. No production server
+was restarted. Physical audio/MIDI capture, remote HTTPS certificate/device prompts
+and Linux native webviews remain manual/unverified.
+
+
+Desktop LAN hosting and windows (2026-09-12): the Mac Server menu now discovers
+compatible LAN servers via embedded mDNS/DNS-SD and offers opt-in HTTPS hosting
+of the bundled engine. Hosting creates a persistent profile-local CA and supplies
+an iPad certificate profile/setup address. Normal invited accounts and project
+roles apply; the private desktop admin session is rejected on the LAN listener.
+Stopping hosting leaves the private engine available. A future iPad Tauri app is
+client-only; no iPad binary or server sidecar for iOS is implemented.
+
+The Mac connection dialog surfaces failed navigation and supports explicit
+per-origin leaf-certificate pins without changing Keychain trust. Certificate
+changes require another approval. Window → New Window for This Performance and
+Tile Windows support multiple views, with count/view/size/position restored per
+performance (up to eight); layouts are outside project revisions.
+
+Verification: 7 desktop Rust tests, 3 server discovery/certificate tests, 97 frontend
+unit tests, production frontend build, the desktop Chromium integration case,
+2 real desktop process tests, and 9 build-script tests passed. The process tests
+validate generated TLS chains with normal certificate checking, public CA/profile
+consistency, invited-client project access, Secure cookies, desktop-session
+rejection on LAN, setup HTTP isolation, CA reuse, stop/restart, and recording
+finalization on exit. An isolated native macOS app verified LAN discovery and
+HTTP remote login isolation, duplicate/tiled windows and restoration after relaunch,
+the certificate prompt, a matching test pin loading HTTPS and secure WebSockets,
+and a changed test certificate requiring renewed approval. The host dialog started
+an isolated HTTPS listener successfully. No production server was restarted.
+
+`./build.sh --notarize` built, signed, notarized and stapled the updated arm64 app;
+Apple submission `3866ebd1-7b66-41d4-a334-ebe33019d473` was Accepted. Signature,
+stapler and Gatekeeper checks passed, and the ignored project-root
+`pr0former.app` was refreshed. The previously built DMG is not this new build.
+Physical iPad profile installation, Wi-Fi performance, microphone/WebRTC media,
+physical audio/MIDI, and Linux native trust/windows remain manual/unverified.
+The native HTTPS/WebSocket check used a disposable fixture and a seeded test pin;
+it did not modify system certificate trust or trust the production server.
+
+
+Piano drag gestures (2026-09-12): vertical pointer movement emits transient MIDI
+pitch bend; horizontal movement across white/black keys releases the previous note
+before attacking the next. Pointer release/cancel, focus loss, and component cleanup
+release notes and recenter bend. Use typed MIDI cables for bend; internal instruments
+use ±2 semitones, while external receivers choose their range. The five scalar note
+outlets retain integer note identity. Internal MIDI channels share bend, and granular
+updates affect newly launched grains. Unsent bend movements coalesce between note
+boundaries; gestures do not create project revisions.
+`cargo test --workspace --quiet` passed 229 tests (one opt-in ignored), including
+synth/FM phase and MIDI forwarding regression. The allocation guard also passes with
+repeated bends through synth/sampler/granular typed MIDI inputs. Frontend tests passed
+90 cases and the build passed with the existing large-chunk warning. Four focused
+Chromium cases passed across the piano, piano-drag and FM-synth files, covering real
+server telemetry, glissando ordering, bend limits/reset, focus loss, API validation,
+existing multi-touch notes and independent note releases. Hardware MIDI/audio and
+physical touch devices remain manual/unverified.
+
+
+macOS signing setup (2026-09-12): `scripts/build-macos-signed.sh --sign-only`
+built the current Apple Silicon desktop app with the installed Developer ID
+Application identity and hardened runtime. Deep/strict codesign verification
+passed for the sealed bundle and helpers. The native app opened to the signed-in
+project browser. The production frontend/release builds and
+`python3 tests/test_desktop.py` passed; wrapper Bash syntax/help and invalid-option
+checks passed. After credentials were saved, `build.sh --notarize-only` passed
+Apple notarization, stapler validation, and Gatekeeper assessment (`Notarized
+Developer ID`). The full `build.sh --notarize --bundles dmg` workflow also
+passed: both the app and arm64 DMG were accepted by Apple, stapled, and accepted
+by Gatekeeper. `build.sh` now asks about signing/notarization in an interactive
+macOS terminal; explicit flags support SSH/CI. Nine isolated build/PTY/key-selection
+tests pass without changing real Keychains or services. SSH login to this Mac was
+verified; its remote Keychain was locked, so full SSH signing/notarization remains
+unverified pending the user's secure `--unlock-keychain` password entry. The setup
+helper's real signing-key access update has not been run. Physical audio/MIDI and
+permission prompts were not tested in this check.
+
+Current additions (2026-09-12): Knobs/Sliders support variable control counts,
+CC channel/controller assignments, pass-through, GUI gestures and MIDI Learn;
+Sliders add range, step, decimals and orientation. A direct connection action in
+the Local audio input modal starts capture. A generated mono audio stream traversed
+the real Chromium WebRTC/Opus uplink and produced graph audio in the focused
+browser regression; physical microphone/device selection remains manual.
+Score click entry inserts adjacent to existing notes, shifts later chord groups
+through available gaps, and rejects bar overflow atomically. Frontend unit tests
+and focused score/save/browser regressions cover these changes. Live control
+values are transient; MIDI Learn persists the assignment, not telemetry.
+The production build passes with the existing large-chunk warning. The focused
+14-case Chromium run set covers controllers/uplink, score insertion, entry tools,
+score workspace and save coordination. DSP allocation guards include both new
+controller nodes. Hardware MIDI, physical microphone capture and touch devices
+were not exercised.
 
 Stabilization validation (2026-09-10):
 
@@ -48,7 +196,7 @@ Stabilization validation (2026-09-10):
   handle at the start of the release ramp) and a `note_off` ADSR input so
   trigger/note-off pulse sources attack and release; the Meter node draws
   per-channel dBFS meters on the canvas and exposes one Level control output
-  per channel; the footer monitor
+  per channel; explanations collapse to info icons with the `i` key; the footer monitor
   button is a VU meter of the received browser stream; the output node modal
   shows its interface above the channel selector. `cargo test --workspace`
   passed **215 tests** (one opt-in ignored); `npm --prefix web test` passed

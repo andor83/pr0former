@@ -3,7 +3,10 @@ mod audio;
 mod bind;
 mod build_info;
 mod desktop;
+mod discovery;
+mod hosting;
 mod hardware_meter;
+mod local_midi;
 mod loops;
 mod media;
 mod monitor_packets;
@@ -1008,8 +1011,71 @@ async fn audition(
 #[derive(Deserialize)]
 struct PianoNote {
     node: String,
-    pitch: u8,
-    velocity: u8,
+    pitch: Option<u8>,
+    velocity: Option<u8>,
+    bend: Option<u16>,
+}
+#[derive(Deserialize)]
+struct ControllerEdit {
+    #[serde(default)]
+    cancel: bool,
+    node: String,
+    index: usize,
+    value: Option<f64>,
+}
+async fn controller_edit(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(edit): Json<ControllerEdit>,
+) -> Api<Json<Value>> {
+    csrf(&headers)?;
+    let u = user(&app, &headers)?;
+    can_edit(&role(&app, &id, &u)?)?;
+    let _guard = app.setup.lock().await;
+    let p = load(&app, &id)?;
+    let node = p
+        .graph
+        .nodes
+        .iter()
+        .find(|n| n.id == edit.node && matches!(n.kind.as_str(), "knobs" | "sliders"))
+        .ok_or_else(|| bad("Controller node missing"))?;
+    if edit.index >= node.parameters.get("count").copied().unwrap_or(4.) as usize
+        || edit.value.is_some_and(|v| !v.is_finite())
+    {
+        return Err(bad("Invalid controller value or index"));
+    }
+    if !edit.cancel
+        && edit.value.is_some()
+        && node.parameters.get(&format!("channel_{}", edit.index + 1)) == Some(&0.)
+    {
+        return Err(bad(
+            "Assign this knob to a MIDI channel before changing its value",
+        ));
+    }
+    if !edit.cancel
+        && node.kind == "sliders"
+        && p.graph
+            .edges
+            .iter()
+            .any(|e| e.target == edit.node && e.target_port == format!("slider_{}", edit.index + 1))
+    {
+        return Err(bad("Connected slider is read-only"));
+    }
+    if app.graph.lock().unwrap().as_deref() != Some(&id) {
+        return Err(bad("Enable this project's audio engine first"));
+    }
+    send(
+        &app,
+        audio::Command::Controller {
+            project: id,
+            node: edit.node,
+            index: edit.index,
+            value: edit.value,
+            cancel: edit.cancel,
+        },
+    )?;
+    Ok(Json(json!({"ok":true})))
 }
 async fn piano_note(
     State(app): State<App>,
@@ -1022,15 +1088,24 @@ async fn piano_note(
     can_edit(&role(&app, &id, &u)?)?;
     let _guard = app.setup.lock().await;
     let p = load(&app, &id)?;
-    if note.pitch > 127 || note.velocity > 127 {
-        return Err(bad("Invalid MIDI note"));
-    }
-    if !p
-        .graph
-        .nodes
-        .iter()
-        .any(|n| n.id == note.node && matches!(n.kind.as_str(), "piano" | "drum_pads"))
-    {
+    let message = match (note.pitch, note.velocity, note.bend) {
+        (Some(pitch), Some(velocity), None) if pitch <= 127 && velocity <= 127 => {
+            pr0_core::midi::Message {
+                status: if velocity == 0 { 0x80 } else { 0x90 },
+                data1: pitch,
+                data2: velocity,
+            }
+        }
+        (None, None, Some(bend)) if bend <= 16383 => pr0_core::midi::Message {
+            status: 0xe0,
+            data1: (bend & 127) as u8,
+            data2: (bend >> 7) as u8,
+        },
+        _ => return Err(bad("Invalid MIDI note or pitch bend")),
+    };
+    if !p.graph.nodes.iter().any(|n| {
+        n.id == note.node && (n.kind == "piano" || (n.kind == "drum_pads" && note.bend.is_none()))
+    }) {
         return Err(bad("Piano or drum pad node missing"));
     }
     if app.graph.lock().unwrap().as_deref() != Some(&id) {
@@ -1043,8 +1118,7 @@ async fn piano_note(
         audio::Command::Piano {
             project: id.clone(),
             node: note.node,
-            pitch: note.pitch,
-            velocity: note.velocity,
+            message,
         },
     )?;
     Ok(Json(serde_json::json!({"ok":true})))
@@ -1154,7 +1228,7 @@ async fn transport(
         let _ = app.events.send(engine_status(&app));
         return Ok(Json(json!({"ok":true})));
     }
-    if c.action == "play"
+    if matches!(c.action.as_str(), "play" | "repeat")
         && app.graph.lock().unwrap().as_deref() == Some(&id)
         && app.active.lock().unwrap().as_deref() != Some(&id)
     {
@@ -1202,7 +1276,7 @@ async fn transport(
                 }
                 send(&app, audio::Command::Seek(beat))?;
             }
-            "play" | "pause" | "stop" => send(
+            "play" | "repeat" | "pause" | "stop" => send(
                 &app,
                 audio::Command::Transport {
                     action: c.action,
@@ -1239,6 +1313,8 @@ async fn transport(
 struct ClipAction {
     part: String,
     playing: bool,
+    #[serde(default)]
+    repeat: bool,
 }
 async fn clip(
     State(app): State<App>,
@@ -1275,6 +1351,7 @@ async fn clip(
         audio::Command::Clip {
             part: c.part,
             playing: c.playing,
+            repeat: c.playing && c.repeat,
         },
     )?;
     Ok(Json(json!({"ok":true})))
@@ -2087,12 +2164,17 @@ async fn send_project_snapshot(socket: &mut WebSocket, app: &App, id: &str, u: &
 
 fn browser_midi_message(value: &Value) -> Option<pr0_core::midi::Message> {
     let data = value.get("data")?.as_array()?;
-    if data.len() != 3 {
+    let status = u8::try_from(data.first()?.as_u64()?).ok()?;
+    let short = matches!(status >> 4, 12 | 13);
+    if data.len() != 3 && !(short && data.len() == 2) {
         return None;
     }
-    let status = u8::try_from(data[0].as_u64()?).ok()?;
     let data1 = u8::try_from(data[1].as_u64()?).ok()?;
-    let data2 = u8::try_from(data[2].as_u64()?).ok()?;
+    let data2 = if data.len() == 2 {
+        0
+    } else {
+        u8::try_from(data[2].as_u64()?).ok()?
+    };
     ((0x80..=0xef).contains(&status) && data1 <= 127 && data2 <= 127).then_some(
         pr0_core::midi::Message {
             status,
@@ -2137,6 +2219,12 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
     let mut check = tokio::time::interval(Duration::from_secs(10));
     let mut last_received = tokio::time::Instant::now();
     let visualization_session = Uuid::new_v4().to_string();
+    let mut local_midi = local_midi::Session::new(
+        app.clone(),
+        id.clone(),
+        u.clone(),
+        visualization_session.clone(),
+    );
     let mut visualizers = false;
     let mut midi_window = tokio::time::Instant::now();
     let mut midi_messages = 0_u16;
@@ -2150,7 +2238,7 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                 let v=&event.value;
                 if v["type"]=="session_revoked" && v["user_id"]==u {let _=socket_text(&mut socket,event.text.to_string()).await;break;}
                 let mine=v.get("project_id").and_then(Value::as_str)==Some(&id);
-                if mine && (v["type"]=="project" || v["type"]=="members_changed") {performer=None;}
+                if mine && (v["type"]=="project" || v["type"]=="members_changed") {performer=None;local_midi.invalidate();}
                 // Serialized once by the producer; non-subscribers take the variant without visualizations.
                 let text=if visualizers {&event.text} else {event.stripped.as_ref().unwrap_or(&event.text)};
                 if (v["type"]=="hardware_levels" || v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || mine)&&socket_text(&mut socket, text.to_string()).await.is_err(){break;}
@@ -2166,6 +2254,13 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                         if v["type"]=="ping"{
                             if visualizers{let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:true});}
                             let _=socket_text(&mut socket, json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string()).await;
+                        }
+                        if matches!(v["type"].as_str(), Some("local_midi" | "local_midi_connect" | "local_midi_reset")) {
+                            let result = local_midi.handle(&v);
+                            if v["type"] != "local_midi" || result.is_err() {
+                                let (connected, error) = match result { Ok(connected) => (connected, None), Err(error) => (false, Some(error)) };
+                                let _ = socket_text(&mut socket,json!({"type":"local_midi_status","node":v["node"],"connected":connected,"error":error}).to_string()).await;
+                            }
                         }
                         if v["type"]=="performance_midi"{
                             if midi_window.elapsed() >= Duration::from_secs(1) { midi_window=tokio::time::Instant::now();midi_messages=0; }
@@ -2202,7 +2297,7 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                 Some(Ok(_))=>{last_received=tokio::time::Instant::now();}
             },
             _=check.tick()=>{
-                performer=None;
+                performer=None;local_midi.invalidate();
                 if user(&app,&headers).is_err() || role(&app,&id,&u).is_err() || last_received.elapsed() >= Duration::from_secs(30) {break;}
                 if tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Ping(Vec::new().into()))).await.map_or(true, |r| r.is_err()) {break;}
             }
@@ -2349,6 +2444,7 @@ async fn main() {
         .route("/api/projects/{id}/preview", get(preview))
         .route("/api/projects/{id}/control", put(control_input))
         .route("/api/projects/{id}/piano", put(piano_note))
+        .route("/api/projects/{id}/controller", put(controller_edit))
         .route("/api/projects/{id}/audition", post(audition))
         .route("/api/projects/{id}/loops/clear", put(clear_loop))
         .route("/api/subgraphs", get(subgraphs::list))
@@ -2498,6 +2594,7 @@ async fn main() {
         .expect("HTTP redirect address");
         let listener = tokio::net::TcpListener::bind(&http_address).await.expect("Bind HTTP redirect listener (ports 80/443 may require OS permission; use PR0_HTTP_PORT/PR0_PORT for alternate ports)");
         println!("HTTP redirect listening on http://{http_address}");
+        let _discovery = discovery::advertise(socket, true);
         tokio::try_join!(
             axum_server::bind_rustls(socket, tls).serve(router.into_make_service()),
             async { axum::serve(listener, tls::redirects(socket.port())).await }
@@ -2505,6 +2602,7 @@ async fn main() {
         .expect("Serve HTTPS and HTTP redirect");
     } else {
         let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        let _discovery = discovery::advertise(listener.local_addr().unwrap(), false);
         axum::serve(listener, router).await.unwrap();
     }
 }

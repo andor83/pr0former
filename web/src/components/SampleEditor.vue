@@ -47,9 +47,9 @@ onBeforeUnmount(()=>{controller.abort();audio.value?.pause();if(context)void con
   <label>Description<textarea v-model="draft.description" maxlength="4096" :disabled="!sample.can_edit||busy"></textarea></label>
   <div class="sample-musical"><label>BPM<input v-model.number="draft.bpm" type="number" min="1" max="400" :disabled="!sample.can_edit||busy" @change="draft.bpm=draft.bpm||null"></label><label>Musical key<input v-model="draft.musical_key" maxlength="64" placeholder="C minor" :disabled="!sample.can_edit||busy"></label></div>
   <label>Root pitch<select aria-label="Root pitch" :value="draft.root_note??''" :disabled="!sample.can_edit||busy" @change="draft.root_note=($event.target as HTMLSelectElement).value===''?null:Number(($event.target as HTMLSelectElement).value)"><option value="">Not set</option><option v-for="note in 128" :key="note-1" :value="note-1">{{midiNoteLabel(note-1)}}</option></select></label>
-  <p class="feature-note">Sets the root MIDI note when this sample is assigned to a pitched sampler. Existing sampler settings and connected root-note controls are preserved.</p>
+  <HelpNote>Sets the root MIDI note when this sample is assigned to a pitched sampler. Existing sampler settings and connected root-note controls are preserved.</HelpNote>
   <label class="check-label"><input v-model="draft.global" type="checkbox" :disabled="!sample.can_publish||busy">Global — available to every user and project</label>
-  <p class="feature-note">Project members can access samples already added to their project. Turning Global off hides the sample from future browsing; existing project copies remain available. Once shared globally, deletion requires an administrator, even after unsharing.</p>
+  <HelpNote>Project members can access samples already added to their project. Turning Global off hides the sample from future browsing; existing project copies remain available. Once shared globally, deletion requires an administrator, even after unsharing.</HelpNote>
   <p v-if="error" class="field-error" role="alert">{{error}}</p>
 </div>
 <footer class="modal-footer"><button class="button primary" :disabled="!sample.can_edit||busy||!draft.name.trim()" @click="save">Save metadata</button></footer>

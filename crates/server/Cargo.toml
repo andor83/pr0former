@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+sha2 = "0.10"
 pr0-core.workspace = true
 pr0-dsp.workspace = true
 serde.workspace = true
@@ -31,3 +32,8 @@ if-addrs = "0.15"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 libc = "0.2"
+mdns-sd = "0.21"
+hostname = "0.4"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+time = "0.3"
+base64 = "0.22"

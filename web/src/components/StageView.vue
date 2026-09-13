@@ -8,7 +8,7 @@ import { buildConductedLane, type ConductedLaneHistory } from '../conductedLane'
 const focusedId = ref('')
 const ScoreWorkspace = defineAsyncComponent(() => import('./ScoreWorkspace.vue'))
 const props = defineProps<{ project: Project; position:{bar:number;beat:number;beats:number}; userId:string; beats:Record<string,number>; part?: Part; playback?:PartPlayback; playbackAll?:PartPlayback[]; globalBeat?:number; beat: number; meterBeat: number; bpm: number; active: boolean; stale: boolean; running: boolean; status: string; canLaunch: boolean; monitorOpen: boolean }>()
-const emit = defineEmits<{ select: [id: string]; launch: [playing: boolean]; exit: []; fullscreen: []; monitor: []; midi: [message:Record<string,unknown>] }>()
+const emit = defineEmits<{ select: [id: string]; launch: [playing: boolean]; fullscreen: []; monitor: []; midi: [message:Record<string,unknown>] }>()
 
 const writtenDynamic = computed(() => {
   const part = props.part
@@ -69,7 +69,7 @@ onBeforeUnmount(() => {
 </script>
 <template>
   <main class="stage-view" aria-label="Performance stage">
-    <header class="stage-header"><div><div class="eyebrow">{{ project.mode }} PERFORMANCE</div><h1>{{ project.name }}</h1></div><div class="stage-buttons"><button v-if="project.mode!=='structured'" class="button" @click="enableMidi">{{midiStatus}}</button><button class="button" :aria-expanded="monitorOpen" @click="$emit('monitor')">Monitor controls</button><button class="button" @click="$emit('fullscreen')">Fullscreen</button><button class="button" @click="$emit('exit')">Exit performance mode</button></div></header>
+    <header class="stage-header"><div><div class="eyebrow">{{ project.mode }} PERFORMANCE</div><h1>{{ project.name }}</h1></div><div class="stage-buttons"><button v-if="project.mode!=='structured'" class="button" @click="enableMidi">{{midiStatus}}</button><button class="button" :aria-expanded="monitorOpen" @click="$emit('monitor')">Monitor controls</button><button class="button" @click="$emit('fullscreen')">Fullscreen</button></div></header>
     <div class="stage-clock" :class="{ unavailable: active && stale }"><div><span>SHARED BAR · BEAT</span><output aria-label="Stage position">{{ position.bar }} : {{ position.beat }}</output></div><div><span>♩ BPM</span><strong>{{ bpm }}</strong></div><p role="status">{{ !active ? 'Waiting for show activation' : stale ? 'Timing unavailable — score held' : running ? 'Transport playing' : 'Transport stopped / paused' }}</p></div>
     <div class="stage-part"><output aria-label="Stage part status" aria-live="polite">{{ status }}</output><div v-if="project.mode !== 'structured' && canLaunch && part && focusedId===part.id" class="stage-buttons"><button class="button primary" aria-label="Launch part" :disabled="!active || stale" @click="$emit('launch', true)">Launch {{part.name}}</button><button class="button" aria-label="Stop part" :disabled="!active || stale" @click="$emit('launch', false)">Stop {{part.name}}</button></div></div>
     <div class="performer-score" :class="{ 'notes-arriving': arriving }">

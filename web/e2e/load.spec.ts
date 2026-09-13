@@ -100,7 +100,7 @@ test('32 independent performers receive dedicated WebRTC monitors', async ({ bro
         await page.getByLabel('Monitor feed', { exact: true }).selectOption(`monitor-${index}`)
         if (uplink) {
           await page.getByLabel('Send microphone to the graph', { exact: true }).check()
-          await page.getByLabel('Browser input node', { exact: true }).selectOption(`synth-${index}`)
+          await page.getByLabel('Local audio input node', { exact: true }).selectOption(`synth-${index}`)
         }
         await page.getByRole('button', { name: 'Connect monitor', exact: true }).click()
         await expect.poll(async () => {
