@@ -30,7 +30,7 @@ pr0former is a development alpha. Software validation does not establish physica
 
 Local input controls, profiles and branding (2026-09-12): Local audio input defaults
 unmuted and automatically starts its authorized microphone uplink when the engine
-is enabled. The orange dome microphone button on the node toggles graph mute;
+is enabled. The flat, orange-accented microphone button on the node toggles graph mute;
 a Mute control input overrides it. Shared monitor/source labels identify the user
 and machine, with native hostnames or an editable browser device name. Metadata is
 session-only. The existing single uplink per project/user limit remains; duplicate
