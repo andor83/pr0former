@@ -25,11 +25,19 @@ if [[ ! -f "$source_dir/.pr0-built-v1" ]]; then
   tar -xf "$archive" -C "$build_root"
   (
     cd "$source_dir"
-    ./configure --disable-autodetect --disable-gpl --disable-nonfree --disable-version3 \
-      --disable-shared --enable-static --disable-doc --disable-debug --disable-ffplay --disable-ffprobe \
-      --disable-network --disable-x86asm --disable-encoders --enable-encoder=pcm_f32le \
-      --disable-muxers --enable-muxer=wav --disable-devices > pr0-configure.log 2>&1
-    make -j "$jobs" ffmpeg > pr0-build.log 2>&1
+    if ! ./configure --disable-autodetect --disable-gpl --disable-nonfree --disable-version3 \
+        --disable-shared --enable-static --disable-doc --disable-debug --disable-ffplay --disable-ffprobe \
+        --disable-network --disable-x86asm --disable-encoders --enable-encoder=pcm_f32le \
+        --disable-muxers --enable-muxer=wav --disable-devices > pr0-configure.log 2>&1; then
+      echo 'FFmpeg configuration failed; last 200 log lines:' >&2
+      tail -n 200 pr0-configure.log >&2
+      exit 1
+    fi
+    if ! make -j "$jobs" ffmpeg > pr0-build.log 2>&1; then
+      echo 'FFmpeg compilation failed; last 200 log lines:' >&2
+      tail -n 200 pr0-build.log >&2
+      exit 1
+    fi
     touch .pr0-built-v1
   )
 fi
