@@ -28,7 +28,8 @@ test('local audio input connects automatically, publishes identity and mutes wit
   const status=await(await page.request.get('/api/status')).json()
   await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
   let p=await(await page.request.post('/api/projects',{headers,data:{name:'Browser uplink regression',mode:'freeform'}})).json()
-  const partTemplate=p.parts[0]
+  const owner=(await(await page.request.get('/api/me')).json()).id
+  p.local_audio_assignments={mic:owner}
   p.parts=[];p.graph={nodes:[{id:'mic',kind:'browser_input',label:'Local audio input',x:0,y:0,channels:2,parameters:{}},{id:'out',kind:'output',label:'Output',x:300,y:0,channels:2,parameters:{}}],edges:[{id:'audio',source:'mic',source_port:'out',target:'out',target_port:'in'}]}
   const saved=await page.request.put(`/api/projects/${p.id}`,{headers,data:p});expect(saved.ok()).toBeTruthy();p=await saved.json()
   await page.addInitScript(()=>{
@@ -46,6 +47,7 @@ test('local audio input connects automatically, publishes identity and mutes wit
   page.on('websocket',s=>s.on('framereceived',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='telemetry'){latestPeak=m.values?.mic?._peak??0;peak=Math.max(peak,latestPeak)}}))
   await page.goto('/');await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()
   await expect.poll(()=>peak,{timeout:20000}).toBeGreaterThan(0.01)
+  await expect(page.locator('.mic-button')).not.toHaveClass(/offline/)
   await page.screenshot({path:'test-results/local-audio-node.png'})
   const inputs=await(await page.request.get(`/api/projects/${p.id}/media`)).json();expect(inputs[0].user_name).toBe('browser-test');expect(inputs[0].machine_name).toBeTruthy()
   const guestName=`listener-${Date.now()}`
@@ -61,12 +63,15 @@ test('local audio input connects automatically, publishes identity and mutes wit
     expect((await(await guest.request.get(`/api/projects/${p.id}/media`)).json())[0].machine_name).toBe(inputs[0].machine_name)
     await remote.close()
     let assigned=(await(await page.request.get(`/api/projects/${p.id}`)).json()).project
-    assigned.parts=[{...partTemplate,performer:me.id,instrument_node:'mic',notes:[]}]
+    assigned.local_audio_assignments={mic:me.id}
     const assignment=await page.request.put(`/api/projects/${p.id}`,{headers,data:assigned});expect(assignment.ok(),await assignment.text()).toBeTruthy();assigned=await assignment.json()
     expect((await guest.request.put(`/api/projects/${p.id}/parameter`,{headers,data:{node:'out',parameter:'gain',value:-20,revision:assigned.revision}})).status()).toBe(403)
     for(const value of [1,0]){const response=await guest.request.put(`/api/projects/${p.id}/parameter`,{headers,data:{node:'mic',parameter:'mute',value,revision:assigned.revision}});expect(response.ok(),await response.text()).toBeTruthy();assigned=await response.json()}
 
+    const restored=(await(await page.request.get(`/api/projects/${p.id}`)).json()).project;restored.local_audio_assignments={mic:owner};expect((await page.request.put(`/api/projects/${p.id}`,{headers,data:restored})).ok()).toBeTruthy()
   } finally {await guest.close()}
+  await expect.poll(async()=>{const sources=await(await page.request.get(`/api/projects/${p.id}/media`)).json();return sources.some((s:any)=>s.user_name==='browser-test'&&s.sending)}).toBeTruthy()
+  await expect.poll(()=>latestPeak).toBeGreaterThan(.01)
   await page.getByRole('button',{name:'Mute local audio input',exact:true}).click()
   await expect.poll(()=>latestPeak).toBe(0)
   await expect(page.getByRole('button',{name:'Unmute local audio input',exact:true})).toHaveAttribute('aria-pressed','true')
@@ -77,5 +82,7 @@ test('local audio input connects automatically, publishes identity and mutes wit
   await expect(page.getByRole('region',{name:'Connected local audio inputs'})).toContainText('browser-test')
   await page.screenshot({path:'test-results/local-audio-input.png'})
   await page.getByRole('button',{name:'Disconnect',exact:true}).click()
+  await page.getByRole('button',{name:'Signal Graph',exact:true}).click()
+  await expect(page.locator('.mic-button')).toHaveClass(/offline/)
   await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
 })

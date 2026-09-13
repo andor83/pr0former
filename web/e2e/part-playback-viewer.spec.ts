@@ -1,0 +1,38 @@
+import {test,expect} from '@playwright/test'
+test('Part player opens all staves in a read-only notation/piano-roll viewer with its own playhead',async({page})=>{
+ const headers={'X-Pr0former':'1'},status=await(await page.request.get('/api/status')).json()
+ await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
+ const p=await(await page.request.post('/api/projects',{headers,data:{name:'Part viewer',mode:'structured'}})).json(),url=`/api/projects/${p.id}`
+ const staff=(id:string,name:string,clef:string)=>({id,name,clef,transpose:0,key_signature:null})
+ const note=(id:string,pitch:number,staff:string,step:number)=>({id,pitch,beat:0,duration:2,velocity:90,rest:false,tied:false,notation:{staff,step,alter:0,voice:1,base:2,dots:0,tuplet_actual:1,tuplet_normal:1}})
+ p.mode='freeform';p.score=null;p.parts=[{...p.parts[0],id:'duet',name:'Duet',view:'notation',loop_beats:4,instrument_node:null,staves:[staff('upper','Upper staff','treble'),staff('lower','Lower staff','bass')],notes:[note('high',60,'upper',28),note('low',48,'lower',21)]}]
+ const node=(id:string,kind:string,x:number)=>({id,kind,label:id,x,y:0,channels:2,parameters:{}})
+ p.graph={nodes:[node('Repeat','trigger',0),{...node('Player','part_player',250),part_id:'duet'}],edges:[{id:'go',source:'Repeat',source_port:'out',target:'Player',target_port:'repeat'}]}
+ const saved=await page.request.put(url,{headers,data:p});expect(saved.ok(),await saved.text()).toBe(true)
+ const read=async()=>(await(await page.request.get(url)).json()).project
+ await page.addInitScript(()=>localStorage.setItem('pr0former.help','hidden'))
+ await page.goto('/');await page.getByRole('button',{name:'Enable audio engine',exact:true}).click();await page.getByRole('button',{name:'Trigger Repeat',exact:true}).click()
+ const button=page.getByRole('button',{name:'View playback of Duet',exact:true});await button.click()
+ const modal=page.getByRole('dialog',{name:'Part playback: Duet',exact:true})
+ await expect(modal).toBeVisible();await expect(modal.locator('.score-staff')).toHaveCount(2)
+ await expect(modal.locator('.staff-engraving svg')).toHaveCount(2)
+ await expect(modal.locator('[data-note-id="high"]')).toBeVisible()
+ await expect(modal.locator('[data-note-id="low"]')).toBeVisible()
+ await expect(modal.getByRole('heading',{name:'Upper staff',exact:true})).toBeVisible();await expect(modal.getByRole('heading',{name:'Lower staff',exact:true})).toBeVisible()
+ const head=modal.locator('[data-playback-beat]'),before=await head.getAttribute('data-playback-beat')
+ await expect.poll(()=>head.getAttribute('data-playback-beat')).not.toBe(before)
+ const transforms=await modal.locator('.score-playhead').evaluateAll(els=>els.map(el=>(el as HTMLElement).style.transform));expect(transforms[0]).toBe(transforms[1])
+ await modal.getByRole('button',{name:'Piano roll',exact:true}).click();await expect(modal.locator('.piano-roll')).toHaveCount(2)
+ await expect(modal.locator('[data-roll-note="high"]')).toBeVisible();await expect(modal.locator('[data-roll-note="low"]')).toBeVisible()
+ const old=await read();const pitch=modal.locator('[data-roll-note="high"]');await modal.locator('.piano-roll').first().focus();await page.keyboard.press('Delete');await page.keyboard.press('Space')
+ const box=(await pitch.boundingBox())!;await page.mouse.move(box.x+3,box.y+5);await page.mouse.down();await page.mouse.move(box.x+80,box.y+45);await page.mouse.up()
+ expect((await read()).parts).toEqual(old.parts);await expect(modal.locator('[data-resize]')).toHaveCount(0)
+ await page.screenshot({path:'/tmp/pr0-part-player-piano-roll.png'})
+ await modal.getByRole('button',{name:'Notation',exact:true}).click();await expect(modal.locator('.score-staff')).toHaveCount(2)
+ await expect(modal.locator('[data-note-id="high"]')).toBeVisible()
+ await expect(modal.locator('[data-note-id="low"]')).toBeVisible()
+ await page.screenshot({path:'/tmp/pr0-part-player-notation.png'})
+ await page.keyboard.press('Escape');await expect(modal).toHaveCount(0);await expect(button).toBeFocused()
+ expect((await read()).parts[0].view).toBe('notation')
+ await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
+})

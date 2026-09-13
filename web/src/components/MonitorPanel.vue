@@ -150,25 +150,31 @@ async function connectInput(node:string) {
   microphone.value=true;inputNode.value=node
   await connect()
 }
-defineExpose({ toggle, state, error, meter, connectInput })
+defineExpose({ toggle, state, error, meter, connectInput, disconnect })
 function level() { if (monitor.value) monitor.value.volume = volume.value }
 watch(state, value => { if(inputNode.value) browserInputState[`${props.projectId}:${inputNode.value}`]=value }, {flush:'sync'})
-watch(() => [props.active, props.autoInput] as const, async ([active,node]) => {
-  if (!active) { if(current) await disconnect(); return }
-  if(node && !current && state.value==='disconnected') await connectInput(node)
-}, {immediate:true,flush:'post'})
-watch(() => props.nodes.map(n=>n.id), async ids => { if(current?.inputKey && !ids.includes(inputNode.value)) { await disconnect(); if(props.active&&props.autoInput)await connectInput(props.autoInput) } })
-onBeforeUnmount(() => { void disconnect() })
+let reconciliation=Promise.resolve(), disposed=false
+watch(() => [props.active,props.autoInput,props.nodes.map(n=>n.id).join('|')] as const,()=>{
+  reconciliation=reconciliation.then(async()=>{
+    if(disposed)return
+    if(current&&(!props.active||(current.inputKey&&!props.nodes.some(n=>n.id===inputNode.value))))await disconnect()
+    if(inputNode.value&&!props.nodes.some(n=>n.id===inputNode.value)){inputNode.value='';microphone.value=false}
+    const node=props.autoInput
+    if(disposed||!props.active||!node||current||state.value!=='disconnected')return
+    const inputs=await api<import('../browserInputs').RemoteAudioInput[]>(`/projects/${props.projectId}/media`).catch(()=>[])
+    if(!disposed&&props.active&&props.autoInput===node&&!current&&!inputs.some(i=>i.node===node))await connectInput(node)
+  }).catch(e=>{error.value=captureError(e)})
+},{immediate:true,flush:'post'})
+onBeforeUnmount(() => { disposed=true;void disconnect() })
 </script>
 <template>
   <section class="browser-monitor" :class="{compact}">
     <div class="section-heading"><div><div class="eyebrow">WEBRTC / OPUS · STEREO</div><h2>Browser audio</h2></div><span class="mode-pill">{{ state.toUpperCase() }}</span></div>
     <audio ref="monitor" autoplay playsinline></audio>
-    <div class="monitor-form"><label>Monitor feed<select v-model="monitorNode" aria-label="Monitor feed" :disabled="state !== 'disconnected'"><option value="">Master mix</option><option v-for="node in nodes.filter(n => n.kind === 'monitor_output')" :key="node.id" :value="node.id">{{ node.label }}</option></select></label><label><input v-model="microphone" type="checkbox" :disabled="state !== 'disconnected'"> Send microphone to the graph</label><select v-if="microphone" v-model="inputNode" :disabled="state !== 'disconnected'" aria-label="Local audio input node"><option value="">Select assigned local audio input…</option><option v-for="node in nodes.filter(n => n.kind === 'browser_input')" :key="node.id" :value="node.id">{{ node.label }} · {{ node.id.slice(0, 8) }}</option></select><BrowserInputPicker v-if="microphone && inputNode" :input-key="`${projectId}:${inputNode}`" :disabled="state !== 'disconnected'" /><p v-if="microphone && !nodes.some(n => n.kind === 'browser_input')" class="field-error">No Local audio input nodes exist. Add one to the graph first.</p><div class="monitor-buttons"><button v-if="state === 'disconnected'" class="button primary" :disabled="!active" @click="connect"><Headphones :size="16" /> Connect monitor</button><button v-else class="button" :disabled="state === 'disconnecting'" @click="disconnect"><Square :size="14" /> Disconnect</button><button v-if="state === 'connected'" class="button" @click="resume">Resume audio</button></div><label>Monitor level<input v-model.number="volume" type="range" min="0" max="1" step="0.01" aria-label="Monitor level" @input="level"></label></div>
+    <div class="monitor-form"><label><span class="field-title">Monitor feed<HelpNote label="Monitor feed">Choose the master mix or a dedicated Monitor output from the patch. Disconnect to change feeds. Use headphones when sending a microphone. Per-part mix-minus sends and physical end-to-end latency calibration are still pending; these network statistics do not measure total listening latency.</HelpNote></span><select v-model="monitorNode" aria-label="Monitor feed" :disabled="state !== 'disconnected'"><option value="">Master mix</option><option v-for="node in nodes.filter(n => n.kind === 'monitor_output')" :key="node.id" :value="node.id">{{ node.label }}</option></select></label><label><input v-model="microphone" type="checkbox" :disabled="state !== 'disconnected'"> Send microphone to the graph</label><select v-if="microphone" v-model="inputNode" :disabled="state !== 'disconnected'" aria-label="Local audio input node"><option value="">Select assigned local audio input…</option><option v-for="node in nodes.filter(n => n.kind === 'browser_input')" :key="node.id" :value="node.id">{{ node.label }} · {{ node.id.slice(0, 8) }}</option></select><BrowserInputPicker v-if="microphone && inputNode && nodes.some(n=>n.id===inputNode&&n.kind==='browser_input')" :input-key="`${projectId}:${inputNode}`" :disabled="state !== 'disconnected'" /><p v-if="microphone && !nodes.some(n => n.kind === 'browser_input')" class="field-error">No Local audio input nodes exist. Add one to the graph first.</p><div class="monitor-buttons"><button v-if="state === 'disconnected'" class="button primary" :disabled="!active" @click="connect"><Headphones :size="16" /> Connect monitor</button><button v-else class="button" :disabled="state === 'disconnecting'" @click="disconnect"><Square :size="14" /> Disconnect</button><button v-if="state === 'connected'" class="button" @click="resume">Resume audio</button></div><label>Monitor level<input v-model.number="volume" type="range" min="0" max="1" step="0.01" aria-label="Monitor level" @input="level"></label></div>
     <p v-if="error" class="field-error" role="alert">{{ error }}</p>
     <div class="media-stats"><span>RTT <strong>{{ stats.rtt.toFixed(1) }} ms</strong></span><span>Jitter <strong>{{ stats.jitter.toFixed(1) }} ms</strong></span><span>Mean jitter buffer <strong>{{ stats.buffer.toFixed(1) }} ms</strong></span><span>Packets lost <strong>{{ stats.lost }}</strong></span></div>
-    <details v-if="compact"><summary>Monitor help</summary><HelpNote>Choose the master mix or a dedicated Monitor output from the patch. Disconnect to change feeds. Use headphones when sending a microphone. Per-part mix-minus sends and physical end-to-end latency calibration are still pending; these network statistics do not measure total listening latency.</HelpNote></details>
-    <HelpNote v-else>Choose the master mix or a dedicated Monitor output from the patch. Disconnect to change feeds. Use headphones when sending a microphone. Per-part mix-minus sends and physical end-to-end latency calibration are still pending; these network statistics do not measure total listening latency.</HelpNote>
+
     <details v-if="settings"><summary>Applied microphone settings</summary><pre>{{ settings }}</pre></details>
   </section>
 </template>

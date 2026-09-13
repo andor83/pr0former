@@ -2,6 +2,226 @@
 
 pr0former is a development alpha. Software validation does not establish physical audio latency, deadline reliability, iPad compatibility, or readiness for a 32-player performance.
 
+## Arrow-key bar creation and jazz chord symbols (2026-09-13)
+
+Quick-entry Right/Shift-Right now offers to append one bar when navigation would
+enter a bar beyond the score. Enter or Add bar confirms; Cancel/Escape keeps the
+caret in place. A session checkbox permits subsequent automatic appends; its
+browser-tab preference survives view changes and reload but is not saved in the
+project. Held-key repeats cannot repeatedly append. Creation reuses the existing
+undoable bar splice, respects the current final meter, completes partial final
+bars, and retains edit locks and the 4096-quarter-beat limit. Left remains bounded
+at zero. The Score entry help page and repository guide document this workflow.
+
+The C⁷ Chord tool places jazz chord symbols above an individual staff at a beat.
+The editor offers a live preview, root/slash-bass selectors and common quality
+buttons, plus free text (64 characters). The tool stays armed for a progression;
+placing at an occupied chord beat edits it. Symbols support existing mark edit,
+drag, delete, undo, save, bar editing and region-copy behavior. They are notation
+only and generate no MIDI or chord voicings. Core validation accepts the new
+`chord` staff-mark kind and bounds its single-line text. Existing read-only staff
+renderers display the same symbols.
+
+MusicXML exports pitch-root symbols as harmony with the literal displayed quality
+and optional slash bass, and imports harmony symbols. Unknown qualities use the
+MusicXML `other` kind; custom non-root labels export as text with an interchange
+notice. Native JSON retains all labels exactly. Chord entry and these interchange
+limits are included in Help → Score entry and docs/SCORE_EDITOR.md.
+
+Validation: all 21 core Rust tests, 108 frontend tests and the production build
+passed. Eight distinct affected browser cases passed, including keyboard-only
+bar confirmation, cancellation, session/reload behavior, changing meter and
+partial bars, existing quick entry/deletion, chord editing/drag/delete/undo,
+server text validation, and chord/tempo MusicXML round trips. The confirmation,
+chord editor and rendered chart were visually reviewed. No hardware timing or
+physical-device behavior is claimed by these software checks.
+
+## Score deletion and quick-entry documentation (2026-09-13)
+
+Deleting selected notes/explicit rests or the entry before the Write caret now
+closes the newly freed duration within its starting bar, staff and voice. Chord
+occupancy is counted once, surviving pitches retain their occupied time, and
+later bars stay fixed. Automatic rests between notes close their gap; trailing
+automatic rests retain the existing hide-symbol behavior. Exact onsets,
+hidden-rest ranges, grace attachments and note references are updated in the
+same undoable score draft. Invalidated ties are removed. Bar-region clearing
+still keeps the selected bars. Scheduling and engine processing are unchanged.
+
+Documentation now includes a dedicated **Score entry** page, with mouse and
+quick-entry workflows, the duration-key mapping, rest-length examples (`R → 5 → R`
+and `0` for the current duration), persistent dot settings, keyboard ties, chords,
+voices, MIDI entry, deletion and saving. The repository score guide and caret
+shortcut hint are updated as well.
+
+Validation: 105 frontend unit tests and the production build passed. Eight
+browser cases passed, covering selection/rest/caret deletion, multi-selection,
+undo/reload, rest lengths/dots/ties, documentation at desktop and narrow widths,
+and existing insertion, entry tools, note dragging and phrasing. Documentation
+screenshots were visually reviewed. These changes were tested in software;
+physical keyboard/MIDI devices and touch gestures were not tested.
+
+## Voice envelopes, playback viewer and Granular Cloud (2026-09-13)
+
+Polyphonic sampler reuses the standalone ADSR’s processing, parameter metadata,
+and editable envelope graph, with an independent envelope in each of its 64
+voices. The node displays the shape and the maximum active envelope level. Options
+provides graph handles and numeric Attack, Decay, Sustain and Release controls;
+connected settings use engine values and lock their handles. Stage times latch on
+entry and sustain edits are smoothed. Voice occupancy remains independent of
+amplitude, so silent sustain and newly starting attacks are not lost. Defaults
+retain immediate attack/full sustain and the existing 80 ms release. One-shot
+samples still finish at their sample boundary. Graph gestures and numeric controls
+now share draft handling, fixing stale numeric fields after graph edits.
+
+Clicking a Part player’s bar/beat panel opens its selected part in a read-only
+modal. It reuses the score staff and piano-roll renderers, shows all staves,
+switches between notation and piano roll, and follows the node’s authoritative
+written position. Scrolling/view changes are local only. Stale telemetry hides
+playheads; the modal does not edit notes or control show transport.
+
+Granular Cloud derives its sample and numeric controls from Granular synth,
+removes the typed MIDI inlet, and relabels `position` as Cloud center (0–1).
+It shares the fixed 16-voice/128-grain Hann-window scheduler, sample preparation,
+shortlist switching and reusable sample packaging. With no Gate/Trigger/note-off
+wires it plays continuously while the engine runs, with optional numeric Pitch
+and Velocity; wiring note controls uses the synth’s existing numeric note behavior.
+Spray randomizes grain starts around center and wraps at sample edges. Center,
+size and density changes affect newly launched grains. This is sample-based DSP,
+not a physical MIDI or external-device feature.
+
+Validation: 262 Rust tests passed (one ignored), including render-allocation
+guards, independent voice envelopes, cloud center/sample switching and numeric
+gates. All 98 frontend unit tests and the production build passed. Eleven
+affected browser cases passed, covering the three features, existing Part player
+and sample selector behavior, MIDI/OSC sampler playback, and all 131 authored
+help examples. Notation, piano roll and envelope layouts were visually reviewed.
+These are software checks; no physical audio or MIDI hardware was tested.
+
+## Independent part player (2026-09-13)
+
+The Control library includes **Part player**, with a project-local Source part
+selector in Options and Play, Play & repeat, and Stop trigger inputs. Play queues
+one complete pass at the next metronome beat; repeat queues continuous looping;
+Stop releases held notes and cancels pending launches. Retriggering starts over at
+the next beat without count-in. Coincident inputs prioritize Stop, then repeat.
+A pending launch is fulfilled before a new trigger on that beat, so periodic
+trigger streams do not postpone playback indefinitely.
+
+Each node advances independently using engine samples and the current BPM, even
+when the performance is stopped. While the show runs, launch boundaries share its
+metronome position, including meter changes and written repeat jumps; otherwise
+launches follow the continuously running graph beat grid. Already running clips
+keep their local phase through show play/pause/seek/stop and tempo changes. The
+node shows the selected part, written bar/beat, and waiting/playing/repeating state
+from telemetry. It has standard typed MIDI and scalar note outputs for instruments
+or MIDI output nodes. The engine must be enabled.
+
+Server preparation reuses score ties, articulation, grace timing, notation repeats,
+staff channels, dynamics and MIDI automation. Explicit graph playback ignores
+show mute/solo and performer queues; authored tempo marks do not override current
+BPM. Prepared player storage is limited to one million note/automation events per
+graph. Compatible replacements preserve playback; changed/deleted clips release
+held notes into surviving typed consumers. Preparation allocates outside rendering;
+rendering and state transfer use prepared storage. Help includes a freeform
+algorithmic-snippet example wired to Play, repeat, Stop and MIDI output.
+
+Validation: 256 Rust workspace tests passed (one opt-in test ignored), including
+sample-index assertions for starts, repeats, retriggers, completion, Stop,
+positive-edge behavior, coincident periodic triggers, meter/repeat boundaries,
+tempo/show changes and graph replacement. A server test checks notation, channels,
+automation and independence from muted show parts. The allocation/deallocation
+guard covers looping, retriggering, stopping and retiring players. All 97 frontend
+tests and the production build passed, with the existing bundle-size warning.
+Six Chromium cases passed: the player workflow with synth output and persistence,
+MIDI/OSC/sampler routing, and four help workflows including all 130 node examples.
+The node screenshot was inspected. Physical MIDI hardware and timing remain
+manual and unverified; no hardware latency or deadline claim is made.
+
+## Sample selector (2026-09-13)
+
+The Control library now includes Sample selector: an ordered, zero-based shortlist
+of up to 64 project samples, configured by autocomplete in the modal. Entries can
+be nicknamed, reordered and removed. Orange rounded buttons display the nickname
+or sample name; clicks select the normal saved Index parameter. A connected Index
+uses engine values and disables manual buttons. Fractional indices round down;
+empty/out-of-range selections output 0.
+
+Its numeric Sample ID output connects to the new Sample ID input on Sample player,
+Polyphonic sampler and Granular synth. Preparation loads matching-channel shortlist
+assets before rendering within the existing 256 MB prepared-audio limit. Switching
+swaps retained buffers and clears old playback/voices; note triggering remains
+separate and root MIDI note retains its configured value. Invalid/unprepared IDs
+select silence with missing-sample telemetry. List fields and project asset access
+are server-validated. Reusable subgraphs bundle and remap shortlist-only samples.
+The in-app reference includes a Kick/Snare/Hat palette example and numeric control.
+
+Validation: the Rust workspace suite passed (one opt-in test ignored), followed by
+all three focused selector regressions; render allocation/deallocation guards
+include rapid sample switching. Tests cover all three consumers at 1–8 channels,
+invalid indices, empty banks and graph replacement. All 97 frontend tests, the
+production build and seven focused Chromium cases passed, including actual sampler
+output, list persistence, connected-input locking, asset remapping and rendering
+all 129 authored help examples. The node screenshot was inspected. The build keeps
+the existing bundle-size warning. Physical audio/MIDI and touch devices were not
+used; no hardware timing or CPU-throughput result is claimed.
+
+## Score note dragging and playback editing (2026-09-13)
+
+Dragging an existing note now previews its staff position and onset without a
+selection rectangle. The grabbed note auditions on pickup and pitch changes
+through its saved instrument and matching Part MIDI routes when the engine is
+enabled. The server validates the optional preview pitch; previews do not save
+revisions, and note-offs retain the existing rendered-sample countdown. Release
+saves one undoable move. Escape, pointer cancellation/capture loss, window blur,
+and playback start discard the position preview. Empty-space box selection is
+preserved. Rapid successive drags no longer open the note-edit dialog.
+
+The score editor disables editing during playback/count-in and restores it on
+pause/stop. This is a UI editing lock, not a new restriction on preparation APIs.
+Rust workspace tests passed 244 cases (one opt-in test ignored), frontend tests
+passed 97 cases, and the production build passed with the existing bundle-size
+warning. Fourteen focused Chromium cases passed across note dragging, entry,
+mass edits, phrasing, workspace and save workflows. The new real-server case
+observed Part MIDI pitch previews and release, verified no save before dropping,
+one-step undo, cancellation, playback locking and engine-disabled movement.
+Physical MIDI/audio devices and touch hardware were not tested.
+
+## Contextual help and documentation (2026-09-13)
+
+Explanatory prose in nodes, settings, score dialogs, libraries and menus now uses
+info buttons beside the relevant titles/fields. The `i` key and header control
+expand/collapse descriptions in place; the preference persists locally. Info icons
+and hovers remain available in both states. Expanded node descriptions sit below
+the control body so the ports retain their positions. Native popovers
+are mounted inside the active dialog so both stacking and modal inertness are
+handled, with fixed-position fallback for older webviews. Hover, focus, keyboard
+activation, tap, Escape and outside dismissal are supported. Errors, connection
+states and essential action status remain visible.
+
+The guide now includes a fuller first-sound walkthrough, troubleshooting,
+server/client architecture, the desktop private engine and remote/LAN hosting,
+and separate `init.sh` and `build.sh` references. All 128 built-in catalog nodes
+supply authored usage/examples from `pr0-core`, including required sample/device
+setup. Examples use the main Vue Flow node/edge components, dynamic port metadata
+and measured layout in an isolated read-only flow. They expose example settings
+without subscribing to audio, requesting waveform previews or changing projects.
+The server validator checks every example graph. See [DOCUMENTATION.md](DOCUMENTATION.md)
+for the node-author contract.
+
+Validation: `cargo test --workspace --quiet` passed 244 tests (one opt-in test
+ignored); frontend tests passed 97 cases; the production frontend build passed
+with the existing bundle-size warning. All 16 affected Chromium cases passed,
+including render/interaction checks for all 128 examples, modal popup hit-testing,
+global preference persistence, inline expansion with stable node ports, hovers in
+both toggle states, a narrow-screen/tap check, node controls, score
+editing, device preferences and profile editing. Screenshots of the guide, ADSR,
+spectral and channel examples, expanded modal/node descriptions, modal tooltip
+and narrow layout were inspected.
+`/bin/bash -n` and help checks passed for both scripts; the isolated launcher
+lifecycle test passed, including the unchanged `--startup` branch. No startup
+services were changed. Physical audio/MIDI, native Tauri webviews and actual touch
+hardware were not tested, and the desktop application bundle was not repackaged.
+
 ## Capabilities and evidence
 
 | Area | Current behavior | Evidence / limitations |
@@ -27,6 +247,26 @@ pr0former is a development alpha. Software validation does not establish physica
 - Worker telemetry now includes maximum observed work and block-start gap in microseconds. These software measurements include scheduling/configuration effects and are not a hardware latency or deadline guarantee.
 
 ## Validation
+
+Explicit local input ownership (2026-09-12): owners/editors assign Local audio
+input nodes to ensemble members in node options. Assignments persist separately
+from score parts. Unassigned nodes stay disconnected; performers and privileged
+users alike can configure/send only their own assigned inputs. Device selection
+remains local; “Use this device” transfers the user's capture to their current
+instance. Reassignment revokes the old sender and clears its queued audio.
+Disconnected or non-sending microphones use a gray ring/icon, based on server
+connection state and recent decoded packet arrival. Browser capture permission,
+physical inputs and iPad behavior remain manual/unverified.
+Validation: 243 Rust tests passed (one opt-in ignored), 97 frontend tests and the
+production web build passed. Three focused Chromium cases passed, including live
+reassignment, sender revocation/reconnection, owner/editor/performer/conductor
+permissions, rejection of non-members, local device control visibility, and gray
+disconnected versus active microphone states. The audio fixture is generated,
+and the assignment UI fixture denies microphone access explicitly. The release
+server build and two isolated desktop process tests passed. Packaging this change
+is pending: the signing wrapper stopped at its Keychain-profile preflight because
+the login Keychain is locked; the project-root app remains the previous build.
+
 
 Local input controls, profiles and branding (2026-09-12): Local audio input defaults
 unmuted and automatically starts its authorized microphone uplink when the engine

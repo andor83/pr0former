@@ -8,7 +8,7 @@ enum Stage {
     Sustain,
     Release,
 }
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct Adsr {
     stage: Stage,
     level: f64,
@@ -21,6 +21,7 @@ pub struct Adsr {
     trigger: bool,
     note_off: bool,
 }
+#[derive(Clone, Copy)]
 pub struct Settings {
     pub attack: f64,
     pub decay: f64,
@@ -30,6 +31,13 @@ pub struct Settings {
     pub reset: bool,
 }
 impl Adsr {
+    pub fn level(&self) -> f64 {
+        self.level
+    }
+    pub fn idle(&self) -> bool {
+        self.stage == Stage::Idle
+    }
+
     fn begin(&mut self, stage: Stage, target: f64, ms: f64, sample_rate: f64) {
         self.stage = stage;
         self.target = target;

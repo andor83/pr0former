@@ -732,7 +732,8 @@ async fn update_project(
 ) -> Api<Json<Project>> {
     csrf(&headers)?;
     let u = user(&app, &headers)?;
-    can_edit(&role(&app, &id, &u)?)?;
+    let membership=role(&app,&id,&u)?;
+    can_edit(&membership)?;
     let _guard = app.setup.lock().await;
     if p.id != id {
         return Err(bad("Project ID mismatch"));
@@ -741,8 +742,11 @@ async fn update_project(
         return Err(bad("Exit performance mode before editing"));
     }
     let previous = load(&app, &id)?;
+    if p.local_audio_assignments != previous.local_audio_assignments && !matches!(membership.as_str(),"owner"|"editor") {return Err(Failure(StatusCode::FORBIDDEN,"Only owners and editors can assign local audio inputs".into()));}
+    for target in p.local_audio_assignments.values() { role(&app,&id,target).map_err(|_|bad("Assign local audio inputs to ensemble members"))?; }
     sample_library::assign_roots(&app.db.lock().unwrap(), &previous, &mut p)?;
     p.validate().map_err(bad)?;
+    samples::validate_choices(&p).map_err(bad)?;
     validate_conductor(&app, &p)?;
     let active = app.active.lock().unwrap().as_deref() == Some(&id);
     settings::validate_route_changes(&previous, &p, &settings::read()).map_err(bad)?;
@@ -797,6 +801,7 @@ async fn update_project(
         None
     };
     update_working_copy(&app, &mut p)?;
+    app.media.reconcile_inputs(&p).await;
     if let Some(engine) = prepared {
         send(
             &app,
@@ -965,6 +970,8 @@ async fn clear_loop(
 struct Audition {
     part: String,
     note: String,
+    /// Unsaved drag preview; routing and velocity still come from the saved note.
+    pitch: Option<u8>,
 }
 async fn audition(
     State(app): State<App>,
@@ -976,6 +983,9 @@ async fn audition(
     let u = user(&app, &headers)?;
     can_edit(&role(&app, &id, &u)?)?;
     let _guard = app.setup.lock().await;
+    if request.pitch.is_some_and(|pitch| pitch > 127) {
+        return Err(bad("MIDI pitch must be 0–127"));
+    }
     if app.performance.lock().unwrap().as_deref() == Some(&id) {
         return Err(bad("Note entry is disabled in performance mode"));
     }
@@ -1013,7 +1023,7 @@ async fn audition(
                 channel: config
                     .and_then(|s| s.midi_channel)
                     .unwrap_or(part.midi_channel),
-                pitch: note.pitch,
+                pitch: request.pitch.unwrap_or(note.pitch),
                 velocity: note.velocity,
             },
         )?;
@@ -1155,8 +1165,8 @@ async fn parameter(
     let mut p = load(&app, &id)?;
     let owns_input = c.parameter == "mute"
         && p.graph.nodes.iter().any(|n| n.id == c.node && n.kind == "browser_input")
-        && p.parts.iter().any(|part| part.performer.as_deref() == Some(&u) && part.instrument_node.as_deref() == Some(&c.node));
-    if !owns_input { can_edit(&membership)?; }
+        && p.local_audio_assignments.get(&c.node)==Some(&u);
+    if c.parameter=="mute" && p.graph.nodes.iter().any(|n|n.id==c.node&&n.kind=="browser_input") { if !owns_input {return Err(Failure(StatusCode::FORBIDDEN,"Local audio input is not assigned to you".into()));} } else { can_edit(&membership)?; }
     let previous = p.clone();
     if p.revision != c.revision {
         return Err(Failure(StatusCode::CONFLICT, "Stale parameter edit".into()));
@@ -1639,7 +1649,9 @@ async fn member_candidates(
     Ok(Json(json!(rows)))
 }
 fn unassign_member_parts(project: &mut Project, user_id: &str) -> usize {
-    project.parts.iter_mut().fold(0, |count, part| {
+    let before=project.local_audio_assignments.len();
+    project.local_audio_assignments.retain(|_,user|user!=user_id);
+    project.parts.iter_mut().fold(before-project.local_audio_assignments.len(), |count, part| {
         if part.performer.as_deref() == Some(user_id) {
             part.performer = None;
             count + 1
@@ -2635,7 +2647,11 @@ mod live_edit_tests {
         other.id = "other".into();
         other.performer = Some("kept".into());
         project.parts.push(other);
-        assert_eq!(unassign_member_parts(&mut project, "removed"), 1);
+        project.local_audio_assignments.insert("mic".into(),"removed".into());
+        project.local_audio_assignments.insert("other-mic".into(),"kept".into());
+        assert_eq!(unassign_member_parts(&mut project, "removed"), 2);
+        assert!(!project.local_audio_assignments.contains_key("mic"));
+        assert_eq!(project.local_audio_assignments["other-mic"],"kept");
         assert_eq!(project.parts[0].performer, None);
         assert_eq!(project.parts[1].performer.as_deref(), Some("kept"));
     }

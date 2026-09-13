@@ -527,6 +527,99 @@ impl Sequencer {
             last_beat: 0.,
         }
     }
+    /// Prepare independently triggered clips using the same notation interpretation as the score.
+    /// Explicit graph players ignore show mute/solo and never use performer queues/count-in.
+    pub fn prepare_players(project: &Project, engine: &mut pr0_dsp::Engine) -> Result<(), String> {
+        if !project.graph.nodes.iter().any(|n| n.kind == "part_player") {
+            return Ok(());
+        }
+        let mut source = project.clone();
+        source.mode = pr0_core::Mode::Freeform;
+        for part in &mut source.parts {
+            part.muted = false;
+            part.solo = false;
+        }
+        let prepared = Self::new(&source);
+        let mut total = 0usize;
+        for node in project
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "part_player")
+        {
+            let Some(lane) = prepared
+                .lanes
+                .iter()
+                .find(|l| Some(&l.id) == node.part_id.as_ref())
+            else {
+                continue;
+            };
+            total = total.saturating_add(lane.events.len()).saturating_add(
+                lane.automation
+                    .iter()
+                    .map(|a| a.lane.events.len())
+                    .sum::<usize>(),
+            );
+            if total > 1_000_000 {
+                return Err("Part players exceed one million prepared MIDI events".into());
+            }
+            // Independent graph clips use quarter-note beats at current BPM, without
+            // the conducted performer's denominator-to-pulse remapping.
+            let local = |beat: f64| {
+                let segment = lane
+                    .meter_map
+                    .iter()
+                    .rev()
+                    .find(|s| s.engine_start <= beat + 1e-9)
+                    .unwrap();
+                segment.local_start + (beat - segment.engine_start) / segment.scale
+            };
+            let part = project.parts.iter().find(|p| p.id == lane.id).unwrap();
+            let mut meters = if part.performance_meters.is_empty() {
+                project
+                    .score
+                    .as_ref()
+                    .map(|s| s.meters.clone())
+                    .unwrap_or_default()
+            } else {
+                part.performance_meters.clone()
+            };
+            if meters.first().is_none_or(|m| m.beat != 0.) {
+                let (beats, unit) = project.initial_meter();
+                meters.insert(
+                    0,
+                    pr0_core::score::MeterChange {
+                        beat: 0.,
+                        beats,
+                        unit,
+                    },
+                );
+            }
+            engine.set_part_player(
+                &node.id,
+                pr0_dsp::part_player::Clip {
+                    length: local(lane.length),
+                    meters,
+                    spans: lane.score_spans.clone(),
+                    events: lane
+                        .events
+                        .iter()
+                        .map(|event| pr0_dsp::part_player::Event {
+                            beat: local(event.beat),
+                            message: pr0_core::midi::Message {
+                                status: (if event.velocity == 0 { 0x80 } else { 0x90 })
+                                    | (lane.routes[event.note_id as usize].channel - 1),
+                                data1: event.pitch,
+                                data2: event.velocity,
+                            },
+                        })
+                        .collect(),
+                    automation: lane.automation.iter().map(|a| a.lane.clone()).collect(),
+                },
+            );
+        }
+        Ok(())
+    }
     /// Transfer compatible lanes without replaying their event history.
     /// Preparation and this transfer happen on the orchestration worker.
     pub fn replace(
@@ -1515,6 +1608,101 @@ pub fn external_worker(socket: std::sync::Arc<crate::osc::Runtime>) -> SyncSende
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_players_prepare_notation_repeats_channels_and_automation_without_show_launch() {
+        let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Structured);
+        p.parts.truncate(1);
+        let part = &mut p.parts[0];
+        part.muted = true;
+        part.loop_beats = 2.;
+        part.performance_meters = vec![pr0_core::score::MeterChange {
+            beat: 0.,
+            beats: 3,
+            unit: 8,
+        }];
+        part.staves = vec![
+            serde_json::from_value(
+                serde_json::json!({"id":"staff","name":"Staff","clef":"treble","midi_channel":6}),
+            )
+            .unwrap(),
+        ];
+        part.notes = serde_json::from_value(serde_json::json!([
+            {"id":"short","pitch":60,"beat":0,"duration":1,"velocity":90,"rest":false,"tied":false,"notation":{"staff":"staff","voice":1,"step":28,"alter":0,"base":1,"dots":0,"articulation":"staccato"}},
+            {"id":"tie-start","pitch":64,"beat":0,"duration":0.5,"velocity":80,"rest":false,"tied":true,"notation":{"staff":"staff","voice":1,"step":28,"alter":0,"base":1,"dots":0,"tie_to":"tie-end"}},
+            {"id":"tie-end","pitch":64,"beat":0.5,"duration":0.5,"velocity":80,"rest":false,"tied":false,"notation":{"staff":"staff","voice":1,"step":28,"alter":0,"base":1,"dots":0}}
+        ])).unwrap();
+        part.automation = vec![serde_json::from_value(serde_json::json!({"id":"pedal","name":"Pedal","channel":6,"message":"cc","number":64,"events":[{"id":"down","beat":0,"duration":0,"start":127,"end":127,"curve":"step"}]})).unwrap()];
+        p.score = Some(serde_json::from_value(serde_json::json!({"version":1,"length":2,"loop_score":false,"meters":[{"beat":0,"beats":3,"unit":8}],"tempos":[{"beat":0,"bpm":240}],"repeats":[{"start":0,"end":1,"times":2}]})).unwrap());
+        let template = p.graph.nodes[0].clone();
+        p.graph.nodes = [
+            ("go", "trigger"),
+            ("player", "part_player"),
+            ("out", "midi_output"),
+        ]
+        .into_iter()
+        .map(|(id, kind)| {
+            let mut n = template.clone();
+            n.id = id.into();
+            n.kind = kind.into();
+            n.parameters.clear();
+            n.part_id = (id == "player").then(|| p.parts[0].id.clone());
+            n
+        })
+        .collect();
+        p.graph.edges = [
+            ("go", "out", "player", "play"),
+            ("player", "midi", "out", "midi"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(
+            |(i, (source, source_port, target, target_port))| pr0_core::Edge {
+                id: i.to_string(),
+                source: source.into(),
+                source_port: source_port.into(),
+                target: target.into(),
+                target_port: target_port.into(),
+            },
+        )
+        .collect();
+        let mut e = pr0_dsp::Engine::prepare(p.graph.clone(), 1000.).unwrap();
+        e.clock.bpm = 60.;
+        Sequencer::prepare_players(&p, &mut e).unwrap();
+        e.bang("go");
+        let mut events = vec![];
+        for sample in 0..4001 {
+            e.render(&[], &mut [[0.; 8]]);
+            while let Some(m) = e.take_midi_message("out") {
+                events.push((sample, m));
+            }
+        }
+        let attacks: Vec<_> = events
+            .iter()
+            .filter(|(_, m)| m.status == 0x95)
+            .map(|(s, m)| (*s, m.data1))
+            .collect();
+        assert_eq!(
+            attacks,
+            vec![(1000, 64), (1000, 60), (2000, 64), (2000, 60)]
+        );
+        let short_releases: Vec<_> = events
+            .iter()
+            .filter(|(_, m)| m.status == 0x85 && m.data1 == 60)
+            .map(|(s, _)| *s)
+            .collect();
+        assert_eq!(short_releases, vec![1500, 2500]);
+        assert!(
+            events
+                .iter()
+                .any(|(s, m)| *s == 4000 && m.status == 0xb5 && m.data1 == 64 && m.data2 == 0)
+        );
+        assert!(!e.clock.running);
+        assert_eq!(e.clock.bpm, 60.);
+        assert_eq!(e.telemetry()["player"]["_playing"], 0.);
+        p.graph.nodes[1].part_id = Some("missing".into());
+        assert!(p.validate().is_err());
+    }
+
     #[test]
     fn part_control_streams_isolate_chords_and_reassignment_releases_old_pitches() {
         let mut p = pr0_core::demo_project("x".into(), "x".into(), pr0_core::Mode::Structured);

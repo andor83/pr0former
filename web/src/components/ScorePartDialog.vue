@@ -134,7 +134,7 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
         <template v-if="tab === 'part'">
           <div class="sd-fields">
             <label
-              >Part name<input
+              ><span class="field-title">Part name</span><input aria-label="Part name"
                 :value="part.name"
                 :disabled="!editable"
                 @change="update({ name: value($event) })"
@@ -174,7 +174,11 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
               </select></label
             >
             <label
-              >Loop length (quarter beats)<input
+              ><span class="field-title">Loop length (quarter beats)<HelpNote label="Loop length">
+            Loop length applies to independent conducted/freeform parts; structured
+            scores follow the shared timeline. Each staff has its own clef, key and
+            routing tab.
+          </HelpNote></span><input aria-label="Loop length (quarter beats)"
                 type="number"
                 min="0.25"
                 max="4096"
@@ -183,16 +187,16 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
                 @change="update({ loop_beats: Number(value($event)) })"
             /></label>
           </div>
-          <p class="sd-note">
-            Loop length applies to independent conducted/freeform parts; structured
-            scores follow the shared timeline. Each staff has its own clef, key and
-            routing tab.
-          </p>
+
         </template>
         <template v-else-if="tab === 'routing'">
           <div class="sd-fields">
             <label
-              >Instrument / input<select
+              ><span class="field-title">Instrument / input<HelpNote label="Instrument / input">
+            The graph instrument receives score notes and MIDI automation; MIDI and
+            OSC routes deliver the same events to external devices. Staves can
+            override the instrument and MIDI route individually.
+          </HelpNote></span><select
                 aria-label="Instrument / input"
                 :value="part.instrument_node || ''"
                 :disabled="!editable"
@@ -234,17 +238,13 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
                 @change="update({ osc_address: value($event) })"
             /></label>
           </div>
-          <p class="sd-note">
-            The graph instrument receives score notes and MIDI automation; MIDI and
-            OSC routes deliver the same events to external devices. Staves can
-            override the instrument and MIDI route individually.
-          </p>
+
         </template>
         <template v-else-if="tab === 'meter'">
           <template v-if="project.mode==='conducted'">
-            <div class="sd-meter-editor"><div class="sd-meter-preview"><span>{{performanceMeter.beats}}</span><span>{{performanceMeter.unit}}</span></div><div class="sd-steppers"><label>Part beats per bar<input type="number" min="1" max="16" :value="performanceMeter.beats" :disabled="!editable" @change="updatePerformanceMeter({beats:Number(value($event))})"></label><label>Part beat unit<select :value="performanceMeter.unit" :disabled="!editable" @change="updatePerformanceMeter({unit:Number(value($event))})"><option v-for="u in units" :key="u" :value="u">{{u}}</option></select></label></div></div>
+            <div class="sd-meter-editor"><div class="sd-meter-preview"><span>{{performanceMeter.beats}}</span><span>{{performanceMeter.unit}}</span></div><div class="sd-steppers"><label><span class="field-title">Part beats per bar<HelpNote label="Part beats per bar">This part’s denominator beat follows one global conducting pulse. Other parts may use different meters without changing pulse duration.</HelpNote></span><input aria-label="Part beats per bar" type="number" min="1" max="16" :value="performanceMeter.beats" :disabled="!editable" @change="updatePerformanceMeter({beats:Number(value($event))})"></label><label>Part beat unit<select :value="performanceMeter.unit" :disabled="!editable" @change="updatePerformanceMeter({unit:Number(value($event))})"><option v-for="u in units" :key="u" :value="u">{{u}}</option></select></label></div></div>
             <div class="performance-meter-changes"><header><strong>Meter changes</strong><button type="button" class="button small" :disabled="!editable||part.loop_beats<=.25" @click="addPerformanceMeter">Add change</button></header><div v-for="(meter,index) in performanceMeters.slice(1)" :key="`${meter.beat}:${index}`" class="performance-meter-row"><label>Beat<input type="number" min="0.25" :max="part.loop_beats-0.001" step="0.25" :value="meter.beat" :disabled="!editable" @change="setPerformanceMeter(index+1,{beat:Number(value($event))})"></label><label>Beats<input type="number" min="1" max="16" :value="meter.beats" :disabled="!editable" @change="setPerformanceMeter(index+1,{beats:Number(value($event))})"></label><label>Unit<select :value="meter.unit" :disabled="!editable" @change="setPerformanceMeter(index+1,{unit:Number(value($event))})"><option v-for="u in units" :key="u" :value="u">{{u}}</option></select></label><button type="button" class="icon-button" aria-label="Remove meter change" :disabled="!editable" @click="removePerformanceMeter(index+1)">×</button></div><p v-if="performanceMeters.length===1" class="feature-note">No later meter changes. Each denominator beat always maps to one global pulse.</p></div>
-            <p class="sd-note">This part’s denominator beat follows one global conducting pulse. Other parts may use different meters without changing pulse duration.</p>
+
           </template>
           <template v-else>
           <div class="sd-meter-editor">
@@ -324,18 +324,18 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
               </div>
             </div>
           </div>
-          <p class="sd-note">
+          <div class="help-section-title">Project meter<HelpNote label="Project meter">
             The initial time signature for the whole project, also used for the
             count-in. Mid-score meter changes are made from the Measure dialog or
             the Shared score dialog.
-          </p>
+          </HelpNote></div>
           </template>
         </template>
         <template v-else-if="staff">
           <h3>{{ staff.name }}</h3>
           <div class="sd-fields">
             <label
-              >Staff name<input
+              ><span class="field-title">Staff name</span><input aria-label="Staff name"
                 :value="staff.name"
                 :disabled="!editable"
                 @change="emit('staff', staff, { name: value($event) })"
@@ -423,7 +423,11 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
             </button>
           </div>
           <div class="sd-stepper">
-            <span>Sounding transposition</span>
+            <span>Sounding transposition<HelpNote label="Sounding transposition">
+            Semitones between written and sounding pitch (Horn in F: −7, B♭
+            clarinet: −2). Written spelling is kept; playback follows the sounding
+            pitch.
+          </HelpNote></span>
             <button
               type="button"
               aria-label="Transpose down a semitone"
@@ -450,11 +454,7 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
               +
             </button>
           </div>
-          <p class="sd-note">
-            Semitones between written and sounding pitch (Horn in F: −7, B♭
-            clarinet: −2). Written spelling is kept; playback follows the sounding
-            pitch.
-          </p>
+
           <h3>Staff routing</h3>
           <div class="sd-fields">
             <label

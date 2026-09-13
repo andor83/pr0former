@@ -207,10 +207,10 @@ function change(action: () => Project) {
               Set time signature
             </button>
           </div>
-          <p class="sd-note">
+          <div class="help-section-title">Project meter<HelpNote label="Project meter">
             Applies to every part from the position above; at beat zero it also
             sets the initial and count-in meter. Existing notes keep their timing.
-          </p>
+          </HelpNote></div>
         </template>
         <template v-else-if="tab === 'bars'">
           <div class="sd-stepper">
@@ -274,17 +274,19 @@ function change(action: () => Project) {
               Delete from bar {{ bar }}
             </button>
           </div>
-          <p class="sd-note">
+          <div class="help-section-title">Insert and delete time<HelpNote label="Insert and delete time">
             Insertion and deletion shift all parts, signatures, repeats and MIDI
             events together. Delete removes the selected bars’ contents. Undo
             restores the complete edit.
-          </p>
+          </HelpNote></div>
         </template>
         <template v-else>
           <h3>Clef change · {{ part?.name }}</h3>
           <div class="sd-fields">
             <label
-              >Staff<select v-model="staffId" aria-label="Staff">
+              ><span class="field-title">Staff<HelpNote label="Staff">
+            Uses the position above; clef changes can occur between bar lines.
+          </HelpNote></span><select v-model="staffId" aria-label="Staff">
                 <option v-for="s in staffs" :key="s.id" :value="s.id">
                   {{ s.name }}
                 </option>
@@ -325,9 +327,7 @@ function change(action: () => Project) {
               Set clef at beat
             </button>
           </div>
-          <p class="sd-note">
-            Uses the position above; clef changes can occur between bar lines.
-          </p>
+
         </template>
       </section>
     </div>

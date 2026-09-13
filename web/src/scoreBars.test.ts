@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest'
 import type { Project, Part } from './types'
-import { editBars, setMeter, setClef, measures } from './scoreBars'
+import { editBars, setMeter, setClef, measures, addMark } from './scoreBars'
 import { metadata } from './score'
 function fixture(): Project {
   const part: Part = {
@@ -261,4 +261,14 @@ it('places forward and backward repeat bars like Finale', async () => {
   const moved = placeRepeatBegin(placeRepeatEnd(p, 9), 4)
   expect(moved.score!.repeats).toEqual([{ start: 4, end: 12, times: 2, first_ending: null }])
   expect(() => placeRepeatEnd(p, 50)).toThrow()
+})
+
+it('keeps chord symbols attached to bars and validates their text before saving', () => {
+  const p = addMark(fixture(), 'p', 's', { beat: 4, kind: 'chord', text: ' Dm7♭5/A♭ ' })
+  expect(p.parts[0]!.staves![0]!.marks![0]!.text).toBe('Dm7♭5/A♭')
+  const shifted = editBars(p, 'insert', 1, 1)
+  expect(shifted.parts[0]!.staves![0]!.marks![0]!.beat).toBe(8)
+  expect(editBars(p, 'delete', 2, 1).parts[0]!.staves![0]!.marks).toEqual([])
+  expect(() => addMark(p, 'p', 's', { beat: 0, kind: 'chord', text: 'x'.repeat(65) })).toThrow()
+  expect(() => addMark(p, 'p', 's', { beat: 0, kind: 'chord', text: 'C\nD' })).toThrow()
 })

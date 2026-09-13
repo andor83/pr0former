@@ -330,7 +330,10 @@ function render() {
       grouped({ kind: 'mark', mark: mark.id, beat: mark.beat }, () => {
         const x = xAt(mark.beat) - 12
         ctx.save()
-        if (mark.kind === 'rehearsal') {
+        if (mark.kind === 'chord') {
+          ctx.setFont('Space Grotesk', 16, 'bold')
+          ctx.fillText(mark.text, x, 48)
+        } else if (mark.kind === 'rehearsal') {
           ctx.setFont('Arial', 13, 'bold')
           const width = Math.max(18, mark.text.length * 9 + 8)
           ctx.beginPath()
@@ -661,7 +664,8 @@ function render() {
             el.dataset.scoreBeat = String(h.beat)
             el.dataset.duration = h.glyph
             el.dataset.dots = String(h.dots)
-            el.setAttribute('role', 'button')
+            el.setAttribute('role', props.interactive === false ? 'img' : 'button')
+            if (props.interactive === false) el.style.pointerEvents = 'none'
             el.setAttribute(
               'aria-label',
               `${h.n.rest ? 'Rest' : 'Note ' + h.n.pitch} at beat ${h.n.beat + 1}`,

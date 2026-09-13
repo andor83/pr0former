@@ -30,10 +30,10 @@ onMounted(() => dialog.value?.showModal())
       <fieldset :disabled="pending || active || !editable">
         <label>Project name<input v-model="draft.name" maxlength="120" required autofocus></label>
         <label>Performance mode<select v-model="draft.mode" aria-label="Performance mode"><option value="structured">Structured — shared score timeline</option><option value="conducted">Conducted — conductor launches parts</option><option value="freeform">Freeform — assigned performers launch parts</option></select></label>
-        <label>Initial tempo (quarter-note BPM)<input v-model.number="draft.bpm" type="number" min="1" max="400" step="any" required></label>
+        <label><span class="field-title">Initial tempo (quarter-note BPM)<HelpNote label="Initial tempo">Initial tempo applies when the show is activated. During a show, conductors can change tempo using the transport.</HelpNote></span><input aria-label="Initial tempo (quarter-note BPM)" v-model.number="draft.bpm" type="number" min="1" max="400" step="any" required></label>
       </fieldset>
       <p v-if="active" role="status">Deactivate the show to change project settings.</p>
-      <HelpNote v-else>Initial tempo applies when the show is activated. During a show, conductors can change tempo using the transport.</HelpNote>
+
       <p v-if="project.revision !== draft.revision" class="field-error" role="status">The project changed after these settings opened. Close and reopen to use the latest revision.</p>
       <p v-if="error" class="field-error" role="alert">{{ error }}</p>
       <button class="button primary wide" :disabled="pending || active || !editable || project.revision !== draft.revision">{{ pending ? 'Saving…' : 'Save project settings' }}</button>

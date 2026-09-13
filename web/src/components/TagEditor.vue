@@ -24,6 +24,6 @@ const size=computed(()=>{ const max=Math.max(2,...props.cloud.map(c=>c.count)); 
     <div v-if="cloud.length" class="tag-cloud" role="group" aria-label="Tag cloud">
       <button v-for="c in cloud" :key="c.tag.toLowerCase()" type="button" class="tag-cloud-item" :class="{active:applied(c.tag)}" :style="{fontSize:size(c.count)}" :disabled="disabled" :aria-pressed="applied(c.tag)" :title="`${c.count} sample${c.count===1?'':'s'} · click to ${applied(c.tag)?'remove':'add'}`" @click="set(toggleTag(tags,c.tag))">{{c.tag}}</button>
     </div>
-    <HelpNote>Click a tag in the cloud to add or remove it; larger tags are used by more samples. Tags are matched case-insensitively.</HelpNote>
+    <div class="help-section-title">Tags<HelpNote label="Tags">Click a tag in the cloud to add or remove it; larger tags are used by more samples. Tags are matched case-insensitively.</HelpNote></div>
   </div>
 </template>

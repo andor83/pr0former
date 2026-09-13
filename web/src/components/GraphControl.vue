@@ -31,7 +31,7 @@ function edit(text:string){
         <input :type="mode===4?'text':'number'" :aria-label="`${node.label} value`" :step="mode===1?1:mode===3?0.01:'any'" :min="min" :max="max" :value="draft|| (mode===4?'':0)" :disabled="!editable" @focus="focused=true" @blur="focused=false" @input="draft=($event.target as HTMLInputElement).value" @change="edit(($event.target as HTMLInputElement).value)">
       </template>
       <small>{{['One-sample trigger','Integer','Float','Slider','Text'][mode]}}<template v-if="mode>0&&mode<4"> · {{min}} … {{max}}</template></small>
-      <p v-if="mode===0&&!active" class="feature-note">Activate the show to trigger.</p>
+      <p v-if="mode===0&&!active" class="feature-note">Enable the engine to trigger.</p>
       <p v-if="error" role="alert" class="field-error">{{error}}</p>
     </template>
   </div>

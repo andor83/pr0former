@@ -1,17 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
 import { Activity, Clock3, Cpu, Headphones } from '@lucide/vue'
 import type { GraphNode, Telemetry, HardwareLevels, HardwareDeviceLevels } from '../types'
 import { api } from '../api'
 import MonitorPanel from './MonitorPanel.vue'
 import LevelMeter from './LevelMeter.vue'
-import {remoteAudioInputs,type RemoteAudioInput} from '../browserInputs'
+import {type LocalAudioAccess,remoteAudioInputs,type RemoteAudioInput} from '../browserInputs'
 const props = defineProps<{projectId:string;autoInput?:string;nodes:GraphNode[];active:boolean;stale:boolean;telemetry:Telemetry|null;hardware:HardwareLevels|null;hardwareStale:boolean;age:number;sampleRate:number;blockSize:number;visible:boolean;stage:boolean}>()
+const access=inject<import('vue').ComputedRef<LocalAudioAccess>>('localAudioAccess')
+const allowedNodes=computed(()=>props.nodes.filter(n=>n.kind!=='browser_input'||access?.value.assignments[n.id]===access?.value.userId))
 const monitorPanel = ref<InstanceType<typeof MonitorPanel>>()
 const monitorState = computed(() => monitorPanel.value?.state ?? 'disconnected')
 const monitorError = computed(() => monitorPanel.value?.error ?? '')
 const monitorLevel = computed(() => monitorPanel.value?.meter ?? 0)
-defineExpose({ toggleMonitor: () => monitorPanel.value?.toggle(), connectInput: (node:string) => monitorPanel.value?.connectInput(node), monitorState, monitorError, monitorLevel })
+defineExpose({ disconnectInput:()=>monitorPanel.value?.disconnect(), toggleMonitor: () => monitorPanel.value?.toggle(), connectInput: (node:string) => monitorPanel.value?.connectInput(node), monitorState, monitorError, monitorLevel })
 const inventory = ref<{input_interfaces:{id:number;name:string;channels:number|null}[]}>()
 const deviceError = ref('')
 const inputs = computed(() => {
@@ -62,7 +64,7 @@ const memory = computed(()=>resources.value?.resident_bytes == null ? '—' : `$
       <section v-show="!stage" class="monitor-stat-card"><h3><Clock3 :size="14" />Clock sync</h3><strong class="clock-readout">{{active&&!stale ? `${Math.max(0,Math.round(age))} ms` : '—'}}</strong><span class="stat-caption">{{active ? stale ? 'Waiting for engine timing' : 'Latest timing snapshot age' : 'Enable the audio engine for timing'}}</span><div class="mini-stats"><span>Rate<strong>{{sampleRate/1000}} kHz</strong></span><span>Block<strong>{{blockSize}} frames</strong></span></div></section>
       <section v-if="active && !stale && telemetry?.worker_max_work_us !== undefined" v-show="!stage" class="monitor-stat-card"><h3>Worker observations</h3><div class="mini-stats"><span>Peak work<strong>{{(telemetry.worker_max_work_us / 1000).toFixed(2)}} ms</strong></span><span>Peak block gap<strong>{{((telemetry.worker_max_block_gap_us || 0) / 1000).toFixed(2)}} ms</strong></span></div><span class="stat-caption">Since graph load; block gaps include normal pacing.</span></section>
       <section v-show="!stage" class="monitor-stat-card"><h3><Cpu :size="14" />Server process</h3><div class="resource-readouts"><div><span>CPU</span><strong>{{cpu}}</strong></div><div><span>Memory</span><strong>{{memory}}</strong></div></div><p class="stat-caption">{{resourceError || 'CPU: 100% = one core · Memory: resident use'}}</p></section>
-      <MonitorPanel :auto-input="autoInput" ref="monitorPanel" :project-id="projectId" :active="active" :nodes="nodes" compact />
+      <MonitorPanel :auto-input="autoInput" ref="monitorPanel" :project-id="projectId" :active="active" :nodes="allowedNodes" compact />
       <section v-show="!stage" class="monitor-stat-card"><h3><Activity :size="14" />Audio status</h3><dl><div><dt>Hardware output</dt><dd>{{active&&!stale ? telemetry?.hardware_enabled ? 'Enabled' : 'Muted' : '—'}}</dd></div><div><dt>Underrun frames</dt><dd>{{active&&!stale ? telemetry?.underruns ?? '—' : '—'}}</dd></div></dl><p v-if="active && telemetry?.error" class="field-error">{{telemetry.error}}</p></section>
     </aside>
     <div v-show="!stage" class="meter-banks">

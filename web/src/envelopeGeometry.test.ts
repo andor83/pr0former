@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_SCALE, MIN_HOLD, autoScale, dragHandle, envelopePoints, fitScale, logTime, logWidth, minScale, timeLabel } from './envelopeGeometry'
+import { readEnvelope, MAX_SCALE, MIN_HOLD, autoScale, dragHandle, envelopePoints, fitScale, logTime, logWidth, minScale, timeLabel } from './envelopeGeometry'
 
 const e = { attack: 10, decay: 100, sustain: 0.5, release: 300 }
 
@@ -61,4 +61,11 @@ describe('envelope geometry', () => {
     expect(timeLabel(2371)).toBe('2.4 s')
     expect(timeLabel(10000)).toBe('10.0 s')
   })
+})
+
+it('reads shared envelope defaults and refuses invented connected values',()=>{
+  const defaults=Object.entries({attack:0,decay:0,sustain:1,release:80}).map(([id,value])=>({id,default:value}))
+  expect(readEnvelope({},defaults)).toEqual({attack:0,decay:0,sustain:1,release:80})
+  expect(readEnvelope({attack:20},defaults,undefined,['attack'])).toBeNull()
+  expect(readEnvelope({attack:20},defaults,{attack:150},['attack'])).toEqual({attack:150,decay:0,sustain:1,release:80})
 })

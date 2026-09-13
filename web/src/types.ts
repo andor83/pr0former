@@ -3,11 +3,13 @@ export type Mode = 'structured' | 'conducted' | 'freeform'
 export type Signal = 'audio' | 'control' | 'spectral' | 'midi'
 export interface Parameter { id: string; label: string; unit: string; min: number; max: number; default: number; logarithmic: boolean; structural: boolean }
 export interface Port { id: string; label: string; signal: Signal; fixed_channels?: number | null }
-export interface Descriptor { default_channels?: number; kind: string; label: string; symbol: string; category: string; description: string; aliases: string[]; inputs: Port[]; outputs: Port[]; parameters: Parameter[] }
+export interface NodeDocumentation { title: string; explanation: string; steps: string[]; graph: { nodes: GraphNode[]; edges: GraphEdge[] } }
+export interface Descriptor { documentation?: NodeDocumentation; default_channels?: number; kind: string; label: string; symbol: string; category: string; description: string; aliases: string[]; inputs: Port[]; outputs: Port[]; parameters: Parameter[] }
 export interface IoConfig { port: string; address: string; destination: string }
-export interface GraphNode { io?: IoConfig | null; part_id?: string | null; library?:{id:string;version:number}|null; parent?: string | null; id: string; kind: string; label: string; x: number; y: number; channels: number; parameters: Record<string, number>; control_value?: number | string | null }
+export interface SampleChoice { asset: number; name: string; nickname: string }
+export interface GraphNode { sample_choices?: SampleChoice[]; io?: IoConfig | null; part_id?: string | null; library?:{id:string;version:number}|null; parent?: string | null; id: string; kind: string; label: string; x: number; y: number; channels: number; parameters: Record<string, number>; control_value?: number | string | null }
 export interface GraphEdge { id: string; source: string; source_port: string; target: string; target_port: string }
-export type MarkKind = 'text'|'rehearsal'|'cue'|'expression'|'tempo'|'lyric'
+export type MarkKind = 'text'|'rehearsal'|'cue'|'expression'|'tempo'|'lyric'|'chord'
 export interface StaffMark {id:string;beat:number;kind:MarkKind;text:string}
 export type CurveKind = 'slur'|'bracket'|'crescendo'|'decrescendo'
 export interface StaffCurve {id:string;kind:CurveKind;start_note?:string|null;start_beat:number;end_note?:string|null;end_beat:number;height:number;lift:number;end_lift?:number;start_dynamic?:Pick<AutomationEvent,'id'|'start'|'end'|'curve'>|null}
@@ -23,7 +25,7 @@ export interface Part { muted?:boolean; solo?:boolean; dynamics?:Dynamics|null; 
 export interface ScoreTimeline { barlines?:{beat:number;style:string}[]; version:1; length:number; loop_score:boolean; meters:{beat:number;beats:number;unit:number}[]; keys:{beat:number;key:string;mode?:'major'|'minor'|null}[]; repeats:{start:number;end:number;times:number;first_ending?:number|null}[]; navigation?:{at:number;target:number;fine?:number|null;coda?:[number,number]|null}|null; tempos?:{beat:number;bpm:number}[] }
 export interface ConductedSet {id:string;name:string;parts:string[]}
 export interface ConductedLayout {count_in_pulses:number;pulse_unit:number;sets:ConductedSet[]}
-export interface Project { score?: ScoreTimeline|null; schema_version: number; id: string; name: string; mode: Mode; revision: number; bpm: number; beats_per_bar: number; beat_unit?: number; conductor?:string|null; conducted?:ConductedLayout; graph: { nodes: GraphNode[]; edges: GraphEdge[] }; parts: Part[] }
+export interface Project { local_audio_assignments?:Record<string,string>; score?: ScoreTimeline|null; schema_version: number; id: string; name: string; mode: Mode; revision: number; bpm: number; beats_per_bar: number; beat_unit?: number; conductor?:string|null; conducted?:ConductedLayout; graph: { nodes: GraphNode[]; edges: GraphEdge[] }; parts: Part[] }
 export interface PartPlayback { position_end?:number|null; id: string; playing: boolean; start: number; position: number; pending: [number, boolean] | null; armed?:boolean;repeating?:boolean;count_in_remaining?:number|null;dynamic_override?:number|null;queue_position?:number|null;scheduled_start?:number|null }
 export interface Visualization {kind:'control'|'audio'|'spectral';value?:number|string;sequence?:number;generation?:number;size?:number;ready?:boolean;polar?:boolean;channels?:{magnitude:number[];phase:number[]}[];history?:string[];columns?:number}
 export interface Telemetry { osc_messages?:Record<string,[number,number|string]>; worker_max_work_us?:number; worker_max_block_gap_us?:number; route_targets?:Record<string,string>; feedback_edges?:string[]; midi_input_error?: string | null; node_io?: {error: string | null; dropped: number}; count_in_remaining?: number | null; metronome?: boolean; sample_rate?:number;block_size?:number;visualizations?:Record<string,Visualization>;  parts: PartPlayback[]; type: 'telemetry'; project_id: string; revision: number; epoch: string; sequence: number; server_time: number; sample: number; beat: number; bpm: number; running: boolean; hardware_enabled: boolean; underruns: number; error: string; values: Record<string, Record<string, number>> }

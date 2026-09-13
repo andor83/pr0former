@@ -553,7 +553,7 @@ pub fn assign_roots(
     project: &mut pr0_core::Project,
 ) -> Api<()> {
     for node in &mut project.graph.nodes {
-        if !matches!(node.kind.as_str(), "poly_sampler" | "granular_synth")
+        if !matches!(node.kind.as_str(), "poly_sampler" | "granular_synth" | "granular_cloud")
             || project
                 .graph
                 .edges

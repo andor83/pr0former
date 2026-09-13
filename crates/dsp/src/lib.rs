@@ -17,6 +17,8 @@ mod pitch_tracker;
 pub mod recorder;
 mod sampler;
 mod sequence;
+pub mod part_player;
+pub mod score_automation;
 mod spectral;
 pub mod stretch;
 mod visualizer;
@@ -158,6 +160,7 @@ struct Voice {
 }
 mod controllers;
 struct RuntimeNode {
+    part_player: Option<Box<part_player::Player>>,
     controllers: Option<Box<controllers::Controllers>>,
     midi_pending: Box<midi_events::Buffer>,
     midi_frame: Box<midi_events::Buffer>,
@@ -168,6 +171,11 @@ struct RuntimeNode {
     adsr: envelope::Adsr,
     steps: sequence::Steps,
     sample: Vec<[f32; 8]>,
+    sample_bank: Vec<(u32, Vec<[f32; 8]>)>,
+    selected_sample: Option<usize>,
+    sample_request: f64,
+    sample_input: Option<usize>,
+    sample_choices: Vec<u32>,
     sample_position: usize,
     spectral: Option<Box<spectral::Spectral>>,
     id: String,
@@ -379,12 +387,41 @@ impl RuntimeNode {
             .map(|i| self.values[i])
             .unwrap_or(0.)
     }
-    fn process(&mut self, clock: &Clock, hardware: &[f32; MAX_CHANNELS]) {
+    fn envelope_settings(&self) -> envelope::Settings {
+        envelope::Settings { attack:self.p("attack"), decay:self.p("decay"), sustain:self.p("sustain"), release:self.p("release"), reset:self.p("reset") > 0. }
+    }
+    fn process(&mut self, clock: &Clock, hardware: &[f32; MAX_CHANNELS], part_metronome: Option<(f64, f64, u8)>) {
         let sr = clock.sample_rate;
         let a = self.p("a");
         let b = self.p("b");
         let input = self.input[0];
         let mut scalar = 0.;
+        if let Some(port) = self.sample_input {
+            let connected = self.bindings.iter().any(|b| !b.parameter && b.destination == port);
+            let request = if connected { self.input[port][0] } else { self.p("asset") };
+            if request != self.sample_request {
+                self.sample_request = request;
+                // Legacy set_sample users have no selectable bank. An empty bank
+                // still reports an unavailable requested ID in telemetry.
+                if !self.sample_bank.is_empty() {
+                    if let Some(old) = self.selected_sample.take() {
+                        std::mem::swap(&mut self.sample, &mut self.sample_bank[old].1);
+                    }
+                    self.selected_sample = self.sample_bank.iter()
+                        .position(|(id, _)| f64::from(*id) == request);
+                    if let Some(next) = self.selected_sample {
+                        std::mem::swap(&mut self.sample, &mut self.sample_bank[next].1);
+                    }
+                    self.sample_position = 0;
+                    if let Some(sampler) = self.sampler.as_mut() {
+                        **sampler = sampler::Sampler::default();
+                    }
+                    if let Some(granular) = self.granular.as_mut() {
+                        **granular = granular::Granular::default();
+                    }
+                }
+            }
+        }
         self.output = [0.; MAX_CHANNELS];
         self.direct_midi_controls();
         self.control_text = None;
@@ -400,6 +437,12 @@ impl RuntimeNode {
             }
         }
         match self.kind.as_str() {
+            "sample_selector" => {
+                let index = self.p("index");
+                scalar = if index.is_finite() && index >= 0. {
+                    self.sample_choices.get(index.floor() as usize).copied().unwrap_or(0) as f64
+                } else { 0. };
+            }
             "subgraph_input_audio" | "subgraph_output_audio" => self.output = input,
             "subgraph_input_control" | "subgraph_output_control" => {
                 scalar = input[0];
@@ -571,7 +614,10 @@ impl RuntimeNode {
                     }
                 }
             }
-            "part_midi" | "midi_input" | "osc_to_midi" => {
+            "part_midi" | "part_player" | "midi_input" | "osc_to_midi" => {
+                if let Some(player) = &mut self.part_player {
+                    player.tick(clock, [self.input[0][0], self.input[1][0], self.input[2][0]], &mut self.midi_frame, part_metronome);
+                }
                 // Every producer receives raw channel messages; the scalar
                 // outlets are a decoding of the same frame that the typed
                 // output forwards, so the two can never disagree.
@@ -584,7 +630,7 @@ impl RuntimeNode {
                 self.control[6] = self.control[1];
                 scalar = self.control[0];
             }
-            "midi_output" | "midi_to_osc" | "poly_sampler" | "granular_synth" => {
+            "midi_output" | "midi_to_osc" | "poly_sampler" | "granular_synth" | "granular_cloud" => {
                 let mut values = std::array::from_fn(|i| self.input[i][0]);
                 let mut connected = std::array::from_fn(|i| {
                     self.bindings.iter().any(|b| {
@@ -610,7 +656,7 @@ impl RuntimeNode {
                     }
                 }
                 let notes = self.note_inputs.tick(values, connected);
-                if self.kind == "granular_synth" {
+                if matches!(self.kind.as_str(), "granular_synth" | "granular_cloud") {
                     for note in notes.into_iter().flatten() {
                         if clock.running || note.velocity == 0 {
                             self.granular
@@ -619,8 +665,13 @@ impl RuntimeNode {
                                 .note(note.pitch, note.velocity);
                         }
                     }
+                    if self.kind == "granular_cloud" && !connected[2..5].iter().any(|c| *c) {
+                        let pitch = if connected[0] { values[0] } else { self.p("root_note") };
+                        let velocity = if connected[1] { values[1] } else { 127. };
+                        self.granular.as_mut().unwrap().cloud(pitch.clamp(0.,127.) as u8, velocity.clamp(0.,127.) as u8);
+                    }
                     let settings = granular::Settings {
-                        root: self.p("root_note") - self.midi_controls.as_ref().unwrap().bend,
+                        root: self.p("root_note") - self.midi_controls.as_ref().map_or(0., |m| m.bend),
                         position: self.p("position"),
                         spray_ms: self.p("spray"),
                         grain_ms: self.p("grain_ms"),
@@ -643,18 +694,18 @@ impl RuntimeNode {
                                 .note(note.pitch, note.velocity);
                         }
                     }
-                    let (root, amplitude, looping, release) = (
+                    let (root, amplitude, looping, settings) = (
                         self.p("root_note") - self.midi_controls.as_ref().unwrap().bend,
                         self.p("amplitude"),
                         self.p("loop") > 0.,
-                        self.p("release"),
+                        self.envelope_settings(),
                     );
                     self.output = self.sampler.as_mut().unwrap().render(
                         &self.sample,
                         root,
                         amplitude,
                         looping,
-                        release,
+                        settings,
                         sr,
                         clock.running,
                     );
@@ -722,13 +773,7 @@ impl RuntimeNode {
                 self.control[2] = pulse as u8 as f64;
             }
             "adsr" => {
-                let settings = envelope::Settings {
-                    attack: self.p("attack"),
-                    decay: self.p("decay"),
-                    sustain: self.p("sustain"),
-                    release: self.p("release"),
-                    reset: self.p("reset") > 0.,
-                };
+                let settings = self.envelope_settings();
                 scalar = self.adsr.tick(
                     self.p("gate") > 0.,
                     input[0] > 0.,
@@ -1350,6 +1395,7 @@ pub struct Engine {
     order: Vec<usize>,
     pub clock: Clock,
     pub graph_clock: Clock,
+    part_metronome: Option<(f64, f64, u8)>,
     pub graph: Graph,
     priority: Vec<usize>,
     /// Indices of named send nodes; receives scan only these each sample.
@@ -1396,6 +1442,11 @@ impl Engine {
                 adsr: envelope::Adsr::default(),
                 steps: sequence::Steps::default(),
                 sample: vec![],
+                sample_bank: vec![],
+                selected_sample: None,
+                sample_request: f64::NAN,
+                sample_input: d.inputs.iter().position(|p| p.id == "sample_id"),
+                sample_choices: n.sample_choices.iter().map(|s| s.asset).collect(),
                 sample_position: 0,
                 spectral: if d.category == "Spectral"
                     || (pr0_core::named_route(&n.kind) && n.kind.ends_with("spectral"))
@@ -1534,7 +1585,7 @@ impl Engine {
                         n.parameters.get("fft_size").copied().unwrap_or(8192.) as usize,
                     ))
                 }),
-                granular: (n.kind == "granular_synth")
+                granular: matches!(n.kind.as_str(), "granular_synth" | "granular_cloud")
                     .then(|| Box::new(granular::Granular::default())),
                 pitch_shift: (n.kind == "granular_pitch_shift").then(|| {
                     Box::new(granular::PitchShift::new(
@@ -1551,9 +1602,11 @@ impl Engine {
                     },
                 ),
                 sampler: (n.kind == "poly_sampler").then(|| Box::new(sampler::Sampler::default())),
+                part_player: None,
                 midi_controls: (matches!(
                     n.kind.as_str(),
                     "part_midi"
+                        | "part_player"
                         | "midi_input"
                         | "osc_to_midi"
                         | "piano"
@@ -1845,6 +1898,7 @@ impl Engine {
             order,
             senders,
             clock: Clock::new(sample_rate),
+            part_metronome: None,
             graph_clock: Clock {
                 running: true,
                 ..Clock::new(sample_rate)
@@ -1987,6 +2041,11 @@ impl Engine {
                 self.clock.sample_rate,
             )
     }
+    /// Supply the show metronome's written position, meter origin and denominator
+    /// before each sample. None uses the continuously running graph beat grid.
+    pub fn set_part_player_metronome(&mut self, meter: Option<(f64, f64, u8)>) {
+        self.part_metronome = meter;
+    }
     pub fn set_meter(&mut self, beats_per_bar: u8, beat_unit: u8) {
         self.graph_clock.beat_length = 4. / beat_unit.max(1) as f64;
         self.graph_clock.bar_beats = beats_per_bar.max(1) as f64 * self.graph_clock.beat_length;
@@ -2008,6 +2067,8 @@ impl Engine {
             };
             let source = &previous.nodes[source_index];
             let compatible = target.kind == source.kind
+                && target.sample_choices == source.sample_choices
+                && target.sample_bank.iter().map(|s| s.0).eq(source.sample_bank.iter().map(|s| s.0))
                 && (target.route.is_none()
                     || (self.nodes.len() == previous.nodes.len()
                         && self
@@ -2015,6 +2076,7 @@ impl Engine {
                             .iter()
                             .zip(&previous.nodes)
                             .all(|(a, b)| a.id == b.id)))
+                && part_player::compatible(target.part_player.as_deref(), source.part_player.as_deref())
                 && target.part_id == source.part_id
                 && target.io == source.io
                 && target.channels == source.channels
@@ -2058,7 +2120,8 @@ impl Engine {
                     if target.part_id == source.part_id && target.defaults == source.defaults {
                         std::mem::swap(&mut target.midi_pending, &mut source.midi_pending);
                     }
-                    if target.part_id != source.part_id
+                    if target.kind == "part_player"
+                        || target.part_id != source.part_id
                         || target.io != source.io
                         || target.defaults != source.defaults
                     {
@@ -2096,11 +2159,36 @@ impl Engine {
                 }
             }
         }
+        for source in 0..previous.nodes.len() {
+            let Some(player) = &mut previous.nodes[source].part_player else { continue };
+            let mut releases = midi_events::Buffer::new();
+            player.stop(&mut releases);
+            if releases.len == 0 { continue; }
+            for old in &previous.nodes {
+                if old.bindings.iter().any(|b| b.source == source && b.signal == pr0_core::Signal::Midi) {
+                    if let Some(target) = self.nodes.iter_mut().find(|n| n.id == old.id) {
+                        for event in &releases.events[..releases.len] { target.midi_pending.push(*event); }
+                    }
+                }
+            }
+        }
+    }
+    /// Install a score clip prepared outside rendering.
+    pub fn set_part_player(&mut self, id: &str, clip: part_player::Clip) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id && n.kind == "part_player") {
+            node.part_player = Some(Box::new(part_player::Player::new(clip)));
+        }
     }
     pub fn set_sample(&mut self, id: &str, sample: Vec<[f32; 8]>) {
         if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
             n.sample = sample;
             n.sample_position = 0;
+        }
+    }
+    /// Prepared off the render path. Switching only swaps owned buffers, never frees them.
+    pub fn add_sample_choice(&mut self, id: &str, asset: u32, sample: Vec<[f32; 8]>) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
+            node.sample_bank.push((asset, sample));
         }
     }
     /// Preserve a part's synth phase and release envelopes in a prepared graph.
@@ -2853,7 +2941,7 @@ impl Engine {
                             });
                     }
                 }
-                self.nodes[idx].process(&self.graph_clock, &hardware);
+                self.nodes[idx].process(&self.graph_clock, &hardware, self.part_metronome);
                 let node=&mut self.nodes[idx];
                 if node.kind=="console_out" && node.bindings.iter().any(|b|!b.parameter && b.destination==0)
                     && (!node.input_event_only[0] || node.input_events[0]) {
@@ -2991,6 +3079,10 @@ impl Engine {
                         n.control[0]
                     },
                 );
+                if n.sample_input.is_some() {
+                    values.insert("_sample_id".into(), n.selected_sample.map(|i| n.sample_bank[i].0 as f64).unwrap_or(0.));
+                    values.insert("_sample_missing".into(), if n.sample_request > 0. && n.selected_sample.is_none() { 1. } else { 0. });
+                }
                 if let Some(tracker) = &n.pitch_tracker {
                     for slot in 0..n.p("slots") as usize {
                         values.insert(format!("pitch{}", slot + 1), tracker.notes[slot]);
@@ -3106,7 +3198,7 @@ impl Engine {
                 );
                 if matches!(
                     n.kind.as_str(),
-                    "part_midi" | "midi_input" | "osc_to_midi" | "piano"
+                    "part_midi" | "part_player" | "midi_input" | "osc_to_midi" | "piano"
                 ) {
                     values.insert(
                         "_dropped".into(),
@@ -3118,6 +3210,22 @@ impl Engine {
                     {
                         values.insert(name.into(), value);
                     }
+                }
+                if let Some(sampler) = &n.sampler {
+                    let (level, voices, held) = sampler.envelope_state();
+                    values.insert("_envelope".into(), level);
+                    values.insert("_voices".into(), voices as f64);
+                    values.insert("_held".into(), held as f64);
+                }
+                if let Some(player) = &n.part_player {
+                    let (bar, beat) = player.bar_beat();
+                    values.insert("_playing".into(), f64::from(player.playing));
+                    values.insert("_pending".into(), f64::from(player.pending()));
+                    values.insert("_repeating".into(), f64::from(player.repeating));
+                    values.insert("_position".into(), player.position);
+                    values.insert("_written_position".into(), player.written_position());
+                    values.insert("_bar".into(), bar);
+                    values.insert("_beat".into(), beat);
                 }
                 if n.kind == "clock" {
                     values.insert("tempo".into(), self.clock.bpm);
@@ -5957,7 +6065,7 @@ mod pan_tests {
             e.nodes[0].output = [0.5, -0.25, 0., 0., 0., 0., 0., 0.];
             let idx = e.nodes.iter().position(|n| n.id == "pan").unwrap();
             e.nodes[idx].input[0] = [0.5, -0.25, 0., 0., 0., 0., 0., 0.];
-            e.nodes[idx].process(&Clock::new(48000.), &[0.; MAX_CHANNELS]);
+            e.nodes[idx].process(&Clock::new(48000.), &[0.; MAX_CHANNELS], None);
             let out = e.nodes[idx].output;
             assert!((out[0] - expected[0]).abs() < 1e-9, "pan {pan}: {out:?}");
             assert!((out[1] - expected[1]).abs() < 1e-9, "pan {pan}: {out:?}");
@@ -6298,7 +6406,7 @@ mod unified_midi_tests {
 mod console_tests {
     use super::*;
     use pr0_core::{ControlValue, Edge, Node};
-    fn node(id:&str,kind:&str)->Node { Node {id:id.into(),kind:kind.into(),label:id.into(),x:0.,y:0.,channels:1,parameters:Default::default(),part_id:None,io:None,library:None,parent:None,control_value:None} }
+    fn node(id:&str,kind:&str)->Node { Node {sample_choices:vec![],id:id.into(),kind:kind.into(),label:id.into(),x:0.,y:0.,channels:1,parameters:Default::default(),part_id:None,io:None,library:None,parent:None,control_value:None} }
     fn engine()->Engine {
         Engine::prepare(Graph {nodes:vec![node("source","control_input"),node("debug","console_out")],edges:vec![Edge{id:"wire".into(),source:"source".into(),source_port:"out".into(),target:"debug".into(),target_port:"in".into()}]},48000.).unwrap()
     }
@@ -6349,3 +6457,12 @@ mod console_tests {
         assert_eq!(engine.take_console_entries().0[0].value,ControlValue::Text("hello".into()));
     }
 }
+
+#[cfg(test)]
+mod sample_selector_tests;
+
+#[cfg(test)]
+mod part_player_tests;
+
+#[cfg(test)]
+mod granular_cloud_tests;

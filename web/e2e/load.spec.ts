@@ -33,6 +33,7 @@ test('32 independent performers receive dedicated WebRTC monitors', async ({ bro
       nodes: users.flatMap((_, i) => [{ ...synth, id: `synth-${i}`, label: `Synth ${i}` }, { id: `monitor-${i}`, kind: 'monitor_output', label: `Monitor ${i}`, x: 500, y: i * 150, channels: 2, parameters: { gain: -12 } }]),
       edges: users.map((_, i) => ({ id: `send-${i}`, source: `synth-${i}`, source_port: 'out', target: `monitor-${i}`, target_port: 'in' })),
     }
+    if(uplink)project.local_audio_assignments=Object.fromEntries(users.map((user,i)=>[`synth-${i}`,user]))
     const saved = await owner.request.put(`/api/projects/${projectId}`, { headers, data: project })
     expect(saved.ok()).toBeTruthy(); project = await saved.json()
     expect((await owner.request.post(`/api/projects/${projectId}/transport`, { headers, data: { action: 'activate' } })).ok()).toBeTruthy()

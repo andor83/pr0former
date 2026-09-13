@@ -122,88 +122,140 @@ impl Drop for ImportDirectory {
     }
 }
 
+/// Project-scoped numeric IDs never name arbitrary filesystem paths.
+pub fn validate_choices(project: &pr0_core::Project) -> Result<(), String> {
+    for choice in project.graph.nodes.iter().flat_map(|n| &n.sample_choices) {
+        if !directory(&project.id)
+            .join(format!("{}.wav", choice.asset))
+            .is_file()
+        {
+            return Err(format!(
+                "Sample {} is not in this project; add it from the sample library first",
+                choice.asset
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
     let rate = crate::settings::read().sample_rate;
     crate::settings::validate_routes(project, &crate::settings::read())?;
+    validate_choices(project)?;
     cache_project(project, rate)?;
     let mut engine = pr0_dsp::Engine::prepare(project.graph.clone(), rate as f64)?;
     let (beats, unit) = project.initial_meter();
     engine.set_meter(beats, unit);
     crate::loops::restore(project, &mut engine)?;
     let mut total = 0;
+    let shortlist: std::collections::BTreeSet<u32> = project
+        .graph
+        .nodes
+        .iter()
+        .flat_map(|n| n.sample_choices.iter().map(|s| s.asset))
+        .collect();
+    let flat = project.graph.flatten()?;
     for node in &project.graph.nodes {
         if !matches!(
             node.kind.as_str(),
-            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "convolution_reverb"
+            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "granular_cloud" | "convolution_reverb"
         ) {
             continue;
         }
-        let asset = node.parameters.get("asset").copied().unwrap_or(0.) as u32;
-        if asset == 0 {
-            continue;
+        let default_asset = node.parameters.get("asset").copied().unwrap_or(0.) as u32;
+        let dynamic = matches!(
+            node.kind.as_str(),
+            "sample" | "poly_sampler" | "granular_synth" | "granular_cloud"
+        );
+        let connected = dynamic
+            && flat
+                .edges
+                .iter()
+                .any(|e| e.target == node.id && e.target_port == "sample_id");
+        let mut assets = if connected {
+            shortlist.clone()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        if default_asset != 0 {
+            assets.insert(default_asset);
         }
-        let mut reader = hound::WavReader::open(cache_path(&project.id, asset, rate))
-            .map_err(|e| format!("Sample {asset}: {e}"))?;
-        let spec = reader.spec();
-        if node.kind == "convolution_reverb" {
-            if !matches!(spec.channels, 1 | 2) {
+        for asset in assets {
+            let mut reader = hound::WavReader::open(cache_path(&project.id, asset, rate))
+                .map_err(|e| format!("Sample {asset}: {e}"))?;
+            let spec = reader.spec();
+            if node.kind == "convolution_reverb" {
+                if !matches!(spec.channels, 1 | 2) {
+                    return Err(format!(
+                        "Convolution response must be mono or stereo; sample has {} channels",
+                        spec.channels
+                    ));
+                }
+            } else if spec.channels as usize != node.channels {
+                if asset != default_asset {
+                    continue;
+                }
                 return Err(format!(
-                    "Convolution response must be mono or stereo; sample has {} channels",
-                    spec.channels
+                    "Sample has {} channels; node {} has {}",
+                    spec.channels, node.label, node.channels
                 ));
             }
-        } else if spec.channels as usize != node.channels {
-            return Err(format!(
-                "Sample has {} channels; node {} has {}",
-                spec.channels, node.label, node.channels
-            ));
-        }
-        let raw: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {
-            reader
-                .samples::<f32>()
-                .collect::<Result<_, _>>()
-                .map_err(|e| e.to_string())?
-        } else {
-            let scale = 2_f32.powi(spec.bits_per_sample as i32 - 1);
-            reader
-                .samples::<i32>()
-                .map(|x| x.map(|x| x as f32 / scale))
-                .collect::<Result<_, _>>()
-                .map_err(|e| e.to_string())?
-        };
-        let channels = spec.channels as usize;
-        let input_frames = raw.len() / channels;
-        let length = (input_frames as f64 * rate as f64 / spec.sample_rate as f64).round() as usize;
-        let mut frames = Vec::with_capacity(length);
-        for i in 0..length {
-            let position = i as f64 * spec.sample_rate as f64 / rate as f64;
-            let index = position as usize;
-            let fraction = (position - index as f64) as f32;
-            let mut frame = [0.; 8];
-            for ch in 0..channels {
-                let a = raw.get(index * channels + ch).copied().unwrap_or(0.);
-                let b = raw.get((index + 1) * channels + ch).copied().unwrap_or(a);
-                frame[ch] = a + (b - a) * fraction;
+            let raw: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {
+                reader
+                    .samples::<f32>()
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| e.to_string())?
+            } else {
+                let scale = 2_f32.powi(spec.bits_per_sample as i32 - 1);
+                reader
+                    .samples::<i32>()
+                    .map(|x| x.map(|x| x as f32 / scale))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| e.to_string())?
+            };
+            let channels = spec.channels as usize;
+            let input_frames = raw.len() / channels;
+            let length =
+                (input_frames as f64 * rate as f64 / spec.sample_rate as f64).round() as usize;
+            if total + length > 8_000_000 {
+                return Err("Prepared sample memory exceeds 256 MB".into());
             }
-            if node.kind == "convolution_reverb" && channels == 1 {
-                frame[1] = frame[0];
+            let mut frames = Vec::with_capacity(length);
+            for i in 0..length {
+                let position = i as f64 * spec.sample_rate as f64 / rate as f64;
+                let index = position as usize;
+                let fraction = (position - index as f64) as f32;
+                let mut frame = [0.; 8];
+                for ch in 0..channels {
+                    let a = raw.get(index * channels + ch).copied().unwrap_or(0.);
+                    let b = raw.get((index + 1) * channels + ch).copied().unwrap_or(a);
+                    frame[ch] = a + (b - a) * fraction;
+                }
+                if node.kind == "convolution_reverb" && channels == 1 {
+                    frame[1] = frame[0];
+                }
+                frames.push(frame);
             }
-            frames.push(frame);
+            if node.kind == "phase_vocoder" {
+                frames = pr0_dsp::stretch::prepare(
+                    &frames,
+                    channels,
+                    node.parameters.get("speed").copied().unwrap_or(1.),
+                    node.parameters.get("pitch").copied().unwrap_or(0.),
+                );
+            }
+            total += frames.len();
+            if total > 8_000_000 {
+                return Err("Prepared sample memory exceeds 256 MB".into());
+            }
+            if dynamic {
+                engine.add_sample_choice(&node.id, asset, frames);
+            } else {
+                engine.set_sample(&node.id, frames);
+            }
         }
-        if node.kind == "phase_vocoder" {
-            frames = pr0_dsp::stretch::prepare(
-                &frames,
-                channels,
-                node.parameters.get("speed").copied().unwrap_or(1.),
-                node.parameters.get("pitch").copied().unwrap_or(0.),
-            );
-        }
-        total += frames.len();
-        if total > 8_000_000 {
-            return Err("Prepared sample memory exceeds 256 MB".into());
-        }
-        engine.set_sample(&node.id, frames);
     }
+    crate::performance::Sequencer::prepare_players(project, &mut engine)?;
     Ok(engine)
 }
 
@@ -229,7 +281,7 @@ pub fn cache_project(project: &pr0_core::Project, rate: u32) -> Result<(), Strin
     for node in &project.graph.nodes {
         if matches!(
             node.kind.as_str(),
-            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "convolution_reverb"
+            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "granular_cloud" | "convolution_reverb"
         ) {
             let asset = node.parameters.get("asset").copied().unwrap_or(0.) as u32;
             if asset != 0 {

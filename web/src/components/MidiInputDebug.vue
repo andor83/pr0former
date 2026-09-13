@@ -18,8 +18,8 @@ const lastControls=computed(()=>['Control change','Pitch bend','Program change',
     <div class="control-readouts">
       <label v-for="item in lastControls" :key="item.type">Last {{item.type.toLowerCase()}}<output :aria-label="`Last MIDI ${item.type.toLowerCase()}`">{{live&&item.message?`Ch ${item.message.channel} · ${item.message.detail} · ${item.message.value}`:'—'}}</output></label>
     </div>
-    <div class="debug-heading"><h4>Observed history</h4><button class="text-button" :disabled="!history.length" @click="history=[]">Clear observed MIDI history</button></div>
-    <p class="feature-note">Only the latest 20 observations are kept in memory; older entries are discarded. Sampled at 20 updates/second, after input decoding and any channel filter. Each row shows the last message in an update; +N is the number received since the previous observation. Fast messages can be skipped here. This is not a complete event log. System messages and SysEx are not forwarded.</p>
+    <div class="debug-heading"><h4 aria-label="Observed history">Observed history<HelpNote label="Observed history">Only the latest 20 observations are kept in memory; older entries are discarded. Sampled at 20 updates/second, after input decoding and any channel filter. Each row shows the last message in an update; +N is the number received since the previous observation. Fast messages can be skipped here. This is not a complete event log. System messages and SysEx are not forwarded.</HelpNote></h4><button class="text-button" :disabled="!history.length" @click="history=[]">Clear observed MIDI history</button></div>
+
     <div v-if="history.length" class="midi-history" tabindex="0" aria-label="Observed MIDI messages">
       <table><thead><tr><th>Count</th><th>Type</th><th>Ch</th><th>Detail</th><th>Value</th><th>Hex bytes</th></tr></thead><tbody><tr v-for="item in history" :key="item.sequence"><td>{{item.sequence}} <small v-if="item.arrivals>1">(+{{item.arrivals}})</small></td><td>{{item.type}}</td><td>{{item.channel}}</td><td>{{item.detail}}</td><td>{{item.value}}</td><td><code>{{item.raw}}</code></td></tr></tbody></table>
     </div>

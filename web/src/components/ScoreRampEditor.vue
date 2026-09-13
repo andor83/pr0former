@@ -373,11 +373,11 @@ const selectedValue = computed(() => {
         </form>
         <small v-if="!laneForm" class="ramp-hint">{{
           selectedValue
-            ? `Selected ${activeLine?.name}: beat ${selected!.beat + 1} · ${selectedValue.value}${dynamicName(selectedValue.value) ? ' (' + dynamicName(selectedValue.value) + ')' : ''} · ↑↓ nudge · Backspace deletes`
+            ? `Selected ${activeLine?.name}: beat ${selected!.beat + 1} · ${selectedValue.value}${dynamicName(selectedValue.value) ? ' (' + dynamicName(selectedValue.value) + ')' : ''}`
             : editable
-              ? `Editing ${activeLine?.name || 'velocity'} · click the graph to add a point · drag points to move · click a chip to edit that line`
+              ? `Editing ${activeLine?.name || 'velocity'}`
               : 'Velocity and continuous MIDI ramps'
-        }}</small>
+        }}<HelpNote label="Ramp editing">Click the graph to add a point, drag points to move them, and click a chip to edit that line. Use ↑ / ↓ to nudge the selected point and Backspace to delete it.</HelpNote></small>
       </template>
     </div>
     <svg

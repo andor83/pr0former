@@ -71,3 +71,46 @@ The first running sample emits a tick. The node follows the engine’s graph clo
 ## Note-control nodes
 
 Use both MIDI paths for every instrument node that receives note data: expose the raw `midi` port and keep the numeric `pitch`, `velocity`, `gate`, `trigger`, `note_off` controls working independently. A direct MIDI cable must decode into the same voice behavior as the five explicit controls; do not make one path a UI-only alias. A trigger/release is one sample wide with a low sample between events; read pitch and velocity on that same sample. Gate reports any held notes and does not encode individual polyphonic releases. `crates/dsp/src/midi_controls.rs` provides the bounded event source; `note_inputs.rs` decodes consumer edges. Keep MIDI callbacks, device connections and OSC encoding in `pr0-server`, outside DSP rendering. See ARCHITECTURE.md for the exact OSC wire protocol and queue/voice limits.
+
+## Documentation supplied by a node author
+
+Keep a node's usage and worked example with its catalog metadata. The descriptor's
+`documentation` field supplies the in-app reference; the frontend does not guess
+example connections. Built-in entries live in
+`crates/core/src/node_documentation.json` and must include a graph accepted by the
+server validator. See [Documentation and contextual help](DOCUMENTATION.md) for
+fields, setup requirements and the read-only graph renderer.
+
+## Sample selector and sample inputs
+
+`sample_selector` converts an Index (0 through n−1) into the project-local numeric
+Sample ID stored in its ordered `Node.sample_choices`. It supports up to 64 entries,
+optional display nicknames and server-validated parameter input. Configure the
+list in options using the project-sample autocomplete. For development, click the
+orange Kick/Snare/Hat entries; for a programmed patch, connect a number to Index.
+Connect the output to a Polyphonic sampler, Granular synth or Sample player
+`sample_id` input. Send MIDI/trigger notes separately to hear the selection.
+
+Preparation loads the matching-channel shortlist audio before rendering. Switching
+swaps retained buffers and resets old voices/position, without allocation or I/O.
+It does not change the sampler root MIDI note. Empty lists, invalid indices and
+unprepared/mismatched IDs select silence. `sample` playback still follows show
+transport. See the catalog's Sample selector help example for the complete setup.
+
+### Play score snippets from the graph
+
+Add **Part player** and choose a score part in its Options. Wire triggers or algorithmic controls to **Play**, **Play & repeat**, and **Stop**. With the audio engine enabled, the snippet starts on the next metronome beat at the current tempo, even while the performance is stopped. Play runs once; Play & repeat loops the whole part; Stop releases notes and cancels pending playback. Retriggering restarts at the next beat without count-in. The node shows its selected part and current written bar/beat.
+
+Connect its **MIDI** outlet to **MIDI output** and select a physical port there, or wire it straight into a synth/sampler. Each player is independent, so several short parts can form an algorithmic freeform patch. A Clock ratio or Counter can supply periodic launch triggers; leave a low interval between triggers. The node’s in-app help contains a complete trigger/loop/stop wiring example.
+
+### Polyphonic sampler envelopes
+
+Polyphonic sampler now gives every note its own ADSR. Open Options to drag the same orange envelope graph used by the standalone ADSR node, or set Attack, Decay, Sustain and Release numerically. The graph is also shown on the node; its dotted line is the highest active voice envelope. Connected settings remain read-only and display engine values. New notes start independent envelopes; releasing one pitch leaves other held notes sounding. Loop while held sustains the sample beyond its original length.
+
+### Granular Cloud
+
+Granular Cloud is a continuous version of Granular synth with no MIDI inlet. Choose a sample, enable the engine, and move Cloud center between 0 and 1. Spray randomizes the starts of overlapping Hann-enveloped grains around that point. Grain duration, density, amplitude, release, root note, sample ID and the numeric note inputs are preserved. With no Gate/Trigger/note-off wiring it runs continuously; optional Pitch/Velocity set its sound. Wire Gate or Trigger/note-off to use the same note control as Granular synth. The Cloud center inlet retains the `position` ID for compatibility. Sample selector can switch its source.
+
+### View a Part player’s playback
+
+Click the Part player’s bar/beat panel to open its selected part in a read-only modal. Switch between Notation and Piano roll to see all staves and their playheads. The view follows that player’s position, including score repeats, independently of show transport. View changes and scrolling do not edit or save the score.

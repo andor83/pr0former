@@ -15,6 +15,8 @@ const props = defineProps<{
   part: Part
   selected: Set<string>
   editable: boolean
+  fitNotes?: boolean
+  length?: number
   tool: 'write' | 'select'
   anchors: ScoreAnchor[]
   scale: number
@@ -32,14 +34,14 @@ const root = ref<HTMLElement>(),
   grid = ref<HTMLElement>()
 onMounted(() => {
   if (root.value)
-    root.value.scrollTop = Math.max(0, (pitches.value[0]! - 72) * 20)
+    root.value.scrollTop = props.fitNotes ? 0 : Math.max(0, (pitches.value[0]! - 72) * 20)
 })
 const pitches = computed(() => {
   const high = Math.min(
       127,
-      Math.max(84, ...props.part.notes.map((n) => n.pitch + 3)),
+      Math.max(props.fitNotes && props.part.notes.length ? 0 : 84, ...props.part.notes.map((n) => n.pitch + 3)),
     ),
-    low = Math.max(0, Math.min(36, ...props.part.notes.map((n) => n.pitch - 3)))
+    low = Math.max(0, Math.min(props.fitNotes && props.part.notes.length ? 127 : 36, ...props.part.notes.map((n) => n.pitch - 3)))
   return Array.from({ length: high - low + 1 }, (_, i) => high - i)
 })
 const xAt = (beat: number) => props.origin + beat * props.scale
@@ -252,7 +254,7 @@ const shown = computed(() => [
   >
     <div class="roll-ruler" :style="{ width: `${width}px` }">
       <span
-        v-for="b in Math.ceil((width - origin) / scale)"
+        v-for="b in Math.ceil(length ?? ((width - origin) / scale))"
         :key="b"
         :style="{ left: `${xAt(b - 1)}px`, width: `${scale}px` }"
         >{{ b }}</span
@@ -289,6 +291,8 @@ const shown = computed(() => [
           v-for="n in shown.filter((n) => n.pitch === pitch)"
           :key="n.id"
           class="midi-note"
+          :tabindex="editable ? 0 : -1"
+          :aria-disabled="!editable"
           :data-roll-note="n.id"
           :class="{
             selected: selected.has(noteKey(part.id, n.id)),
@@ -300,7 +304,7 @@ const shown = computed(() => [
           }"
           :aria-label="`Note ${n.pitch} at beat ${n.beat + 1}`"
         >
-          <span data-resize title="Drag to resize" />
+          <span v-if="editable" data-resize title="Drag to resize" />
         </button>
       </div>
       <div class="roll-playhead" :style="{ left: `${xAt(beat)}px` }" />

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { X } from '@lucide/vue'
-defineProps<{ title: string; error?: string }>()
+defineProps<{ title: string; error?: string; wide?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 const dialog = ref<HTMLDialogElement>()
 let previous: HTMLElement | null = null
@@ -23,6 +23,7 @@ onUnmounted(() =>
     ><dialog
       ref="dialog"
       class="score-dialog"
+      :class="{wide}"
       :aria-label="title"
       @cancel.prevent="emit('close')"
       @close="emit('close')"
@@ -58,6 +59,7 @@ onUnmounted(() =>
   border-radius: 10px;
   box-shadow: 0 20px 80px #0008;
 }
+.score-dialog.wide{width:min(1200px,calc(100vw - 24px))}
 .score-dialog::backdrop {
   background: #0008;
 }

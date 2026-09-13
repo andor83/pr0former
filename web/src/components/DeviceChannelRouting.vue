@@ -39,11 +39,11 @@ watch(() => props.sampleRate, refresh)
 </script>
 <template>
   <section class="parameter-row device-routing" aria-label="Physical channel routing">
-    <div class="parameter-heading"><h3>Channel routing</h3><span class="small-tag">{{node.channels}} SIGNAL CHANNELS</span></div>
+    <div class="parameter-heading"><h3 aria-label="Channel routing">Channel routing<HelpNote label="Channel routing">{{input ? 'Each signal channel reads its chosen physical input. Reusing an input duplicates it; None produces silence.' : 'Signal channels sharing a destination are summed. Mix to stereo sends odd channels left and even channels right, and adjusts Output gain for headroom. Manual mappings retain the current gain.'}}<template v-if="selected.length > 1"><br /><br />This mapping applies to every enabled output interface. Destinations beyond an interface’s channel count are ignored.</template></HelpNote></h3><span class="small-tag">{{node.channels}} SIGNAL CHANNELS</span></div>
     <p v-if="!devices && !error" class="feature-note">Checking interface channels…</p>
     <p v-for="device in selected" :key="device.id" class="feature-note">{{device.name}} · {{device.channels ? `${device.channels} physical ${input ? 'inputs' : 'outputs'} at ${sampleRate} Hz` : device.error || 'Channel count unavailable'}}</p>
     <p v-if="devices && !selected.length" class="feature-note">No available interface selected. Configure routes for physical channels 1–64; unavailable channels stay silent.</p>
-    <HelpNote v-if="selected.length > 1">This mapping applies to every enabled output interface. Destinations beyond an interface’s channel count are ignored.</HelpNote>
+
     <p v-if="error" class="field-error" role="alert">{{error}}</p>
     <table>
       <thead><tr><th scope="col">Signal channel</th><th scope="col">{{input ? 'Physical source' : 'Physical destination'}}</th></tr></thead>
@@ -63,7 +63,7 @@ watch(() => props.sampleRate, refresh)
       <button v-if="!input && node.channels > 1" class="button small" :disabled="disabled || (count > 0 && count < 2)" @click="preset('stereo')">Mix to stereo</button>
       <button class="button small" @click="refresh">Refresh channels</button>
     </div>
-    <HelpNote>{{input ? 'Each signal channel reads its chosen physical input. Reusing an input duplicates it; None produces silence.' : 'Signal channels sharing a destination are summed. Mix to stereo sends odd channels left and even channels right, and adjusts Output gain for headroom. Manual mappings retain the current gain.'}}</HelpNote>
+
   </section>
 </template>
 <style scoped>

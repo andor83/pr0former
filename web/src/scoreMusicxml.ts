@@ -7,6 +7,7 @@ import type {
   NoteNotation,
 } from './types'
 import { newId } from './id'
+import { chordHarmony, readChordHarmony } from './chordSymbols'
 import {
   keyNames,
   metadata,
@@ -215,7 +216,7 @@ export function exportScoreMusicXML(
           ss.forEach((s, si) => {
             for (const mark of s.marks || [])
               if (mark.beat >= m.start && mark.beat < m.end)
-                content += direction(
+                content += (mark.kind === 'chord' ? chordHarmony(mark.text, Math.round((mark.beat - m.start) * divisions), si + 1) : null) ?? direction(
                   mark.beat,
                   `<direction-type>${
                     mark.kind === 'rehearsal'
@@ -563,6 +564,12 @@ export function importScoreMusicXML(xml: string): {
             if (!chord) position += duration
             furthest = Math.max(furthest, beat + duration)
           }
+        } else if (item.tagName === 'harmony') {
+          const text = readChordHarmony(item), at = position + num(item, 'offset', 0) / div
+          if (text && text.length <= 64 && at >= 0 && at <= 4096) {
+            const s = staff(num(item, 'staff', 1))
+            s.marks = [...(s.marks || []), { id: newId(), beat: at, kind: 'chord', text }]
+          } else warnings.add('An unsupported harmony symbol was omitted; review the original chord chart.')
         } else if (item.tagName === 'barline') {
           const r = item.querySelector('repeat')
           if (r?.getAttribute('direction') === 'forward')
@@ -772,6 +779,7 @@ export function importScoreMusicXML(xml: string): {
 /** Native project JSON remains the lossless format for graph and performance settings. */
 export function musicXMLExportWarnings(project: Project): string[] {
   const warnings: string[] = []
+  if (project.parts.some(p => staves(p).some(s => s.marks?.some(m => m.kind === 'chord' && !chordHarmony(m.text, 0, 1))))) warnings.push('Custom chord labels without a pitch root export as text; native JSON retains their chord-symbol type.')
   if(project.score?.barlines?.length || project.parts.some(p => p.muted || p.solo)) warnings.push('Special barline styles and mute/solo settings remain in the native project.')
   if (project.parts.some((p) => p.staves?.some((s) => s.hidden_rests?.length)))
     warnings.push(

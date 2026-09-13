@@ -7,10 +7,13 @@ import { Settings2 } from '@lucide/vue'
 import type { Descriptor, GraphNode, Telemetry } from '../types'
 import { formatValue } from '../api'
 import GraphControl from './GraphControl.vue'
+import PartPlayerReadout from './PartPlayerReadout.vue'
+import SampleSelectorButtons from './SampleSelectorButtons.vue'
 import PianoKeys from './PianoKeys.vue'
 import DrumPads from './DrumPads.vue'
 import MidiControllers from './MidiControllers.vue'
 import EnvelopeGraph from './EnvelopeGraph.vue'
+import { readEnvelope } from '../envelopeGeometry'
 import PitchTrackerReadout from './PitchTrackerReadout.vue'
 import NodeMeters from './NodeMeters.vue'
 import OscMessageDebug from './OscMessageDebug.vue'
@@ -18,9 +21,9 @@ import MidiInputActivity from './MidiInputActivity.vue'
 import TriggerButton from './TriggerButton.vue'
 import ToggleButton from './ToggleButton.vue'
 import LocalAudioButton from './LocalAudioButton.vue'
-import {remoteAudioInputs} from '../browserInputs'
+import {type LocalAudioAccess,remoteAudioInputs} from '../browserInputs'
 import DataVisualizer from './DataVisualizer.vue'
-const props = defineProps<NodeProps<{ projectId:string;canMute:boolean;controller:(node:string,index:number,value:number|null|'cancel'|'clear')=>void;connected:string[];piano:(project:string,node:string,pitch:number,velocity:number,bend?:number)=>void;active:boolean;editable:boolean;driven:boolean;setControl:(id:string,value:number|string)=>void;bang:(id:string)=>void;node: GraphNode; descriptor: Descriptor; values?: Record<string, number>; edit: (id:string)=>void; open: (id: string) => void; connectPort: (id: string, port: string, direction: string) => void; toggleSelection:(id:string)=>void; contextMenu: (id: string, event: MouseEvent) => void }>>()
+const props = defineProps<NodeProps<{ previewPart?:(id:string)=>void;partName?:string;parameter?:(node:string,key:string,value:number)=>void;projectId:string;canMute:boolean;controller:(node:string,index:number,value:number|null|'cancel'|'clear')=>void;connected:string[];piano:(project:string,node:string,pitch:number,velocity:number,bend?:number)=>void;active:boolean;editable:boolean;driven:boolean;setControl:(id:string,value:number|string)=>void;bang:(id:string)=>void;node: GraphNode; descriptor: Descriptor; values?: Record<string, number>; edit: (id:string)=>void; open: (id: string) => void; connectPort: (id: string, port: string, direction: string) => void; toggleSelection:(id:string)=>void; contextMenu: (id: string, event: MouseEvent) => void }>>()
 const telemetry = inject<ShallowRef<Telemetry | null>>('telemetry')
 const telemetryStale=inject<ComputedRef<boolean>>('telemetryStale')
 const values = computed(() => telemetry?.value?.values[props.id])
@@ -36,15 +39,14 @@ const midiOutputs = computed(() => props.data.descriptor.outputs.filter(port => 
 const regularInputs = computed(() => inputs.value.filter(port => port.signal !== 'midi'))
 const regularOutputs = computed(() => props.data.descriptor.outputs.filter(port => port.signal !== 'midi'))
 // The on-node envelope shows engine values while live, else the stored parameters.
-const adsrEnvelope = computed(() => {
-  const live = props.data.active && !(telemetryStale?.value ?? true) ? values.value : undefined
-  const stored = props.data.node.parameters
-  const pick = (key: string, fallback: number) => live?.[key] ?? stored[key] ?? fallback
-  return { attack: pick('attack', 10), decay: pick('decay', 100), sustain: pick('sustain', 0.7), release: pick('release', 200) }
-})
+const hasEnvelope = computed(() => ['adsr','poly_sampler'].includes(props.data.node.kind))
+const adsrEnvelope = computed(() => readEnvelope(props.data.node.parameters, props.data.descriptor.parameters,
+  props.data.active && !(telemetryStale?.value ?? true) ? values.value : undefined, props.data.connected))
+const audioAccess=inject<ComputedRef<LocalAudioAccess>>('localAudioAccess')
+const assignedName=computed(()=>audioAccess?.value.members.find(m=>m.id===audioAccess.value.assignments[props.id])?.username)
 const audioSource=computed(()=>remoteAudioInputs.value.find(i=>i.project_id===props.data.projectId&&i.node===props.id))
 const audioName=computed(()=>audioSource.value?`${audioSource.value.user_name} (${audioSource.value.machine_name})`:undefined)
-const height = computed(() => props.data.node.kind==='browser_input'?235 : ['midi_input','local_midi_input','midi_to_osc','osc_to_midi','osc_input','osc_output'].includes(props.data.node.kind) ? Math.max(320,100+Math.max(inputs.value.length,props.data.descriptor.outputs.length)*30) : ['knobs','sliders'].includes(props.data.node.kind) ? Math.max(300,130+Math.max(props.data.node.parameters.count??4,5)*30) : props.data.node.kind === 'pitch_tracker' ? Math.max(210,172+30*(props.data.node.parameters.slots??1)) : props.data.node.kind === 'piano' ? 280 : props.data.node.kind === 'drum_pads' ? 300 : props.data.node.kind === 'control_input' ? 260 : visualizer.value ? props.data.node.kind==='control_visualizer'?190:150+Math.ceil(props.data.node.channels/2)*(props.data.node.kind==='spectral_visualizer'?148:104) : Math.max(isMath.value ? 124 : 156, (props.data.node.kind === 'subgraph' ? 112 : 100) + Math.max(inputs.value.length, props.data.descriptor.outputs.length) * 30))
+const height = computed(() => props.data.node.kind==='part_player'?380 : props.data.node.kind==='sample_selector'?132+Math.max(1,Math.min(8,props.data.node.sample_choices?.length??0))*36 : props.data.node.kind==='browser_input'?235 : ['midi_input','local_midi_input','midi_to_osc','osc_to_midi','osc_input','osc_output'].includes(props.data.node.kind) ? Math.max(320,100+Math.max(inputs.value.length,props.data.descriptor.outputs.length)*30) : ['knobs','sliders'].includes(props.data.node.kind) ? Math.max(300,130+Math.max(props.data.node.parameters.count??4,5)*30) : props.data.node.kind === 'pitch_tracker' ? Math.max(210,172+30*(props.data.node.parameters.slots??1)) : props.data.node.kind === 'piano' ? 280 : props.data.node.kind === 'drum_pads' ? 300 : props.data.node.kind === 'control_input' ? 260 : visualizer.value ? props.data.node.kind==='control_visualizer'?190:150+Math.ceil(props.data.node.channels/2)*(props.data.node.kind==='spectral_visualizer'?148:104) : Math.max(isMath.value ? 124 : 156, (props.data.node.kind === 'subgraph' ? 112 : 100) + Math.max(inputs.value.length, props.data.descriptor.outputs.length) * 30))
 function controlSelect(event: MouseEvent) {
   if (event.ctrlKey && event.button === 0 && !(event.target instanceof Element && event.target.closest('button,.vue-flow__handle'))) {
     event.preventDefault();event.stopPropagation();props.data.toggleSelection(props.id)
@@ -66,8 +68,9 @@ function controlSelect(event: MouseEvent) {
     <output aria-label="Stored value">{{formatValue(data.active&&!(telemetryStale??true)?values?.value:data.node.parameters.value??0)}}</output>
     <Handle id="out" type="source" :position="Position.Right" class="control" title="Value output" aria-label="Value output" @click.stop="data.connectPort(id,'out','source')" />
   </div>
-  <div v-else class="patch-node" :class="[signal, { selected, 'math-node': isMath, 'visualizer-node':visualizer }]" :style="{ minHeight: `${height}px`, width: ['midi_input','local_midi_input','midi_to_osc','osc_to_midi','osc_input','osc_output'].includes(data.node.kind) ? '420px' : ['knobs','sliders'].includes(data.node.kind) ? `${data.node.kind==='sliders'&&data.node.parameters.orientation===1?350:160+88*(data.node.parameters.count??4)}px` : data.node.kind==='pitch_tracker' ? `${Math.max(240,24+92*(data.node.parameters.slots??1))}px` : data.node.kind==='piano' ? `${160+256*Math.min(data.node.parameters.octaves??1,10-(data.node.parameters.octave??4))}px` : data.node.kind==='drum_pads' ? '384px' : data.node.kind==='adsr' ? '300px' : data.node.kind==='meter' ? `${Math.max(204,150+16*Math.min(8,data.node.channels))}px` : undefined }" tabindex="0" @mousedown="controlSelect" @click="event => { if(event.ctrlKey) event.stopPropagation() }" @contextmenu.prevent.stop="!$event.ctrlKey && data.contextMenu(id, $event)" @keydown.enter.stop.prevent="data.open(id)" @dblclick.stop="data.open(id)">
-    <div class="node-cap"><span>{{ data.descriptor.category }}</span><button class="node-settings nodrag nopan" :aria-label="`Edit ${data.node.label}`" @click.stop="data.edit(id)"><Settings2 :size="14" /></button></div>
+  <div v-else class="patch-node" :class="[signal, { selected, 'math-node': isMath, 'visualizer-node':visualizer }]" :style="{ minHeight: `${height}px`, width: ['midi_input','local_midi_input','midi_to_osc','osc_to_midi','osc_input','osc_output'].includes(data.node.kind) ? '420px' : ['knobs','sliders'].includes(data.node.kind) ? `${data.node.kind==='sliders'&&data.node.parameters.orientation===1?350:160+88*(data.node.parameters.count??4)}px` : data.node.kind==='pitch_tracker' ? `${Math.max(240,24+92*(data.node.parameters.slots??1))}px` : data.node.kind==='piano' ? `${160+256*Math.min(data.node.parameters.octaves??1,10-(data.node.parameters.octave??4))}px` : data.node.kind==='drum_pads' ? '384px' : data.node.kind==='poly_sampler' ? '380px' : data.node.kind==='adsr' ? '300px' : data.node.kind==='meter' ? `${Math.max(204,150+16*Math.min(8,data.node.channels))}px` : undefined }" tabindex="0" @mousedown="controlSelect" @click="event => { if(event.ctrlKey) event.stopPropagation() }" @contextmenu.prevent.stop="!$event.ctrlKey && data.contextMenu(id, $event)" @keydown.enter.stop.prevent="data.open(id)" @dblclick.stop="data.open(id)">
+    <div class="node-body" :style="{ minHeight: `${height - 2}px`, paddingBottom: data.node.kind==='sample_selector' ? '36px' : undefined }">
+    <div class="node-cap"><span>{{ data.descriptor.category }}<HelpNote :label="data.descriptor.label">{{data.descriptor.description}}</HelpNote></span><button class="node-settings nodrag nopan" :aria-label="`Edit ${data.node.label}`" @click.stop="data.edit(id)"><Settings2 :size="14" /></button></div>
     <div v-if="isMath" class="math-symbol">{{ data.descriptor.symbol }}</div>
     <div v-else class="node-title"><span class="node-glyph">{{ data.descriptor.symbol }}</span><span class="node-name">{{ audioName || data.node.label }}<small v-if="renamed" class="node-kind">{{ data.descriptor.label }}</small></span></div>
     <div v-if="isMath" class="math-label">{{ data.node.label }}<small v-if="renamed" class="node-kind">{{ data.descriptor.label }}</small></div>
@@ -86,26 +89,34 @@ function controlSelect(event: MouseEvent) {
       <span>{{ port.label }}</span><Handle :id="port.id" type="source" :position="Position.Right" :class="port.signal" @click.stop="data.connectPort(id, port.id, 'source')" />
     </div>
     <MidiControllers v-if="['knobs','sliders'].includes(data.node.kind)" :node="data.node" :values="values" :connected="data.connected" :editable="data.editable" :disabled="!data.active||!data.editable||(telemetryStale??true)" @control="(index,value)=>data.controller(id,index,value)" />
+    <PartPlayerReadout :interactive="!!data.previewPart && !!data.partName" @open="data.previewPart?.(id)" v-if="data.node.kind==='part_player'" class="node-part-player" :part-name="data.partName" :values="values" :stale="!data.active||(telemetryStale??true)" />
     <NodeMeters v-if="data.node.kind==='meter'" :channels="data.node.channels" :values="values" :stale="!data.active || (telemetryStale??true)" />
-    <LocalAudioButton v-if="data.node.kind==='browser_input'" :project-id="data.projectId" :node="id" :muted="((data.active&&!(telemetryStale??true)?values?.mute:data.node.parameters.mute)??0)>0" :driven="data.connected.includes('mute')" :disabled="!data.canMute||(data.active&&(telemetryStale??true))" :active="data.active" :source="audioName" />
+    <LocalAudioButton v-if="data.node.kind==='browser_input'" :project-id="data.projectId" :node="id" :muted="((data.active&&!(telemetryStale??true)?values?.mute:data.node.parameters.mute)??0)>0" :driven="data.connected.includes('mute')" :disabled="!data.canMute||(data.active&&(telemetryStale??true))" :active="data.active" :source="audioName" :assigned-name="assignedName" :sending="data.active && !(telemetryStale??true) && !!audioSource?.sending && audioSource?.state==='connected'" />
     <PitchTrackerReadout v-if="data.node.kind==='pitch_tracker'" :slots="data.node.parameters.slots??1" :values="values" :stale="!data.active||(telemetryStale??true)" />
-    <EnvelopeGraph v-if="data.node.kind==='adsr'" class="node-envelope" compact :envelope="adsrEnvelope" :level="data.active && !(telemetryStale??true) ? values?._out : undefined" :gate="data.active && !(telemetryStale??true) && (values?.gate ?? 0) > 0" />
+    <template v-if="hasEnvelope"><EnvelopeGraph v-if="adsrEnvelope" class="node-envelope" :class="{'sampler-envelope':data.node.kind==='poly_sampler'}" compact :envelope="adsrEnvelope" :level="data.active && !(telemetryStale??true) ? values?.[data.node.kind==='poly_sampler'?'_envelope':'_out'] : undefined" :gate="data.active && !(telemetryStale??true) && (values?.[data.node.kind==='poly_sampler'?'_held':'gate'] ?? 0) > 0" /><span v-else class="node-envelope envelope-unavailable" :class="{'sampler-envelope':data.node.kind==='poly_sampler'}">Envelope waiting for live values</span></template>
     <DrumPads v-if="data.node.kind==='drum_pads'" :notes="[36,38,45,50,42,49].map((fallback,i)=>data.node.parameters[`note_${i+1}`]??fallback)" :values="values" :stale="!data.active || (telemetryStale??true)" :disabled="!data.editable || !data.active || (telemetryStale??true)" @note="(pitch,velocity)=>data.piano(data.projectId,id,pitch,velocity)" />
     <OscMessageDebug v-if="['osc_input','osc_output'].includes(data.node.kind)" compact :message="telemetry?.osc_messages?.[id]" :address="data.node.io?.address" :output="data.node.kind==='osc_output'" :active="data.active" :stale="telemetryStale??true" />
     <MidiInputActivity v-if="['midi_input','local_midi_input','midi_to_osc','osc_to_midi'].includes(data.node.kind)" :values="values" :active="data.active" :stale="telemetryStale??true" />
     <PianoKeys @bend="value=>data.piano(data.projectId,id,0,0,value)" v-if="data.node.kind==='piano'" :octave="data.node.parameters.octave??4" :octaves="data.node.parameters.octaves??1" :values="values" :stale="!data.active || (telemetryStale??true)" :disabled="!data.editable || !data.active || (telemetryStale??true)" @note="(pitch,velocity)=>data.piano(data.projectId,id,pitch,velocity)" />
+    <SampleSelectorButtons v-if="data.node.kind==='sample_selector'" :choices="data.node.sample_choices||[]" :index="data.active ? (telemetryStale??true) ? -1 : values?.index??-1 : data.connected.includes('index') ? -1 : data.node.parameters.index??0" :disabled="!data.editable||data.connected.includes('index')||(data.active&&(telemetryStale??true))" :connected="data.connected.includes('index')" @select="index=>data.parameter?.(id,'index',index)" />
     <GraphControl v-if="data.node.kind==='control_input'" :node="data.node" :connected="data.driven" :data="visualization" :stale="telemetryStale??true" :active="data.active" :editable="data.editable" @value="value=>data.setControl(id,value)" @bang="data.bang(id)" />
     <DataVisualizer v-if="visualizer" :kind="data.node.kind" :data="visualization" :sample-rate="telemetry?.sample_rate || 48000" :block-size="telemetry?.block_size || 128" :stale="telemetryStale??true" compact />
     <button v-if="data.node.kind==='subgraph'" class="button small nodrag nopan" style="position:absolute;bottom:26px;left:12px" :aria-label="`Open ${data.node.label}`" @click.stop="data.open(id)">Open subgraph</button><div v-if="data.node.kind!=='pitch_tracker'" class="node-foot"><span>{{ signal === 'control' ? 'CONTROL' : `${data.node.channels} CH` }}</span><span class="node-readout">{{visualizer ? 'PASS THROUGH' : values ? formatValue(values._out) : '—'}}</span></div>
+    </div>
   </div>
 </template>
 
 
 <style scoped>
+.node-body{position:relative}
+.node-part-player{position:absolute;top:250px;left:12px;right:12px}
+.patch-node :deep(.help-inline){padding:12px;border-top:1px solid var(--line)}
 
 .patch-node.trigger-node{width:80px;min-width:80px;min-height:64px;height:64px;padding:8px;display:flex;align-items:center;justify-content:center}
 .patch-node.value-node{width:148px;min-width:148px;min-height:72px;height:72px;padding:10px;display:flex;align-items:center;justify-content:center}.value-input-label{position:absolute;left:10px;font-size:9px;color:var(--muted)}.value-node output{margin-left:50px;font-size:18px;font-variant-numeric:tabular-nums;color:var(--amber)}
 .patch-node .node-envelope{position:absolute;left:74px;top:66px;width:180px;height:90px;max-width:none}
+.patch-node .node-envelope.sampler-envelope{left:150px;top:100px;width:210px;height:105px}
+.envelope-unavailable{color:var(--muted);font-size:11px;padding:12px}
 .node-name{display:flex;flex-direction:column;min-width:0;line-height:1.15;overflow-wrap:anywhere}.node-title .node-kind{margin-top:2px}.math-label .node-kind{display:block;margin-top:1px}
 .trigger-node>.vue-flow__handle-left,.value-node>.vue-flow__handle-left{left:0}.trigger-node>.vue-flow__handle-right,.value-node>.vue-flow__handle-right{right:0}
 </style>

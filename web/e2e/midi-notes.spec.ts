@@ -28,7 +28,7 @@ test('part note-on/off streams round-trip through OSC and play a polyphonic samp
     n('Send notes', 'midi_to_osc', 300, 0, { io: { port: '', address: '/notes', destination: `localhost:${port}` } }),
     n('Receive notes', 'osc_to_midi', 600, 0, { io: { port: '', address: '/notes', destination: '' } }),
     n('Sampler', 'poly_sampler', 900, 0, { parameters: { asset: upload.asset, root_note: 60, loop: 1, release: 5, amplitude: .5 } }),
-    n('Headphones', 'monitor_output', 1200, 0),
+    n('Headphones', 'monitor_output', 1350, 0),
     n('On count', 'counter', 0, 420), n('Off count', 'counter', 300, 420),
     n('Received on', 'counter', 600, 420), n('Received off', 'counter', 900, 420),
     n('Keyboard', 'midi_input', 1200, 420), n('MIDI destination', 'midi_output', 1700, 420),
@@ -50,15 +50,15 @@ test('part note-on/off streams round-trip through OSC and play a polyphonic samp
   page.on('websocket', socket => socket.on('framereceived', ({ payload }) => { const event = JSON.parse(String(payload)); if (event.type === 'telemetry') latest = event }))
   await page.goto('/')
   await page.getByRole('button', { name: 'Edit Part notes', exact: true }).click()
-  await expect(page.getByLabel('Source part')).toHaveValue('')
-  await page.getByLabel('Source part').selectOption('part-a')
+  await expect(page.getByLabel('Source part', { exact: true })).toHaveValue('')
+  await page.getByLabel('Source part', { exact: true }).selectOption('part-a')
   await expect.poll(async () => (await load()).graph.nodes.find((n: any) => n.id === 'Part notes').part_id).toBe('part-a')
   await page.getByRole('button', { name: 'Close parameters' }).click()
   await page.getByRole('button', { name: 'Edit Keyboard', exact: true }).click()
-  await expect(page.getByLabel('MIDI input port')).toBeVisible()
+  await expect(page.getByLabel('MIDI input port', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Close parameters' }).click()
   await page.getByRole('button', { name: 'Edit MIDI destination', exact: true }).click()
-  await expect(page.getByLabel('MIDI output port')).toBeVisible()
+  await expect(page.getByLabel('MIDI output port', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Close parameters' }).click()
   await page.getByRole('button', { name: 'Edit Sampler', exact: true }).click()
   await expect(page.getByRole('spinbutton', { name: 'Root MIDI note', exact: true })).toBeVisible()
@@ -66,7 +66,7 @@ test('part note-on/off streams round-trip through OSC and play a polyphonic samp
   await page.getByLabel('Count in', { exact: true }).selectOption('0')
   await page.getByRole('button', { name: 'Enable audio engine', exact: true }).click()
   await page.getByRole('button', { name: 'Monitor', exact: true }).click()
-  await page.getByLabel('Monitor feed').selectOption('Headphones')
+  await page.getByLabel('Monitor feed', { exact: true }).selectOption('Headphones')
   await page.getByRole('button', { name: 'Connect monitor', exact: true }).click()
   await expect(page.locator('.browser-monitor .mode-pill')).toHaveText('CONNECTED', { timeout: 20000 })
   await page.getByRole('button', { name: 'Play', exact: true }).click()
@@ -83,7 +83,7 @@ test('part note-on/off streams round-trip through OSC and play a polyphonic samp
   await expect.poll(() => latest?.running).toBe(false)
   await page.getByRole('button', { name: 'Signal Graph', exact: true }).click()
   await page.getByRole('button', { name: 'Edit Part notes', exact: true }).click()
-  await page.getByLabel('Source part').selectOption('part-b')
+  await page.getByLabel('Source part', { exact: true }).selectOption('part-b')
   await expect.poll(async () => (await load()).graph.nodes.find((n: any) => n.id === 'Part notes').part_id).toBe('part-b')
   await page.getByRole('button', { name: 'Close parameters' }).click()
   const before = latest.values['Received on']._out

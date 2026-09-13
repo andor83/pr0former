@@ -136,6 +136,8 @@ pub enum Command {
         parts: Vec<String>,
     },
     BrowserInput {
+        project: String,
+        user: String,
         node: String,
         pcm: Vec<[f32; 2]>,
     },
@@ -450,7 +452,8 @@ fn run(
                         seq.browser_midi_panic(&parts, e, &io);
                     }
                 }
-                Command::BrowserInput { node, pcm } => {
+                Command::BrowserInput { project: source_project, user: source_user, node, pcm } => {
+                    if !project.as_ref().is_some_and(|p|p.id==source_project&&p.local_audio_assignments.get(&node)==Some(&source_user)) {continue;}
                     let flat: Vec<f32> = pcm.iter().flatten().copied().collect();
                     let pcm: Vec<[f32; 2]> = input_rates
                         .entry(node.clone())
@@ -513,6 +516,13 @@ fn run(
                         prepared.carry_node_state(previous);
                         if let Some(seq) = &sequencer {
                             seq.seed_part_nodes(previous, &mut prepared);
+                        }
+                    }
+                    if let Some(old)=&project {
+                        for node in &p.graph.nodes {
+                            if node.kind=="browser_input" && old.local_audio_assignments.get(&node.id)!=p.local_audio_assignments.get(&node.id) {
+                                browser.remove(&node.id);input_rates.remove(&node.id);prepared.external(&node.id,[0.;MAX_CHANNELS]);
+                            }
                         }
                     }
                     previews.clear();
@@ -987,11 +997,12 @@ fn run(
                 let cue_count_in = sequencer
                     .as_ref()
                     .is_some_and(|s| s.cue_count_in(e.clock.beat));
+                let (position, origin, beats, unit) = sequencer
+                    .as_ref()
+                    .map(|s| s.metronome_position(e.clock.beat))
+                    .unwrap_or((e.clock.beat, 0., 4, 4));
+                e.set_part_player_metronome(e.clock.running.then_some((position, origin, unit)));
                 let metro_click = if metronome {
-                    let (position, origin, beats, unit) = sequencer
-                        .as_ref()
-                        .map(|s| s.metronome_position(e.clock.beat))
-                        .unwrap_or((e.clock.beat, 0., 4, 4));
                     metro.next_at(&e.clock, position, origin, beats, unit)
                 } else {
                     metro = pr0_dsp::count_in::Metronome::new();

@@ -11,7 +11,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -61,6 +61,7 @@ impl Drop for MonitorSubscription {
 type Peers = Arc<Mutex<BTreeMap<String, Arc<RTCPeerConnection>>>>;
 type Admissions = Arc<StdMutex<BTreeMap<String, Arc<AtomicBool>>>>;
 struct InputSource {
+    last_packet: Arc<AtomicU64>,
     token: Arc<AtomicBool>,
     session: String,
     project: String,
@@ -123,12 +124,19 @@ pub struct Media {
     admissions: Admissions,
 }
 impl Media {
+    pub async fn reconcile_inputs(&self, project:&pr0_core::Project) {
+        let invalid={let mut inputs=self.inputs.lock().unwrap();let keys:Vec<_>=inputs.iter().filter(|(_,s)|s.project==project.id && (project.local_audio_assignments.get(&s.node).map(|u|format!("{}/{}",project.id,u))!=Some(s.session.clone()) || !project.graph.nodes.iter().any(|n|n.id==s.node&&n.kind=="browser_input"))).map(|(key,_)|key.clone()).collect();
+            keys.into_iter().filter_map(|key|inputs.remove(&key)).map(|s|{s.token.store(true,Ordering::Release);s.session}).collect::<Vec<_>>()};
+        for session in invalid { if let Some((id,user))=session.split_once('/') {self.close_project_user(id,user).await;} }
+    }
+
     pub async fn close_project_user(&self, project: &str, user: &str) {
         let key = format!("{project}/{user}");
         let token = self.admissions.lock().unwrap().get(&key).cloned();
         if let Some(token) = &token {
             token.store(true, Ordering::Release);
         }
+        self.inputs.lock().unwrap().retain(|_,source|source.session!=key);
         let peer = self.peers.lock().await.remove(&key);
         if let Some(peer) = peer {
             let _ = tokio::time::timeout(Duration::from_secs(5), peer.close()).await;
@@ -243,7 +251,7 @@ pub async fn inputs(State(app): State<App>, headers: HeaderMap, Path(id): Path<S
     let peers=app.media.peers.lock().await;
     let sources=app.media.inputs.lock().unwrap();
     let inputs: Vec<Value> = sources.values().filter(|s|s.project==id && !s.token.load(Ordering::Acquire))
-        .map(|s| json!({"project_id":s.project,"node":s.node,"user_name":s.user_name,"machine_name":s.machine_name,"state":peers.get(&s.session).map(|p|p.connection_state().to_string()).unwrap_or_else(||"connecting".into())})).collect();
+        .map(|s| json!({"project_id":s.project,"node":s.node,"user_name":s.user_name,"machine_name":s.machine_name,"sending":s.last_packet.load(Ordering::Acquire)>0 && (crate::audio::monotonic_ms() as u64).saturating_sub(s.last_packet.load(Ordering::Acquire))<2000,"state":peers.get(&s.session).map(|p|p.connection_state().to_string()).unwrap_or_else(||"connecting".into())})).collect();
     Ok(Json(json!(inputs)))
 }
 
@@ -255,7 +263,7 @@ pub async fn offer(
 ) -> Api<Json<Value>> {
     csrf(&headers)?;
     let u = user(&app, &headers)?;
-    let membership = role(&app, &id, &u)?;
+    role(&app, &id, &u)?;
     app.logs
         .push(&id, "info", "Browser audio negotiation requested");
     if app.graph.lock().unwrap().as_deref() != Some(&id) {
@@ -274,6 +282,7 @@ pub async fn offer(
             return Err(bad("Select a monitor output from this project"));
         }
     }
+    let assignment_guard=app.setup.lock().await;
     let monitor_node = request.monitor_node.clone();
     let input = request.input_node.clone();
     if let Some(node) = &input {
@@ -286,10 +295,7 @@ pub async fn offer(
         {
             return Err(bad("Select a local audio input node"));
         }
-        if membership != "owner"
-            && !project.parts.iter().any(|p| {
-                p.performer.as_deref() == Some(&u) && p.instrument_node.as_deref() == Some(node)
-            })
+        if project.local_audio_assignments.get(node)!=Some(&u)
         {
             return Err(Failure(
                 StatusCode::FORBIDDEN,
@@ -301,14 +307,16 @@ pub async fn offer(
     let machine_name = request.machine_name.as_deref().unwrap_or("Browser device").trim();
     if machine_name.is_empty() || machine_name.chars().count() > 80 || machine_name.chars().any(char::is_control) { return Err(bad("Machine name must contain 1–80 printable characters")); }
     let mut lease = app.media.reserve(key.clone())?;
+    let last_packet=Arc::new(AtomicU64::new(0));
     if let Some(node) = &input {
         let user_name: String = app.db.lock().unwrap().query_row("SELECT username FROM users WHERE id=?1", [&u], |r|r.get(0)).map_err(bad)?;
         let input_key = format!("{id}/{node}");
         let mut inputs = app.media.inputs.lock().unwrap();
         if inputs.contains_key(&input_key) { return Err(Failure(StatusCode::CONFLICT, "This local audio input is already connected from another session".into())); }
-        inputs.insert(input_key.clone(), InputSource {token:lease.cancelled.clone(),session:key.clone(),project:id.clone(),node:node.clone(),user_name,machine_name:machine_name.to_owned()});
+        inputs.insert(input_key.clone(), InputSource {last_packet:last_packet.clone(),token:lease.cancelled.clone(),session:key.clone(),project:id.clone(),node:node.clone(),user_name,machine_name:machine_name.to_owned()});
         lease.input_key=Some(input_key);
     }
+    drop(assignment_guard);
     let mut media = MediaEngine::default();
     media.register_default_codecs().map_err(bad)?;
     let registry = register_default_interceptors(Registry::new(), &mut media).map_err(bad)?;
@@ -349,7 +357,11 @@ pub async fn offer(
         while sender.read(&mut buffer).await.is_ok() {}
     });
     let engine = app.engine.clone();
+    let cancelled=lease.cancelled.clone();
+    let source_project=id.clone();let source_user=u.clone();
     peer.on_track(Box::new(move |remote, _, _| {
+        let cancelled=cancelled.clone();let last_packet=last_packet.clone();
+        let source_project=source_project.clone();let source_user=source_user.clone();
         let input = input.clone();
         let engine = engine.clone();
         Box::pin(async move {
@@ -362,9 +374,12 @@ pub async fn offer(
             };
             let mut pcm = vec![0_f32; 5760 * 2];
             while let Ok((packet, _)) = remote.read_rtp().await {
+                if cancelled.load(Ordering::Acquire) {break;}
                 match decoder.decode_float(&packet.payload, &mut pcm, false) {
                     Ok(frames) => {
+                        if frames>0 {last_packet.store(crate::audio::monotonic_ms() as u64,Ordering::Release);}
                         let _ = engine.try_send(crate::audio::Command::BrowserInput {
+                            project:source_project.clone(),user:source_user.clone(),
                             node: node.clone(),
                             pcm: pcm[..frames * 2]
                                 .chunks_exact(2)
@@ -400,6 +415,8 @@ pub async fn offer(
     let pc = peer.clone();
     let project_id = id.clone();
     {
+        let _setup=app.setup.lock().await;
+        if let Some(node)=&request.input_node { if crate::load(&app,&id)?.local_audio_assignments.get(node)!=Some(&u) {return Err(bad("Local audio input assignment changed during connection"));} }
         let mut peers = app.media.peers.lock().await;
         if lease.cancelled.load(Ordering::Acquire)
             || app.graph.lock().unwrap().as_deref() != Some(&id)

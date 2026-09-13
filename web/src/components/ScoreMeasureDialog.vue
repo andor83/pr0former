@@ -338,7 +338,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               {{ m }}
             </button>
           </div>
-          <p class="sd-note">
+          <div class="help-section-title">Time signature<HelpNote label="Time signature">
             The time signature changes at bar {{ fromBar }}.
             {{
               toEnd
@@ -346,9 +346,12 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
                 : `The previous meter resumes after bar ${toBar}.`
             }}
             Existing notes keep their timing; bar lines are redrawn.
-          </p>
+          </HelpNote></div>
         </template>
-        <template v-else-if="tab === 'key'">
+        <template v-else-if="tab === 'key'"><div class="help-section-title">Key signature<HelpNote label="Key signature">{{ keyLabel(key, keyMode) }} from bar {{ fromBar }}{{
+              toEnd ? ' to the end' : `; the previous key resumes after bar ${toBar}`
+            }}.
+          </HelpNote></div>
           <div class="sd-keys" role="radiogroup" aria-label="Key signature">
             <button
               v-for="k in keyNames"
@@ -385,11 +388,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               Transpose down</label
             >
           </fieldset>
-          <p class="sd-note">
-            {{ keyLabel(key, keyMode) }} from bar {{ fromBar }}{{
-              toEnd ? ' to the end' : `; the previous key resumes after bar ${toBar}`
-            }}.
-          </p>
+
         </template>
         <template v-else-if="tab === 'repeat'">
           <div class="sd-stepper">
@@ -411,7 +410,14 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
             </button>
           </div>
           <label
-            >First ending starts at bar<select
+            ><span class="field-title">First ending starts at bar<HelpNote label="First ending starts at bar">
+            Repeat bars {{ fromBar }}–{{ toBar }} {{ times }} times
+            (𝄆 at bar {{ fromBar }}, 𝄇 after bar {{ toBar }}).
+            {{
+              ending !== ''
+                ? `Bars ${ending}–${toBar} are played on the first pass only.`
+                : ''
+            }}</HelpNote></span><select
               v-model="ending"
               aria-label="First ending starts at bar"
             >
@@ -425,15 +431,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               </option>
             </select></label
           >
-          <p class="sd-note">
-            Repeat bars {{ fromBar }}–{{ toBar }} {{ times }} times
-            (𝄆 at bar {{ fromBar }}, 𝄇 after bar {{ toBar }}).
-            {{
-              ending !== ''
-                ? `Bars ${ending}–${toBar} are played on the first pass only.`
-                : ''
-            }}
-          </p>
+
           <button
             v-if="existingRepeat"
             type="button"
@@ -512,11 +510,11 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               <span class="sd-symbol">{{ symbol }}</span>{{ name }}
             </button>
           </div>
-          <p class="sd-note">Applies to the barline after bar {{ toBar }}.</p>
+          <div class="help-section-title">Barline<HelpNote label="Barline">Applies to the barline after bar {{ toBar }}.</HelpNote></div>
         </template>
         <template v-else-if="tab === 'clef'">
           <label
-            >Staff<select v-model="staffId" aria-label="Clef staff">
+            ><span class="field-title">Staff<HelpNote label="Staff">The clef changes at the start of bar {{ fromBar }}.</HelpNote></span><select v-model="staffId" aria-label="Clef staff">
               <option v-for="s in staffList" :key="s.id" :value="s.id">
                 {{ s.name }}
               </option>
@@ -540,7 +538,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               <span class="sd-symbol">{{ symbol }}</span>{{ c }}
             </button>
           </div>
-          <p class="sd-note">The clef changes at the start of bar {{ fromBar }}.</p>
+
         </template>
         <template v-else-if="tab === 'tempo'">
           <div class="sd-stepper">
@@ -572,11 +570,11 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               {{ t }}
             </button>
           </div>
-          <p class="sd-note">
+          <div class="help-section-title">Tempo<HelpNote label="Tempo">
             The tempo changes at the start of bar {{ fromBar }} and stays in force
             until the next tempo mark. Manual tempo edits during playback last until
             the next mark. At bar 1 this also sets the project tempo and count-in.
-          </p>
+          </HelpNote></div>
           <button
             v-if="tempoHere"
             type="button"
@@ -637,7 +635,10 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
             </div>
           </fieldset>
           <fieldset class="sd-column">
-            <legend>Change note durations</legend>
+            <legend>Change note durations<HelpNote label="Change note durations">
+              Onsets are scaled from the start of bar {{ fromBar }}; later music is
+              not shifted, so doubling can overlap following bars.
+            </HelpNote></legend>
             <div class="sd-quick">
               <button
                 v-for="[factor, label] in [
@@ -658,10 +659,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
                 {{ label }}
               </button>
             </div>
-            <p class="sd-note">
-              Onsets are scaled from the start of bar {{ fromBar }}; later music is
-              not shifted, so doubling can overlap following bars.
-            </p>
+
           </fieldset>
           <fieldset class="sd-row">
             <legend>Move notes</legend>
@@ -693,14 +691,17 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               Move to staff
             </button>
           </fieldset>
-          <p class="sd-note">
+          <div class="help-section-title">Copy and paste<HelpNote label="Copy and paste">
             Copy, cut and paste selected bars with Ctrl/Cmd-C, X and V; paste
             lands at the caret in Write mode or at the selected bars in Select mode.
-          </p>
+          </HelpNote></div>
         </template>
         <template v-else>
           <label
-            >Number of bars<input
+            ><span class="field-title">Number of bars<HelpNote label="Number of bars">
+            Insertion and deletion shift every part, signature, repeat and MIDI
+            event together. Undo restores the whole edit.
+          </HelpNote></span><input aria-label="Number of bars"
               v-model.number="count"
               type="number"
               min="1"
@@ -751,10 +752,7 @@ const barCount = computed(() => toBar.value - fromBar.value + 1)
               Clear contents of bars {{ fromBar }}–{{ toBar }}
             </button>
           </div>
-          <p class="sd-note">
-            Insertion and deletion shift every part, signature, repeat and MIDI
-            event together. Undo restores the whole edit.
-          </p>
+
         </template>
       </section>
     </div>

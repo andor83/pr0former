@@ -4,7 +4,7 @@ import type { ComputedRef, Ref, ShallowRef } from 'vue'
 import type { EdgeProps } from '@vue-flow/core'
 import { BaseEdge, EdgeLabelRenderer, getBezierPath } from '@vue-flow/core'
 import type { Telemetry } from '../types'
-const props = defineProps<EdgeProps<{ signal: string; channels: number; projectId:string }>>()
+const props = defineProps<EdgeProps<{ signal: string; channels: number; projectId:string; preview?:boolean }>>()
 // Live state comes from the shared telemetry reference, like nodes, so the
 // edge list itself never changes on a telemetry tick.
 const telemetry=inject<ShallowRef<Telemetry|null>>('telemetry')
@@ -29,7 +29,7 @@ async function poll(token:number){
   try{const response=await fetch(`/api/projects/${props.data.projectId}/preview?edge=${encodeURIComponent(props.id)}`,{signal:controller.signal});const result=await response.json();if(!response.ok)throw new Error(result.error);if(token!==generation)return;channels.value=result.channels;sampleRate.value=result.sample_rate;error.value=''}catch(e){if(token===generation){channels.value=[];error.value=e instanceof Error?e.message:String(e)}}
   finally{if(hovering.value&&token===generation)timer=setTimeout(()=>void poll(token),200)}
 }
-function start(event:MouseEvent|FocusEvent){if(hovering.value)return;const rect=(event.currentTarget as Element).getBoundingClientRect();anchor.value={x:event instanceof MouseEvent?event.clientX:rect.left+rect.width/2,y:event instanceof MouseEvent?event.clientY:rect.top+rect.height/2};hovering.value=true;if(props.data?.signal==='audio')void poll(++generation)}
+function start(event:MouseEvent|FocusEvent){if(props.data?.preview || hovering.value)return;const rect=(event.currentTarget as Element).getBoundingClientRect();anchor.value={x:event instanceof MouseEvent?event.clientX:rect.left+rect.width/2,y:event instanceof MouseEvent?event.clientY:rect.top+rect.height/2};hovering.value=true;if(props.data?.signal==='audio')void poll(++generation)}
 function stop(){hovering.value=false;generation++;clearTimeout(timer);controller?.abort();channels.value=[]}
 function points(samples:number[]){const scale=Math.max(0.001,...samples.map(Math.abs));return samples.map((v,i)=>`${i*220/(samples.length-1)},${22-v/scale*19}`).join(' ')}
 function peak(samples:number[]){return Math.max(...samples.map(Math.abs)).toFixed(3)}

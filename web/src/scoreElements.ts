@@ -2,6 +2,8 @@ import { isHairpin, retimeHairpin } from './scoreCurves'
 import type { Note, Project } from './types'
 import { atBeat, metadata, staves, withNotation } from './score'
 import { newId } from './id'
+import { deleteScoreNotes } from './scoreDeletion'
+import { measures } from './scoreBars'
 import {
   moveNode,
   nodesFromEvents,
@@ -87,8 +89,12 @@ export function deleteElement(
     return
   }
   const n = p.notes.find((n) => n.id === e.note)
-  if (e.kind === 'rest') {
-    hideRest(project, e)
+  if (e.kind === 'rest' && e.rest) {
+    const rest = e.rest, voice = metadata(rest, p).voice
+    const bar = measures(project).find(b => rest.beat >= b.start && rest.beat < b.end)
+    const following = p.notes.some(n => n.beat >= rest.beat + rest.duration - 1e-8 && n.beat < (bar?.end ?? 0) && metadata(n, p).staff === e.staff && metadata(n, p).voice === voice)
+    if (following) deleteScoreNotes(project, p.id, new Set(), rest)
+    else hideRest(project, e)
     return
   }
   if (e.kind === 'staff') {

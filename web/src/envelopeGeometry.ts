@@ -68,3 +68,14 @@ export function dragHandle(e: Envelope, handle: Handle, unit: Point, scale: numb
 
 /** Short label for a duration, e.g. "120 ms" or "2.4 s". */
 export function timeLabel(ms: number) { return ms >= 1000 ? `${(ms / 1000).toPrecision(ms >= 10000 ? 3 : 2)} s` : `${Math.round(ms)} ms` }
+
+/** Shared descriptor defaults and live values for ADSR and sampler envelope views.
+ * A connected parameter without telemetry has no trustworthy display value. */
+export function readEnvelope(parameters: Record<string, number>, defaults: {id:string;default:number}[], live?: Record<string,number>, connected: string[] = []): Envelope | null {
+  const result = {} as Envelope
+  for (const key of ['attack','decay','sustain','release'] as const) {
+    if (connected.includes(key) && live?.[key] === undefined) return null
+    result[key] = live?.[key] ?? parameters[key] ?? defaults.find(p=>p.id===key)?.default ?? 0
+  }
+  return result
+}

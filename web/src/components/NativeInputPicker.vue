@@ -23,7 +23,7 @@ onBeforeUnmount(() => clearInterval(timer))
     <p v-if="!available.length" class="field-error">No native audio inputs are available on the server.</p>
     <p v-else-if="!enabled.length" class="field-error">No native inputs are enabled. Enable inputs in System settings and save.</p>
     <p v-else-if="value && !enabled.some(i=>i.id===value)" class="field-error">The selected input is disabled or unavailable.</p>
-    <p v-else-if="!devices.active_inputs?.includes(selected)" class="feature-note">Input capture is off. Activate the show and enable server input in System settings.</p>
+    <p v-else-if="!devices.active_inputs?.includes(selected)" class="feature-note">Input capture is off. Enable this input in System settings and enable the audio engine.</p>
     <p v-else class="feature-note">Capturing from {{enabled.find(i=>i.id===selected)?.name}}.</p>
     <p v-if="devices.error" class="field-error">{{devices.error}}</p>
   </template>

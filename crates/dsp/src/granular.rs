@@ -46,6 +46,15 @@ impl Default for Granular {
     }
 }
 impl Granular {
+    /// A continuously held voice reuses the same bounded grain scheduler and windows.
+    pub fn cloud(&mut self, pitch: u8, velocity: u8) {
+        if self.voices[0].level <= 0. || self.voices[0].released {
+            self.note(pitch, velocity.max(1));
+        }
+        self.voices[0].pitch = pitch;
+        self.voices[0].velocity = f64::from(velocity) / 127.;
+    }
+
     pub fn note(&mut self, pitch: u8, velocity: u8) {
         if velocity == 0 {
             if let Some(v) = self
@@ -251,6 +260,42 @@ mod tests {
             amplitude: 0.5,
             release_ms: 20.,
         }
+    }
+    #[test]
+    fn cloud_grains_scatter_around_center_and_use_smooth_windows() {
+        let sample = vec![[1.; 8]; 10000];
+        let mut cloud = Granular::default();
+        cloud.cloud(60, 127);
+        let mut starts = Vec::new();
+        let mut previous = 0.;
+        for i in 0..1000 {
+            let out = cloud.render(
+                &sample,
+                8,
+                1000.,
+                Settings {
+                    position: 0.5,
+                    spray_ms: 30.,
+                    grain_ms: 20.,
+                    density: 10.,
+                    amplitude: 1.,
+                    ..settings()
+                },
+            );
+            if let Some(grain) = cloud.grains.iter().find(|g| g.age == 1) {
+                assert_eq!(out, [0.;8]);
+                starts.push(grain.position);
+            }
+            if cloud.grains.iter().any(|g| g.age == 11) { assert!(out[0] > 0.99); }
+            if cloud.grains.iter().all(|g| g.age >= g.length) && i > 0 {
+                // The last rendered grain sample approaches zero before the gap.
+                assert!(out[0] < 0.025);
+            }
+            assert!((out[0] - previous).abs() < 0.2);
+            previous = out[0];
+        }
+        assert!(starts.iter().all(|p| *p >= 4970. && *p <= 5031.));
+        assert!(starts.windows(2).any(|w| (w[0] - w[1]).abs() > 1.));
     }
     #[test]
     fn sample_grains_preserve_channels_release_repeated_notes_and_stay_bounded() {

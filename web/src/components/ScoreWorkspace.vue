@@ -59,6 +59,7 @@ import {
   setMeter,
   setClef,
   measures,
+  editBars,
   sharedTimeline,
   barsInRange,
   clearRange,
@@ -93,14 +94,15 @@ import {
   deleteElement,
   materializeRest,
   moveElement,
-  hideRest,
   type ScoreElement,
 } from '../scoreElements'
+import { deleteScoreNotes } from '../scoreDeletion'
 const selectedElement = ref<ScoreElement | null>(null)
 const palette = ref<HTMLElement>(),
   paletteHeight = ref(40)
 let lastClick = { key: '', time: 0 },
   inspectAfterPointer = false
+let suppressNoteDoubleClick = false
 function trackClick(key: string) {
   const now = performance.now()
   inspectAfterPointer = key === lastClick.key && now - lastClick.time < 450
@@ -113,6 +115,7 @@ let elementDrag: {
   beat: number
 } | null = null
 import ScoreDialog from './ScoreDialog.vue'
+import ChordSymbolEditor from './ChordSymbolEditor.vue'
 import ScoreStructureEditor from './ScoreStructureEditor.vue'
 import ScorePianoRoll from './ScorePianoRoll.vue'
 import {
@@ -174,6 +177,7 @@ const markKinds: { id: MarkKind; label: string }[] = [
   { id: 'expression', label: 'Expression' },
   { id: 'tempo', label: 'Tempo text' },
   { id: 'lyric', label: 'Lyric' },
+  { id: 'chord', label: 'Chord symbol' },
 ]
 function openTempoDialog(beat: number) {
   tempoDraft.value = { beat, bpm: tempoAt(doc.value, beat) }
@@ -187,6 +191,7 @@ function openMarkDialog(
   kind: MarkKind = 'cue',
   existing?: { id: string; text: string; kind: MarkKind },
 ) {
+  if (kind === 'chord' && !existing) existing = staves(doc.value.parts.find(p => p.id === partId)!).find(s => s.id === staffId)?.marks?.find(m => m.kind === 'chord' && Math.abs(m.beat - beat) < 1e-8)
   markDraft.value = {
     part: partId,
     staff: staffId,
@@ -371,7 +376,6 @@ import ScoreRampEditor from './ScoreRampEditor.vue'
 import {
   addCurve,
   addHairpin,
-  dropCurveAnchors,
   hairpinPath,
   isHairpin,
   slurPath,
@@ -394,6 +398,7 @@ const props = defineProps<{
   userId: string
   editable: boolean
   performance?: boolean
+  playing?: boolean
   saving?: boolean
   beats: Record<string, number>
   members?: { id: string; username: string }[]
@@ -402,7 +407,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   focus: [id: string]
-  audition: [part: string, note: string]
+  audition: [part: string, note: string, pitch?: number]
   seek: [beat: number]
 }>()
 /**
@@ -412,7 +417,8 @@ const emit = defineEmits<{
 const session = props.draftSession ?? createScoreDraft(() => props.project, async p => { await props.save?.(p) })
 const { draft, flushing, conflict, error, pending } = session
 const curvePreview = ref<Project | null>(null)
-const doc = computed(() => curvePreview.value ?? session.doc.value)
+const notePreview = ref<Project | null>(null)
+const doc = computed(() => notePreview.value ?? curvePreview.value ?? session.doc.value)
 let savedRevision = props.project.revision
 let pendingAuditions: { part: string; notes: string[] }[] = []
 watch(session.accepted, () => {
@@ -509,8 +515,7 @@ function touchStart(event: TouchEvent) {
     scrollLeft: viewport.value.scrollLeft,
     scrollTop: viewport.value.scrollTop,
   }
-  gesture.value = null
-  marquee.value = null
+  cancelGesture()
 }
 function touchMove(event: TouchEvent) {
   const v = viewport.value
@@ -565,6 +570,15 @@ const caret = ref<{
   step: number
 } | null>(null)
 const tieNext = ref<string | null>(null)
+const appendBarSessionKey = 'pr0former.score.append-bar-without-asking'
+const appendWithoutAsking = ref((() => {
+  try { return sessionStorage.getItem(appendBarSessionKey) === 'true' }
+  catch { return false }
+})())
+const rememberAppend = ref(false)
+const pendingBar = ref<{ caret: NonNullable<typeof caret.value>; length: number; project: string } | null>(null)
+const addingBar = ref(false)
+
 let lastEntry: {
   part: string
   staff: string
@@ -605,6 +619,7 @@ onMounted(() => {
   if (viewport.value) resize.observe(viewport.value)
   if (palette.value) resize.observe(palette.value)
   updateViewport()
+  window.addEventListener('blur', cancelGesture)
   if (savedView) {
     if (focused.value) emit('focus', focused.value)
     void nextTick(() => {
@@ -638,6 +653,7 @@ function scrolled() {
   rememberView(200)
 }
 onBeforeUnmount(() => {
+  window.removeEventListener('blur', cancelGesture)
   resize?.disconnect()
   clearTimeout(rememberTimer)
   persistView()
@@ -761,8 +777,20 @@ const outsideLoop = computed(
     ).length || 0,
 )
 const canEdit = computed(
-  () => props.editable && !props.performance && !conflict.value,
+  () => props.editable && !props.performance && !props.playing && !conflict.value,
 )
+watch(canEdit, enabled => {
+  if (enabled) return
+  cancelGesture()
+  pendingBar.value = null
+  placement.value = null
+  ghost.value = null
+  inlineText.value = null
+  menu.value = null
+  dialog.value = null
+  tool.value = 'select'
+  pendingAuditions = []
+})
 /** Saving in progress (local draft not yet acknowledged by the server). */
 
 const picked = computed(() =>
@@ -1031,28 +1059,9 @@ function remove() {
   if (!picked.value.length || !canEdit.value) return
   const next = clone(doc.value)
   for (const p of next.parts) {
-    for (const n of p.notes.filter(
-      (n) => n.rest && selected.value.has(noteKey(p.id, n.id)),
+    deleteScoreNotes(next, p.id, new Set(
+      p.notes.filter(n => selected.value.has(noteKey(p.id, n.id))).map(n => n.id),
     ))
-      hideRest(next, {
-        kind: 'rest',
-        part: p.id,
-        staff: metadata(n, p).staff,
-        rest: n,
-      })
-    const removedIds = new Set(
-      p.notes.filter((n) => selected.value.has(noteKey(p.id, n.id))).map((n) => n.id),
-    )
-    p.notes = p.notes.filter((n) => !removedIds.has(n.id))
-    for (const n of p.notes)
-      if (n.notation)
-        for (const kind of ['tie_to', 'slur_to', 'grace_to'] as const)
-          if (
-            n.notation[kind] &&
-            !p.notes.some((other) => other.id === n.notation![kind])
-          )
-            n.notation[kind] = null
-    Object.assign(p, dropCurveAnchors(p, removedIds))
   }
   void commit(next).then((ok) => {
     if (ok) selected.value = new Set()
@@ -1389,7 +1398,7 @@ function enterNote(
   return enterNotes(partId, staffId, beat, [{ step, alter: exactAlter }])[0]
 }
 const canQueue = computed(
-  () => props.editable && !props.performance && !conflict.value,
+  () => props.editable && !props.performance && !props.playing && !conflict.value,
 )
 function placeCaret(
   part: string,
@@ -1519,23 +1528,56 @@ function caretStep(delta: number) {
   if (!c) return
   caret.value = { ...c, step: Math.max(0, Math.min(70, c.step + delta)) }
 }
-function moveCaret(direction: 1 | -1, byBar = false) {
+async function appendCaretBar() {
+  const request = pendingBar.value
+  if (!request || addingBar.value || !canEdit.value || request.project !== doc.value.id) return
+  addingBar.value = true
+  try {
+    let beat = request.length
+    // If another edit has already extended the score, use that new space.
+    if (length.value <= request.length) {
+      const next = editBars(doc.value, 'append', 1, 1)
+      beat = measures(next).at(-1)!.start
+      if (!await commit(next)) return
+    }
+    caret.value = { ...request.caret, beat }
+    if (rememberAppend.value) {
+      appendWithoutAsking.value = true
+      try { sessionStorage.setItem(appendBarSessionKey, 'true') } catch { /* Memory still lasts until this editor closes. */ }
+    }
+    pendingBar.value = null
+    error.value = ''
+    nextTick(scrollToCaret)
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+    // A limit/error must stay reviewable even when automatic creation is enabled.
+    appendWithoutAsking.value = false
+    rememberAppend.value = false
+    try { sessionStorage.removeItem(appendBarSessionKey) } catch { /* Storage may be unavailable. */ }
+  } finally {
+    addingBar.value = false
+  }
+}
+function moveCaret(direction: 1 | -1, byBar = false, repeat = false) {
   const c = caret.value,
     p = doc.value.parts.find((p) => p.id === c?.part)
-  if (!c || !p) return
+  if (!c || !p || pendingBar.value) return
   const bars = measures(doc.value)
-  const stops = byBar
+  const stops = (byBar
     ? [0, ...bars.map((m) => m.start), length.value]
-    : caretStops(p.notes, p, c.staff, c.voice, bars)
-  caret.value = {
-    ...c,
-    beat: nextCaretStop(
-      stops,
-      c.beat,
-      direction,
-      byBar ? barLength.value : caretDuration(),
-    ),
+    : caretStops(p.notes, p, c.staff, c.voice, bars))
+    .filter(beat => beat >= 0 && beat <= length.value)
+  const beat = nextCaretStop(stops, Math.min(length.value, c.beat), direction,
+    byBar ? barLength.value : caretDuration())
+  if (direction > 0 && beat >= length.value - 1e-8) {
+    if (repeat || !canEdit.value) return
+    pendingBar.value = { caret: { ...c, beat: Math.min(length.value, c.beat) }, length: length.value, project: doc.value.id }
+    rememberAppend.value = false
+    error.value = ''
+    if (appendWithoutAsking.value) void appendCaretBar()
+    return
   }
+  caret.value = { ...c, beat: Math.max(0, Math.min(length.value, beat)) }
   nextTick(scrollToCaret)
 }
 /** Backspace at the caret removes the entry that ends there, like deleting typed text. */
@@ -1559,16 +1601,8 @@ function deleteBeforeCaret() {
       moveCaret(-1)
       return
     }
-    const ids = new Set(victims.map((n) => n.id)),
-      next = clone(doc.value),
-      target = next.parts.find((x) => x.id === p.id)!
-    target.notes = target.notes.filter((n) => !ids.has(n.id))
-    for (const n of target.notes)
-      if (n.notation)
-        for (const kind of ['tie_to', 'slur_to', 'grace_to'] as const)
-          if (n.notation[kind] && ids.has(n.notation[kind]!))
-            n.notation[kind] = null
-    Object.assign(target, dropCurveAnchors(target, ids))
+    const next = clone(doc.value)
+    deleteScoreNotes(next, p.id, new Set(victims.map(n => n.id)))
     caret.value = { ...c, beat: Math.min(...victims.map((n) => n.beat)) }
     selected.value = new Set()
     void commit(next)
@@ -1781,6 +1815,7 @@ function contextMenu(event: MouseEvent) {
       { label: 'Key signature…', action: open('key') },
       { label: 'Clef change…', action: open('clef') },
       { label: 'Tempo change…', action: () => openTempoDialog(current.start) },
+      { label: 'Chord symbol…', action: () => openMarkDialog(current.part, current.staff, current.start, 'chord') },
       {
         label: 'Text, cue or rehearsal mark…',
         action: () => openMarkDialog(current.part, current.staff, current.start),
@@ -1847,6 +1882,44 @@ const gesture = ref<{
   barEnd?: number
   move?: boolean
 } | null>(null)
+// Snapshot the score and horizontal mapping so re-engraving never compounds a drag.
+let noteDrag: {
+  base: Project
+  selected: Set<string>
+  note: string
+  beatAt: (x: number) => number
+  delta: number
+  steps: number
+  pitch: number
+} | null = null
+function previewNoteDrag(event: PointerEvent) {
+  const g = gesture.value, drag = noteDrag
+  if (!g?.move || !drag || !canEdit.value) return
+  const delta = Math.round((drag.beatAt(point(event).x) - drag.beatAt(g.x)) * 4) / 4
+  const steps = -Math.round((event.clientY - g.cy) / (5 * zoom.value))
+  if (delta === drag.delta && steps === drag.steps) return
+  try {
+    const next = clone(drag.base)
+    for (const p of next.parts) {
+      p.staves = staves(p)
+      p.notes = p.notes.map(n => {
+        if (!drag.selected.has(noteKey(p.id, n.id))) return n
+        const moved = steps ? changeNote(n, p, { kind: 'pitch', value: steps }) : n
+        return atBeat(moved, Math.max(0, n.beat + delta))
+      })
+    }
+    notePreview.value = next
+    drag.delta = delta
+    drag.steps = steps
+    const note = next.parts.find(p => p.id === g.part)?.notes.find(n => n.id === drag.note)
+    if (note && !note.rest && note.pitch !== drag.pitch) {
+      drag.pitch = note.pitch
+      emit('audition', g.part, note.id, note.pitch)
+    }
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
 const marquee = ref<{
   left: number
   top: number
@@ -1921,10 +1994,10 @@ function toolGhost(row: HTMLElement, pos: { x: number; y: number }) {
     case 'mark':
       return {
         left: x,
-        top: rowTop + (chosen.value === 'lyric' ? 142 : 58),
+        top: rowTop + (chosen.value === 'chord' ? 30 : chosen.value === 'lyric' ? 142 : 58),
         kind: `mark ${chosen.value}`,
         label:
-          chosen.value === 'rehearsal'
+          chosen.value === 'chord' ? 'Cmaj7' : chosen.value === 'rehearsal'
             ? 'A'
             : chosen.value === 'cue'
               ? '▶ cue'
@@ -2027,7 +2100,14 @@ async function inspectElement() {
         : 'part'
 }
 function cancelGesture() {
+  inspectAfterPointer = false
+  lastClick = { key: '', time: 0 }
+  const pointer = gesture.value?.pointer
   gesture.value = null
+  noteDrag = null
+  notePreview.value = null
+  if (pointer !== undefined && viewport.value?.hasPointerCapture(pointer))
+    viewport.value.releasePointerCapture(pointer)
   marquee.value = null
   elementDrag = null
   if (curveDrag?.frame) cancelAnimationFrame(curveDrag.frame)
@@ -2037,6 +2117,7 @@ function cancelGesture() {
 }
 function pointerDown(event: PointerEvent) {
   if (event.button !== 0 || !(event.target instanceof Element)) return
+  suppressNoteDoubleClick = false
   if (inlineText.value && !event.target.closest('.inline-text')) commitInlineText()
   // Performance mode keeps the score available as a visual reference. Do not
   // let notes, marks, or gestures create a selection or editing affordance.
@@ -2199,7 +2280,7 @@ function pointerDown(event: PointerEvent) {
           void commit(next)
         } else dialog.value = 'shared'
       }
-      placement.value = null
+      if (chosen.kind !== 'mark' || chosen.value !== 'chord') placement.value = null
     } catch (e) {
       error.value = String(e)
     }
@@ -2270,7 +2351,20 @@ function pointerDown(event: PointerEvent) {
         placeCaret(p.id, v.staff, n.beat + n.duration, v.step, v.voice)
       }
     }
-    if (canEdit.value && !multi) {
+    if (canEdit.value && !multi && note) {
+      const mapping = view.value === 'grid' ? [] : anchors.value
+      const dragScale = scale.value, dragOrigin = view.value === 'grid' ? 64 : origin
+      noteDrag = {
+        base: doc.value,
+        selected: new Set(set),
+        note: note.id,
+        beatAt: x => scoreBeat(x, mapping, dragScale, dragOrigin),
+        delta: 0,
+        steps: 0,
+        pitch: note.pitch,
+      }
+      ghost.value = null
+      if (!note.rest) emit('audition', row.dataset.partId!, note.id, note.pitch)
       const pos = point(event)
       gesture.value = {
         ...pos,
@@ -2349,7 +2443,15 @@ function pointerMove(event: PointerEvent) {
     return
   }
   const g = gesture.value
-  if (Math.hypot(event.clientX - g.cx, event.clientY - g.cy) < 5) return
+  if (event.pointerId !== g.pointer) return
+  if (!notePreview.value && Math.hypot(event.clientX - g.cx, event.clientY - g.cy) < 5) return
+  if (g.move) {
+    inspectAfterPointer = false
+    lastClick = { key: '', time: 0 }
+    suppressNoteDoubleClick = true
+    previewNoteDrag(event)
+    return
+  }
   marquee.value = {
     left: Math.min(g.x, pos.x),
     top: Math.min(g.y, pos.y),
@@ -2427,31 +2529,15 @@ function pointerUp(event: PointerEvent) {
 
   const g = gesture.value
   if (!g) return
-  if (g.move && marquee.value && canEdit.value) {
-    const delta =
-        Math.round(
-          (beatAt(g.x + (event.clientX - g.cx) / zoom.value) - beatAt(g.x)) * 4,
-        ) / 4,
-      steps = -Math.round((event.clientY - g.cy) / (5 * zoom.value))
-    try {
-      const next = clone(doc.value)
-      for (const p of next.parts) {
-        p.staves = staves(p)
-        p.notes = p.notes.map((n) => {
-          if (!selected.value.has(noteKey(p.id, n.id))) return n
-          let moved = n
-          for (let i = 0; i < Math.abs(steps); i++)
-            moved = changeNote(moved, p, {
-              kind: 'pitch',
-              value: Math.sign(steps),
-            })
-          return atBeat(moved, Math.max(0, n.beat + delta))
-        })
-      }
-      void commit(next)
-    } catch (e) {
-      error.value = String(e)
-    }
+  if (event.pointerId !== g.pointer) return
+  if (g.move) {
+    if (notePreview.value || Math.hypot(event.clientX - g.cx, event.clientY - g.cy) >= 5)
+      previewNoteDrag(event)
+    const next = notePreview.value
+    const changed = noteDrag && (noteDrag.delta !== 0 || noteDrag.steps !== 0)
+    notePreview.value = null
+    noteDrag = null
+    if (next && changed && canEdit.value) void commit(next)
   } else if (marquee.value) {
     const rect = viewport.value!.getBoundingClientRect(),
       m = marquee.value,
@@ -2484,7 +2570,6 @@ function pointerUp(event: PointerEvent) {
           ? { part: g.part, staff: g.staff, start, end }
           : null
     }
-  } else if (g.move) {
   } else if (tool.value === 'write') {
     region.value = null
     placeCaret(g.part, g.staff, g.beat, g.step)
@@ -2678,7 +2763,7 @@ function keydown(event: KeyboardEvent) {
     }
     if (key === 'ArrowLeft' || key === 'ArrowRight') {
       event.preventDefault()
-      moveCaret(key === 'ArrowRight' ? 1 : -1, event.shiftKey)
+      moveCaret(key === 'ArrowRight' ? 1 : -1, event.shiftKey, event.repeat)
       return
     }
     if (event.repeat) return
@@ -3034,6 +3119,7 @@ watch(
             <MousePointer2 :size="15" /></button
           ><button
             aria-label="Write"
+            :disabled="!canEdit"
             title="Write notes"
             :aria-pressed="tool === 'write'"
             @click="
@@ -3298,6 +3384,7 @@ watch(
                 𝄋
               </button></ScoreToolMenu
             >
+            <button title="Chord tool · click a bar to add a jazz chord symbol" aria-label="Chord tool" :aria-pressed="placement?.kind === 'mark' && placement.value === 'chord'" :disabled="!canEdit" @click="placeTool('mark', 'chord')"><b class="chord-tool-icon">C⁷</b></button>
             <ScoreToolMenu label="Text and tempo" symbol="T"
               ><button
                 title="Tempo mark · click a staff at the beat"
@@ -3307,7 +3394,7 @@ watch(
               >
                 ♩=</button
               ><button
-                v-for="k in markKinds"
+                v-for="k in markKinds.filter(k => k.id !== 'chord')"
                 :key="k.id"
                 :title="`${k.label} · click a staff at the beat`"
                 :aria-label="`${k.label} tool`"
@@ -3451,15 +3538,17 @@ watch(
         <div
           ref="viewport"
           class="ensemble-scroll"
+          :class="{ 'dragging-note': gesture?.move }"
           :style="{
             paddingTop: performance ? '0px' : `${paletteHeight + 16}px`,
           }"
           @scroll.passive="scrolled"
-          @dblclick="inspectElement"
+          @dblclick="!suppressNoteDoubleClick && inspectElement()"
           @pointerdown="pointerDown"
           @pointermove="pointerMove"
           @pointerup="pointerUp"
           @pointercancel="cancelGesture"
+          @lostpointercapture="gesture?.move && cancelGesture()"
           @pointerleave="ghost = null"
           @touchstart.passive="touchStart"
           @touchmove="touchMove"
@@ -3731,7 +3820,9 @@ watch(
           </div>
           <div v-if="!performance" class="score-status" role="status">
             {{
-              selectedElement
+              playing
+                ? 'Playback in progress · pause or stop to edit'
+                : selectedElement
                 ? `Selected ${selectedElement.kind} · Enter to edit · Backspace to delete`
                 : picked.length
                   ? `Editing ${picked.length} selected note(s)`
@@ -3740,7 +3831,7 @@ watch(
                   : view === 'grid'
                     ? 'Drag to draw duration · drag notes to move · drag right edge to resize'
                     : caretStatus
-                      ? `${caretStatus} · 1–8 insert · A–G pitch · 0 rest · ↑↓ pitch · ←→ move · T tie · Alt+1–4 voice`
+                      ? `${caretStatus} · 1–8 insert · A–G pitch · 0 rest · . dots · ↑↓ pitch · ←→ move · T tie · Alt+1–4 voice`
                       : tool === 'write'
                         ? 'Click a staff to place the caret, then type durations (1–8) and pitches (A–G)'
                         : 'Click or drag to select · double-click to edit'
@@ -3786,6 +3877,19 @@ watch(
         </footer>
       </div>
     </div>
+    <ScoreDialog
+      v-if="pendingBar && !appendWithoutAsking"
+      title="Add a new bar?"
+      :error="error"
+      @close="pendingBar = null"
+    >
+      <form class="append-bar-form" @submit.prevent="appendCaretBar">
+        <p>You’ve reached the end of the score. Add one bar to all parts and continue entering at its beginning?</p>
+        <label><input v-model="rememberAppend" type="checkbox" /> Don’t ask again this session</label>
+        <p class="append-bar-hint">New bars use the final bar’s time signature. This choice lasts until you close this browser tab.</p>
+        <div class="append-bar-actions"><button type="button" :disabled="addingBar" @click="pendingBar = null">Cancel</button><button type="submit" autofocus :disabled="addingBar || !canEdit">Add bar</button></div>
+      </form>
+    </ScoreDialog>
     <ScoreDialog
       v-if="dialog === 'structure'"
       title="Bars, time signature & clef"
@@ -3846,7 +3950,10 @@ watch(
             step="0.25"
         /></label>
         <label
-          >♩ per minute<input
+          ><span class="field-title">♩ per minute<HelpNote label="♩ per minute">
+          The tempo takes effect when playback reaches this position and lasts
+          until the next tempo mark. A mark at beat 0 also sets the project tempo.
+        </HelpNote></span><input
             v-model.number="tempoDraft.bpm"
             type="number"
             min="1"
@@ -3876,26 +3983,27 @@ watch(
             Remove tempo mark
           </button>
         </div>
-        <p>
-          The tempo takes effect when playback reaches this position and lasts
-          until the next tempo mark. A mark at beat 0 also sets the project tempo.
-        </p>
+
       </div></ScoreDialog
     >
     <ScoreDialog
       v-if="dialog === 'mark' && markDraft"
-      :title="markDraft.id ? 'Edit mark' : 'Add mark'"
+      :title="markDraft.kind === 'chord' ? (markDraft.id ? 'Edit chord symbol' : 'Add chord symbol') : (markDraft.id ? 'Edit mark' : 'Add mark')"
       :error="error"
       @close="dialog = null"
       ><div class="mark-dialog">
         <label
-          >Kind<select v-model="markDraft.kind" aria-label="Mark kind">
+          ><span class="field-title">Kind<HelpNote label="Staff marks">
+          Marks are attached to this staff and appear on every player’s view of
+          the part. Cues are shown bold with an arrow; lyrics sit below the staff.
+        </HelpNote></span><select v-model="markDraft.kind" aria-label="Mark kind">
             <option v-for="k in markKinds" :key="k.id" :value="k.id">
               {{ k.label }}
             </option>
           </select></label
         >
-        <label
+        <ChordSymbolEditor v-if="markDraft.kind === 'chord'" v-model="markDraft.text" @submit="saveMark" />
+        <label v-else
           >Text<input
             v-model="markDraft.text"
             maxlength="256"
@@ -3905,7 +4013,7 @@ watch(
             @keydown.enter.prevent="saveMark"
         /></label>
         <label
-          >At quarter beat<input
+          ><span class="field-title">At quarter beat</span><input
             v-model.number="markDraft.beat"
             type="number"
             min="0"
@@ -3917,7 +4025,7 @@ watch(
             :disabled="!canEdit || !markDraft.text.trim()"
             @click="saveMark"
           >
-            {{ markDraft.id ? 'Save mark' : 'Add mark' }}
+            {{ markDraft.kind === 'chord' ? (markDraft.id ? 'Save chord' : 'Add chord') : (markDraft.id ? 'Save mark' : 'Add mark') }}
           </button>
           <button
             v-if="markDraft.id"
@@ -3937,13 +4045,10 @@ watch(
               }
             "
           >
-            Delete mark
+            {{ markDraft.kind === 'chord' ? 'Delete chord' : 'Delete mark' }}
           </button>
         </div>
-        <p>
-          Marks are attached to this staff and appear on every player’s view of
-          the part. Cues are shown bold with an arrow; lyrics sit below the staff.
-        </p>
+
       </div></ScoreDialog
     >
     <ScoreDialog
@@ -4158,6 +4263,8 @@ watch(
   </section>
 </template>
 <style scoped>
+.append-bar-form{display:grid;gap:18px}.append-bar-form>label{display:flex;align-items:center;gap:10px;min-height:44px;cursor:pointer}.append-bar-form input{width:18px;height:18px}.append-bar-hint{font-size:12px;color:var(--muted)}.append-bar-actions{display:flex;justify-content:flex-end;gap:10px}.append-bar-actions button{min-height:40px}
+
 .selection-inspector {
   display: flex;
   gap: 12px;
@@ -4428,6 +4535,10 @@ watch(
   margin-bottom: -16px;
   transform: translateY(8px);
   width: 170px;
+}
+.dragging-note,
+.dragging-note :deep([data-note-id]) {
+  cursor: grabbing;
 }
 .score-marquee {
   position: absolute;

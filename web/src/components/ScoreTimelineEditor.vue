@@ -128,11 +128,11 @@ const barOf = (b: number) =>
   <div class="sd-dialog">
     <template v-if="!project.score">
       <div class="sd-section">
-        <p class="sd-note">
+        <div class="help-section-title">Convert legacy score<HelpNote label="Convert legacy score">
           Legacy playback loops each part independently. Converting aligns all
           parts on one score, preserves note timing, and stops at its end unless
           whole-score looping is enabled.
-        </p>
+        </HelpNote></div>
         <div class="sd-actions">
           <button
             type="button"
@@ -176,7 +176,13 @@ const barOf = (b: number) =>
           <template v-if="tab === 'score'">
             <div class="sd-fields">
               <label
-                >Score length<input
+                ><span class="field-title">Score length<HelpNote label="Score length">
+              Positions in this dialog are zero-based quarter beats: a 4/4 bar
+              lasts four, a 6/8 bar lasts three. Structured scores play every part
+              through the shared traversal and stop at the end unless looping is
+              enabled. For bar-based editing, select bars in the score and use
+              the Measure dialog.
+            </HelpNote></span><input aria-label="Score length"
                   type="number"
                   min="0.25"
                   max="4096"
@@ -204,18 +210,12 @@ const barOf = (b: number) =>
                 Loop whole score</label
               >
             </div>
-            <p class="sd-note">
-              Positions in this dialog are zero-based quarter beats: a 4/4 bar
-              lasts four, a 6/8 bar lasts three. Structured scores play every part
-              through the shared traversal and stop at the end unless looping is
-              enabled. For bar-based editing, select bars in the score and use
-              the Measure dialog.
-            </p>
+
           </template>
           <template v-else-if="tab === 'meters'">
             <div class="sd-row">
               <label
-                >At quarter beat<input
+                ><span class="field-title">At quarter beat<HelpNote label="At quarter beat">Meter changes never stretch notes.</HelpNote></span><input aria-label="At quarter beat"
                   v-model.number="beat"
                   type="number"
                   min="0"
@@ -273,7 +273,7 @@ const barOf = (b: number) =>
                 </button>
               </li>
             </ul>
-            <p class="sd-note">Meter changes never stretch notes.</p>
+
           </template>
           <template v-else-if="tab === 'keys'">
             <div class="sd-row">
@@ -338,7 +338,10 @@ const barOf = (b: number) =>
           <template v-else-if="tab === 'repeats'">
             <div class="sd-row">
               <label
-                >Repeat start<input
+                ><span class="field-title">Repeat start<HelpNote label="Repeat start">
+              Repeats use ordered, nonoverlapping ranges and 2–32 passes. An
+              optional first-ending start skips that ending on the final pass.
+            </HelpNote></span><input aria-label="Repeat start"
                   v-model.number="start"
                   type="number"
                   min="0"
@@ -387,15 +390,15 @@ const barOf = (b: number) =>
                 </button>
               </li>
             </ul>
-            <p class="sd-note">
-              Repeats use ordered, nonoverlapping ranges and 2–32 passes. An
-              optional first-ending start skips that ending on the final pass.
-            </p>
+
           </template>
           <template v-else>
             <div class="sd-row">
               <label
-                >Jump at<input
+                ><span class="field-title">Jump at<HelpNote label="Jump at">
+              Written repeats run before a D.C./D.S.; the jump is taken once and
+              may end at Fine or use one coda pair.
+            </HelpNote></span><input aria-label="Jump at"
                   v-model.number="jumpAt"
                   type="number"
                   min="0" /></label
@@ -447,7 +450,7 @@ const barOf = (b: number) =>
                 Clear jump
               </button>
             </div>
-            <p v-if="project.score.navigation" class="sd-note">
+            <div class="help-section-title" v-if="project.score.navigation">Navigation<HelpNote label="Navigation">
               Current: {{ project.score.navigation.target === 0 ? 'D.C.' : 'D.S.' }}
               at beat {{ project.score.navigation.at }}<template
                 v-if="project.score.navigation.fine != null"
@@ -457,11 +460,8 @@ const barOf = (b: number) =>
                 · To coda {{ project.score.navigation.coda[0] }} → coda
                 {{ project.score.navigation.coda[1] }}</template
               >.
-            </p>
-            <p class="sd-note">
-              Written repeats run before a D.C./D.S.; the jump is taken once and
-              may end at Fine or use one coda pair.
-            </p>
+            </HelpNote></div>
+
           </template>
         </section>
       </div>

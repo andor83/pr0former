@@ -288,19 +288,20 @@ pub async fn save(
         .parent = None;
     graph.validate().map_err(bad)?;
     // Copy originals into the immutable version, so another project does not depend on source-project files.
-    let assets: BTreeSet<u32> = graph
+    let mut assets: BTreeSet<u32> = graph
         .nodes
         .iter()
         .filter(|n| {
             matches!(
                 n.kind.as_str(),
-                "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth"
+                "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "granular_cloud"
             )
         })
         .filter_map(|n| n.parameters.get("asset"))
         .map(|v| *v as u32)
         .filter(|v| *v != 0)
         .collect();
+    assets.extend(graph.nodes.iter().flat_map(|n| n.sample_choices.iter().map(|s| s.asset)));
     let mut bytes = vec![];
     for asset in assets {
         bytes.push((
@@ -516,9 +517,12 @@ pub async fn insert(
             use tokio::io::AsyncWriteExt;
             file.write_all(&bytes).await.map_err(internal)?;
             for n in &mut graph.nodes {
+                for choice in &mut n.sample_choices {
+                    if choice.asset == old { choice.asset = asset; }
+                }
                 if matches!(
                     n.kind.as_str(),
-                    "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth"
+                    "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "granular_cloud"
                 ) && n.parameters.get("asset").copied() == Some(old as f64)
                 {
                     n.parameters.insert("asset".into(), asset as f64);

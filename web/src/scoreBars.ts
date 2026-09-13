@@ -597,7 +597,9 @@ export function addMark(
   const staff = part.staves.find((s) => s.id === staffId)
   if (!staff) throw new Error('Choose a staff.')
   const text = mark.text.trim()
-  if (!text || text.length > 256) throw new Error('Enter up to 256 characters.')
+  const limit = mark.kind === 'chord' ? 64 : 256
+  if (mark.kind === 'chord' && /[\u0000-\u001f\u007f]/.test(text)) throw new Error('Enter a chord symbol on one line.')
+  if (!text || text.length > limit) throw new Error(`Enter up to ${limit} characters.`)
   if (!Number.isFinite(mark.beat) || mark.beat < 0)
     throw new Error('Choose a position inside the score.')
   const id = mark.id ?? newId()

@@ -38,6 +38,7 @@ unsafe impl GlobalAlloc for CheckedAllocator {
 static ALLOCATOR: CheckedAllocator = CheckedAllocator;
 fn node(id: &str, kind: &str) -> Node {
     Node {
+        sample_choices: vec![],
         id: id.into(),
         kind: kind.into(),
         label: id.into(),
@@ -64,6 +65,7 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
             ("fm", "fm_synth"),
             ("sample", "poly_sampler"),
             ("grains", "granular_synth"),
+            ("cloud", "granular_cloud"),
             ("tone", "oscillator"),
             ("shift", "granular_pitch_shift"),
             ("convolve", "convolution"),
@@ -86,6 +88,16 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
     for n in &mut graph.nodes {
         if n.id == "loop" {
             n.parameters.insert("max_seconds".into(), 1.);
+        }
+        if n.id == "sample" {
+            for (key, value) in [
+                ("attack", 4.),
+                ("decay", 8.),
+                ("sustain", 0.4),
+                ("release", 12.),
+            ] {
+                n.parameters.insert(key.into(), value);
+            }
         }
         if n.id == "one" {
             n.parameters.insert("value".into(), 1.);
@@ -130,7 +142,7 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
         wire(s, sp, t, tp);
     }
     let mut engine = pr0_dsp::Engine::prepare(graph, 48000.).unwrap();
-    for id in ["sample", "grains"] {
+    for id in ["sample", "grains", "cloud"] {
         engine.set_sample(id, vec![[0.1; 8]; 48000]);
     }
     for pitch in 40..104 {
@@ -142,6 +154,16 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
     CALLS.set(0);
     CHECK.set(true);
     for index in 0..64 {
+        if index == 32 {
+            for pitch in 40..104 {
+                engine.piano_note("keys", pitch, 0);
+            }
+        }
+        if index == 48 {
+            for pitch in 40..104 {
+                engine.piano_note("keys", pitch, 100);
+            }
+        }
         engine.node_midi_message(
             "local",
             pr0_core::midi::Message {
@@ -167,4 +189,162 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
         "render must neither allocate nor free prepared storage"
     );
     assert!(output.iter().flatten().all(|v| v.is_finite()));
+}
+
+#[test]
+fn sample_shortlist_switching_neither_allocates_nor_frees_audio_buffers() {
+    let mut selector = node("selector", "sample_selector");
+    selector.sample_choices = (1..=3)
+        .map(|asset| pr0_core::SampleChoice {
+            asset,
+            name: format!("Sample {asset}"),
+            nickname: String::new(),
+        })
+        .collect();
+    let mut graph = Graph {
+        nodes: vec![selector, node("keys", "piano")],
+        edges: vec![],
+    };
+    for kind in ["sample", "poly_sampler", "granular_synth"] {
+        graph.nodes.push(node(kind, kind));
+        if kind != "sample" {
+            graph.edges.push(Edge {
+                id: format!("notes-{kind}"),
+                source: "keys".into(),
+                source_port: "midi".into(),
+                target: kind.into(),
+                target_port: "midi".into(),
+            });
+        }
+        graph.edges.push(Edge {
+            id: kind.into(),
+            source: "selector".into(),
+            source_port: "out".into(),
+            target: kind.into(),
+            target_port: "sample_id".into(),
+        });
+    }
+    let mut engine = pr0_dsp::Engine::prepare(graph, 48000.).unwrap();
+    for kind in ["sample", "poly_sampler", "granular_synth"] {
+        for asset in 1..=3 {
+            engine.add_sample_choice(kind, asset, vec![[asset as f32 * 0.1; 8]; 4096]);
+        }
+    }
+    engine.clock.running = true;
+    let mut output = [[0.; 8]; 32];
+    CALLS.set(0);
+    CHECK.set(true);
+    for index in 0..128 {
+        engine
+            .parameter("selector", "index", (index % 4) as f64)
+            .unwrap();
+        engine.render(&[], &mut output);
+        engine.node_midi_message(
+            "keys",
+            pr0_core::midi::Message {
+                status: 0x90,
+                data1: 60,
+                data2: 100,
+            },
+        );
+        engine.render(&[], &mut output);
+    }
+    CHECK.set(false);
+    assert_eq!(
+        CALLS.get(),
+        0,
+        "sample switches must retain all prepared storage"
+    );
+}
+
+#[test]
+fn independent_part_players_repeat_retrigger_stop_and_retire_without_heap_activity() {
+    use pr0_core::{
+        midi::Message,
+        score::{AutomationEvent, AutomationLane, Curve, MessageKind},
+    };
+    use pr0_dsp::part_player::{Clip, Event};
+    let graph = Graph {
+        nodes: vec![
+            node("play", "trigger"),
+            node("repeat", "trigger"),
+            node("stop", "trigger"),
+            node("clip", "part_player"),
+            node("sink", "midi_output"),
+        ],
+        edges: [
+            ("play", "out", "clip", "play"),
+            ("repeat", "out", "clip", "repeat"),
+            ("stop", "out", "clip", "stop"),
+            ("clip", "midi", "sink", "midi"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (source, source_port, target, target_port))| Edge {
+            id: i.to_string(),
+            source: source.into(),
+            source_port: source_port.into(),
+            target: target.into(),
+            target_port: target_port.into(),
+        })
+        .collect(),
+    };
+    let mut e = pr0_dsp::Engine::prepare(graph.clone(), 1000.).unwrap();
+    e.clock.bpm = 400.;
+    e.set_part_player(
+        "clip",
+        Clip {
+            length: 0.25,
+            meters: vec![],
+            spans: vec![],
+            events: vec![Event {
+                beat: 0.,
+                message: Message {
+                    status: 0x93,
+                    data1: 64,
+                    data2: 100,
+                },
+            }],
+            automation: vec![AutomationLane {
+                id: "pedal".into(),
+                name: "Pedal".into(),
+                channel: 4,
+                message: MessageKind::Cc,
+                number: 64,
+                initial: Some(0.),
+                events: vec![AutomationEvent {
+                    id: "down".into(),
+                    beat: 0.,
+                    duration: 0.,
+                    start: 127.,
+                    end: 127.,
+                    curve: Curve::Step,
+                }],
+            }],
+        },
+    );
+    let mut replacement = pr0_dsp::Engine::prepare(graph, 1000.).unwrap();
+    CALLS.with(|c| c.set(0));
+    CHECK.with(|c| c.set(true));
+    for sample in 0..10000 {
+        if sample % 901 == 0 {
+            e.bang("repeat");
+        }
+        if sample % 997 == 0 {
+            e.bang("play");
+        }
+        if sample % 2003 == 0 {
+            e.bang("stop");
+        }
+        e.render(&[], &mut [[0.; 8]]);
+        while e.take_midi_message("sink").is_some() {}
+    }
+    replacement.carry_node_state(&mut e);
+    replacement.render(&[], &mut [[0.; 8]]);
+    CHECK.with(|c| c.set(false));
+    assert_eq!(
+        CALLS.with(Cell::get),
+        0,
+        "part playback must not allocate or free storage while rendering or carrying state"
+    );
 }

@@ -28,7 +28,8 @@ export async function refreshBrowserInputs() {
   } catch (error) { browserInputs.value = []; browserInputMessage.value = captureError(error) }
 }
 
-export interface RemoteAudioInput {project_id:string;node:string;user_name:string;machine_name:string;state:string}
+export interface LocalAudioAccess {userId?:string;assignments:Record<string,string>;members:import('./types').Member[];canAssign:boolean}
+export interface RemoteAudioInput {sending:boolean;project_id:string;node:string;user_name:string;machine_name:string;state:string}
 export const remoteAudioInputs=ref<RemoteAudioInput[]>([])
 const nativeName=(window as Window & {__PR0_MACHINE_NAME__?:string}).__PR0_MACHINE_NAME__
 export const localMachineName=ref((()=>{try{return localStorage.getItem('pr0former.machine-name')||nativeName||(/iPad/.test(navigator.userAgent)?'iPad':/Mac/.test(navigator.userAgent)?'Mac browser':/Windows/.test(navigator.userAgent)?'Windows browser':'Browser device')}catch{return nativeName||'Browser device'}})())

@@ -1,4 +1,5 @@
 //! Versioned project model and graph validation. No device or UI dependencies.
+pub mod documentation;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -120,6 +121,8 @@ pub struct Descriptor {
     pub symbol: String,
     pub category: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<documentation::NodeDocumentation>,
     pub aliases: Vec<String>,
     pub inputs: Vec<Port>,
     pub outputs: Vec<Port>,
@@ -148,9 +151,20 @@ pub struct IoConfig {
     pub address: String,
     pub destination: String,
 }
+pub const MAX_SAMPLE_CHOICES: usize = 64;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SampleChoice {
+    pub asset: u32,
+    pub name: String,
+    #[serde(default)]
+    pub nickname: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
-    /// Source score part for part_midi, or performer association for monitor_output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample_choices: Vec<SampleChoice>,
+    /// Source score part for part_midi / part_player, or performer association for monitor_output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,6 +302,8 @@ fn default_osc() -> String {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub local_audio_assignments: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<score::Timeline>,
     pub schema_version: u32,
@@ -320,6 +336,11 @@ fn param(id: &str, label: &str, unit: &str, min: f64, max: f64, default: f64) ->
         logarithmic: false,
         structural: false,
     }
+}
+fn envelope_parameters(defaults: [f64; 4]) -> Vec<Parameter> {
+    [("attack", "Attack", "ms", 10000.), ("decay", "Decay", "ms", 10000.),
+     ("sustain", "Sustain", "", 1.), ("release", "Release", "ms", 10000.)]
+        .into_iter().zip(defaults).map(|((id,label,unit,max),value)| param(id,label,unit,0.,max,value)).collect()
 }
 fn port(id: &str, signal: Signal) -> Port {
     Port {
@@ -372,6 +393,7 @@ pub fn catalog() -> Vec<Descriptor> {
             symbol: symbol.into(),
             category: category.into(),
             description: description.into(),
+            documentation: documentation::for_kind(kind),
             inputs,
             outputs,
             parameters,
@@ -625,17 +647,9 @@ pub fn catalog() -> Vec<Descriptor> {
         "Sample-timed linear ADSR, edge triggered: a rising gate or retrigger pulse starts or restarts the attack from the current level; a falling gate or rising note_off pulse releases from the current level, even if the gate parameter is left high. Pulse sources (Piano, Part MIDI, MIDI to control) wire trigger to retrigger and note_off to note_off. Attacks normally ramp from the current level; Retrigger from zero drops to 0 first and ramps the full attack every time. Stage times latch at entry; sustain edits are smoothed.",
         vec![port("retrigger", Control), port("note_off", Control)],
         vec![port("out", Control)],
-        vec![
-            param("gate", "Gate", "", 0., 1., 0.),
-            param("attack", "Attack", "ms", 0., 10000., 10.),
-            param("decay", "Decay", "ms", 0., 10000., 100.),
-            param("sustain", "Sustain", "", 0., 1., 0.7),
-            param("release", "Release", "ms", 0., 10000., 200.),
-            Parameter {
-                structural: true,
-                ..param("reset", "Retrigger from zero", "", 0., 1., 0.)
-            },
-        ],
+        std::iter::once(param("gate", "Gate", "", 0., 1., 0.))
+            .chain(envelope_parameters([10., 100., 0.7, 200.]))
+            .chain(std::iter::once(Parameter { structural: true, ..param("reset", "Retrigger from zero", "", 0., 1., 0.) })).collect(),
         &["adsr", "vline", "envelope"],
     );
     add(
@@ -665,6 +679,13 @@ pub fn catalog() -> Vec<Descriptor> {
         ],
         vec![],
         &["score", "notes", "part input"],
+    );
+    add(
+        "part_player", "Part player", "▶♪", "Control",
+        "Play a selected score part independently of show transport, at the current tempo. Rising Play starts once on the next metronome beat; Play & repeat loops until Stop. Retriggering restarts on the next beat, without count-in. Connect MIDI to an instrument or MIDI output. Select the part in Options; bar and beat are live engine values.",
+        vec![port("play", Control), Port { label: "Play & repeat".into(), ..port("repeat", Control) }, port("stop", Control)],
+        vec![port("pitch", Control), port("velocity", Control), port("gate", Control), port("trigger", Control), port("note_off", Control)],
+        vec![], &["score", "snippet", "algorithmic", "loop", "part playback"],
     );
     add(
         "convolution",
@@ -1941,11 +1962,18 @@ pub fn catalog() -> Vec<Descriptor> {
         &["loop", "record", "eight tracks"],
     );
     add(
+        "sample_selector", "Sample selector", "☷", "Control",
+        "Build a numbered shortlist of project samples in the options, with optional nicknames. Click an orange entry or drive Index (0 through n−1) to output its numeric Sample ID. Connect to the Sample ID input of a Polyphonic sampler, Granular synth or Sample player. A connected Index is read-only. Fractional indices round down; out-of-range indices and empty lists output 0 (no sample). Selecting does not trigger a note.",
+        vec![], vec![Port { label: "Sample ID".into(), ..port("out", Control) }],
+        vec![param("index", "Index", "", -1., 1000000000., 0.)],
+        &["sample list", "sample picker", "sample switch"],
+    );
+    add(
         "poly_sampler",
         "Polyphonic sampler",
         "▶",
         "Audio",
-        "64-voice pitched WAV sampler. Pitch and velocity take MIDI values (0–127); trigger starts a note and note_off releases the matching pitch. Repeated pitches release oldest-held-first. Gate can drive simple monophonic patches when triggers are unconnected. Upload a WAV and set its root MIDI note in the modal. Oldest voices are stolen at capacity.",
+        "64-voice pitched WAV sampler. Pitch and velocity take MIDI values (0–127); trigger starts a note and note_off releases the matching pitch. Repeated pitches release oldest-held-first. Gate can drive simple monophonic patches when triggers are unconnected. Upload a WAV and set its root MIDI note in the modal. Each voice runs its own ADSR, using the same envelope as the ADSR node. Edit the graph or Attack, Decay, Sustain and Release in Options. Stage times latch when each stage starts; live sustain changes are smoothed. Every note starts a fresh envelope, including repeated pitches. The graph’s live line shows the highest voice envelope. Defaults preserve immediate attack and full sustain. Oldest voices are stolen at capacity.",
         vec![
             port("pitch", Control),
             port("velocity", Control),
@@ -1962,8 +1990,7 @@ pub fn catalog() -> Vec<Descriptor> {
             param("root_note", "Root MIDI note", "", 0., 127., 60.),
             param("amplitude", "Amplitude", "", 0., 1., 0.5),
             param("loop", "Loop while held", "", 0., 1., 0.),
-            param("release", "Release", "ms", 1., 2000., 80.),
-        ],
+        ].into_iter().chain(envelope_parameters([0., 0., 1., 80.])).collect(),
         &["sampler", "polyphonic sample"],
     );
     for (kind, label) in [
@@ -2019,7 +2046,21 @@ pub fn catalog() -> Vec<Descriptor> {
         ],
         &[],
     );
+    // Keep Cloud's sample and numeric controls identical to the granular instrument.
+    let mut cloud = result.iter().find(|d| d.kind == "granular_synth").unwrap().clone();
+    cloud.kind = "granular_cloud".into();
+    cloud.label = "Granular Cloud".into();
+    cloud.symbol = "☁".into();
+    cloud.description = "A continuous cloud of overlapping Hann-enveloped grains from the selected sample, without a MIDI inlet. Cloud center (0–1) scans from sample start to end; Spray randomizes grain starts around that center, wrapping at the sample edges. Grain duration, Density, Amplitude, Release, sample selection and numeric note inputs match Granular synth. With no gate/trigger/note_off wiring, the cloud runs while the engine is enabled; optional Pitch and Velocity set its pitch and strength. Connect Gate or Trigger/note_off for the same numeric note control as Granular synth. New center and grain settings affect newly launched grains.".into();
+    cloud.documentation = documentation::for_kind("granular_cloud");
+    cloud.aliases = vec!["sample cloud".into(), "granular texture".into(), "cloud center".into()];
+    cloud.inputs.retain(|p| p.signal != Midi);
+    cloud.parameters.iter_mut().find(|p| p.id == "position").unwrap().label = "Cloud center".into();
+    result.push(cloud);
     for descriptor in &mut result {
+        if matches!(descriptor.kind.as_str(), "sample" | "poly_sampler" | "granular_synth" | "granular_cloud") {
+            descriptor.inputs.push(Port { label: "Sample ID".into(), ..port("sample_id", Control) });
+        }
         let midi_input = matches!(
             descriptor.kind.as_str(),
             "midi_to_control"
@@ -2037,6 +2078,7 @@ pub fn catalog() -> Vec<Descriptor> {
         let midi_output = matches!(
             descriptor.kind.as_str(),
             "part_midi"
+                | "part_player"
                 | "midi_input"
                 | "osc_to_midi"
                 | "piano"
@@ -2195,6 +2237,14 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
+            if !n.sample_choices.is_empty() && n.kind != "sample_selector" {
+                return Err("Sample lists belong only to Sample selector nodes".into());
+            }
+            if n.sample_choices.len() > MAX_SAMPLE_CHOICES || n.sample_choices.iter().any(|s|
+                s.asset == 0 || s.asset > 1_000_000_000 || s.name.len() > 256 || s.nickname.len() > 80
+            ) {
+                return Err("Sample lists allow at most 64 entries, valid Sample IDs, names up to 256 bytes and nicknames up to 80 bytes".into());
+            }
             if matches!(n.kind.as_str(), "convolution" | "convolution_reverb")
                 && n.parameters
                     .get("window")
@@ -2211,7 +2261,7 @@ impl Graph {
                     );
                 }
             }
-            if matches!(n.kind.as_str(), "poly_sampler" | "granular_synth")
+            if matches!(n.kind.as_str(), "poly_sampler" | "granular_synth" | "granular_cloud")
                 && n.parameters
                     .get("root_note")
                     .is_some_and(|v| v.fract() != 0.)
@@ -2253,11 +2303,11 @@ impl Graph {
                 }
             }
             if let Some(part) = &n.part_id {
-                if !matches!(n.kind.as_str(), "part_midi" | "monitor_output")
+                if !matches!(n.kind.as_str(), "part_midi" | "part_player" | "monitor_output")
                     || part.is_empty()
                     || part.len() > 256
                 {
-                    return Err("A part association belongs only to a Part MIDI or Monitor output node and must be a valid part ID".into());
+                    return Err("A part association belongs only to a Part MIDI, Part player or Monitor output node and must be a valid part ID".into());
                 }
             }
             if let Some(io) = &n.io {
@@ -2857,6 +2907,9 @@ impl Project {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        for (node,user) in &self.local_audio_assignments {
+            if user.is_empty() || !self.graph.nodes.iter().any(|n|n.id==*node && n.kind=="browser_input") {return Err("Local audio assignments must name a local audio input and user".into());}
+        }
         if self.schema_version != SCHEMA_VERSION {
             return Err("Unsupported project schema".into());
         }
@@ -3048,6 +3101,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         .map(|(id, kind, x, y)| {
             let d = catalog.iter().find(|d| d.kind == *kind).unwrap();
             Node {
+                sample_choices: vec![],
                 part_id: None,
                 io: None,
                 library: None,
@@ -3093,7 +3147,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
     })
     .collect();
     Project {
-        score: None,
+        local_audio_assignments: BTreeMap::new(),        score: None,
         schema_version: 1,
         id,
         name,

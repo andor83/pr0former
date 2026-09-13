@@ -120,6 +120,10 @@ test('syncopation, point tools, mixing and preparation playback', async ({
     .click()
   await page.getByLabel('Count in', { exact: true }).selectOption('0')
   await page.getByRole('button', { name: 'Play', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Write', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Mute Second', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'Pause', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Write', exact: true })).toBeEnabled()
   await page.getByRole('button', { name: 'Mute Second', exact: true }).click()
   await expect.poll(async () => (await read()).parts[1].muted).toBe(true)
   // Audition is authorized against an existing saved note and uses the graph.

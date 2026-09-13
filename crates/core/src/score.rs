@@ -33,7 +33,7 @@ pub struct Staff {
     #[serde(default)]
     pub transpose: i8,
 }
-pub const MARK_KINDS: [&str; 6] = ["text", "rehearsal", "cue", "expression", "tempo", "lyric"];
+pub const MARK_KINDS: [&str; 7] = ["text", "rehearsal", "cue", "expression", "tempo", "lyric", "chord"];
 pub const CURVE_KINDS: [&str; 4] = ["slur", "bracket", "crescendo", "decrescendo"];
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StaffCurve {
@@ -219,6 +219,7 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
                 || !MARK_KINDS.contains(&m.kind.as_str())
                 || m.text.trim().is_empty()
                 || m.text.len() > 256
+                || (m.kind == "chord" && (m.text.chars().count() > 64 || m.text.chars().any(char::is_control)))
             {
                 return Err("Invalid staff mark".into());
             }
@@ -347,6 +348,22 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn jazz_chord_symbols_validate_and_round_trip_as_notation() {
+        let mut p = crate::demo_project("x".into(), "x".into(), crate::Mode::Structured);
+        let mut staff: Staff = serde_json::from_value(serde_json::json!({"id":"chords", "name":"Upper", "clef":"treble"})).unwrap();
+        staff.marks = ["Dm7", "G7♭9", "B♭maj7/D", "Fm7♭5", "N.C."].iter().enumerate().map(|(i, text)| StaffMark {
+            id: format!("chord-{i}"), beat: i as f64, kind: "chord".into(), text: (*text).into(),
+        }).collect();
+        p.parts[0].staves.push(staff);
+        assert!(p.validate().is_ok());
+        let restored: crate::Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(restored.parts[0].staves[0].marks, p.parts[0].staves[0].marks);
+        for text in ["x".repeat(65), "C\nD".into(), "  ".into()] {
+            p.parts[0].staves[0].marks[0].text = text;
+            assert!(p.validate().is_err());
+        }
+    }
     #[test]
     fn tempo_map_and_staff_marks_validate_and_default_empty() {
         let mut p = crate::demo_project("x".into(), "x".into(), crate::Mode::Structured);
