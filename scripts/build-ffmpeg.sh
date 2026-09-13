@@ -8,7 +8,13 @@ sha=b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3
 archive="$build_root/ffmpeg-$version.tar.xz"
 source_dir="$build_root/ffmpeg-$version"
 executable="$source_dir/ffmpeg"
-case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) executable="$executable.exe" ;; esac
+make_target=ffmpeg
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    executable="$executable.exe"
+    make_target=ffmpeg.exe
+    ;;
+esac
 python_command=python3
 command -v "$python_command" >/dev/null 2>&1 || python_command=python
 mkdir -p "$build_root"
@@ -33,7 +39,7 @@ if [[ ! -f "$source_dir/.pr0-built-v1" ]]; then
       tail -n 200 pr0-configure.log >&2
       exit 1
     fi
-    if ! make -j "$jobs" ffmpeg > pr0-build.log 2>&1; then
+    if ! make -j "$jobs" "$make_target" > pr0-build.log 2>&1; then
       echo 'FFmpeg compilation failed; last 200 log lines:' >&2
       tail -n 200 pr0-build.log >&2
       exit 1
