@@ -109,6 +109,7 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn('pull_request:', source)
         self.assertNotIn('Use stable Rust', source)
         self.assertNotIn('shell: pwsh', source)
+        self.assertIn('ExecutionPolicy Bypass', source)
         self.assertIn('workflow_dispatch:', source)
         self.assertIn('- "v*"', source)
         self.assertIn(r'.\build.ps1 --install-deps --bundles nsis', source)
