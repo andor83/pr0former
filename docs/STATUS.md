@@ -643,8 +643,11 @@ Stabilization validation (2026-09-10):
   retains the run artifact for seven days, and turns a tag result into a draft
   release. Windows signing remains unconfigured. The workflow was syntax-parsed
   and its static routing/retention/release contract is included in the **12
-  passing** build tests. The hosted workflow and installer have not yet been run,
-  installed, or hardware-tested.
+  passing** build tests. Hosted run `34791040927` completed successfully in
+  30m21s and uploaded the unsigned 31,651,930-byte
+  `pr0former_0.1.0_x64-setup.exe` NSIS installer. The downloaded artifact's
+  SHA-256 is `936bbc5f24ffbf2c2dc8cf584b86445181a49ae9e46d403dd700cbe731814987`.
+  The installer has not yet been launched, installed, or hardware-tested.
 
 - GitHub visibility (2026-09-13): `andor83/pr0former` is public and the tracked
   root MIT license permits open-source redistribution. Before the visibility
