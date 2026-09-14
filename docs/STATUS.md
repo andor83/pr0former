@@ -679,11 +679,12 @@ Stabilization validation (2026-09-10):
   SHA-256 is `936bbc5f24ffbf2c2dc8cf584b86445181a49ae9e46d403dd700cbe731814987`.
   The installer has not yet been launched, installed, or hardware-tested.
 
-- GitHub visibility (2026-09-13): `andor83/pr0former` is public and the tracked
-  root MIT license permits open-source redistribution. Before the visibility
-  change, tracked filenames, current tracked contents, and Git history were
-  checked for common private-key/token patterns with no matches. Ignored local
-  data, certificates, recordings, dependencies, build outputs, and the dirty
-  working tree were not uploaded by the visibility change.
+- GitHub visibility (2026-09-13): `andor83/pr0former` was briefly public after
+  tracked filenames, current tracked contents, and Git history were checked for
+  common private-key/token patterns with no matches, then returned to private
+  while self-hosted release automation is being established. The tracked root
+  MIT license still permits a future open-source release. Ignored local data,
+  certificates, recordings, dependencies, and build outputs were not uploaded
+  by either visibility change.
 
 See [VALIDATION_HISTORY.md](VALIDATION_HISTORY.md) for dated prior runs, [AUDIO_ENGINE_AUDIT.md](AUDIO_ENGINE_AUDIT.md) for the September 8 audit, and [ARCHITECTURE.md](ARCHITECTURE.md) / [SCORE_EDITOR.md](SCORE_EDITOR.md) for current contracts and usage.
