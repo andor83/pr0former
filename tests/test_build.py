@@ -121,6 +121,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(source.count('retention-days: 7'), 1)
         self.assertEqual(source.count('contents: write'), 1)
         self.assertIn('needs: build-windows', source)
+        self.assertIn('--repo "$GITHUB_REPOSITORY"', source)
         self.assertIn('actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9', source)
         self.assertIn('tar xz zstd python', source)
         self.assertIn("$env:GITHUB_PATH", source)
