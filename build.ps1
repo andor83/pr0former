@@ -66,6 +66,16 @@ if ($Bundles -match '(^|,)msi(,|$)') {
 function Test-Command([string]$Name) {
   return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
+function Refresh-ProcessPath {
+  $Paths = @(
+    [Environment]::GetEnvironmentVariable('Path', 'Machine'),
+    [Environment]::GetEnvironmentVariable('Path', 'User'),
+    $env:Path
+  )
+  $env:Path = (($Paths -join ';') -split ';' |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -Unique) -join ';'
+}
 function Get-MsysRoot {
   foreach ($Candidate in @($env:MSYS2_ROOT, 'C:\msys64', 'C:\tools\msys64')) {
     if ($Candidate -and (Test-Path (Join-Path $Candidate 'usr\bin\bash.exe'))) { return $Candidate }
@@ -157,6 +167,7 @@ if ($Missing.Count -gt 0) {
   Show-DependencyHelp $Missing
   if (-not (Confirm-DependencyInstall)) { exit 1 }
   Install-Dependencies $Missing
+  Refresh-ProcessPath
   $Missing = @(Get-MissingDependencies)
   if ($Missing.Count -gt 0) {
     Show-DependencyHelp $Missing

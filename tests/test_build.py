@@ -97,6 +97,8 @@ class BuildTests(unittest.TestCase):
         self.assertIn('ffmpeg-$Target.exe', source)
         self.assertIn('Microsoft.VisualStudio.2022.BuildTools', source)
         self.assertIn('python mingw-w64-ucrt-x86_64-gcc', source)
+        self.assertIn('function Refresh-ProcessPath', source)
+        self.assertIn("GetEnvironmentVariable('Path', 'Machine')", source)
         ffmpeg_source = (ROOT / 'scripts/build-ffmpeg.sh').read_text()
         self.assertIn('make_target=ffmpeg.exe', ffmpeg_source)
         self.assertIn('make -j "$jobs" "$make_target"', ffmpeg_source)
