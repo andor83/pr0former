@@ -101,15 +101,19 @@ class BuildTests(unittest.TestCase):
         self.assertIn('make_target=ffmpeg.exe', ffmpeg_source)
         self.assertIn('make -j "$jobs" "$make_target"', ffmpeg_source)
 
-    def test_release_workflow_uses_windows_runner_and_bounded_artifacts(self):
+    def test_release_workflow_uses_self_hosted_windows_runner_and_bounded_artifacts(self):
         source = (ROOT / '.github/workflows/desktop-release.yml').read_text()
-        self.assertIn('runs-on: windows-2022', source)
-        self.assertNotIn('runs-on: ubuntu-', source)
+        self.assertIn('runs-on: [self-hosted, Windows, X64]', source)
+        self.assertIn('runs-on: ubuntu-latest', source)
         self.assertNotIn('runs-on: macos-', source)
+        self.assertNotIn('pull_request:', source)
         self.assertIn('workflow_dispatch:', source)
         self.assertIn('- "v*"', source)
         self.assertIn(r'.\build.ps1 --install-deps --bundles nsis', source)
         self.assertEqual(source.count('retention-days: 7'), 1)
+        self.assertEqual(source.count('contents: write'), 1)
+        self.assertIn('needs: build-windows', source)
+        self.assertIn('actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c', source)
         self.assertIn('--draft --verify-tag', source)
 
     def test_interactive_choices(self):

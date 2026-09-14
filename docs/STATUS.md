@@ -638,8 +638,11 @@ Stabilization validation (2026-09-10):
   unverified.
 
 - Native Windows release automation (2026-09-13): the GitHub Actions workflow
-  builds an NSIS installer on Windows x86-64 using the native PowerShell entry
-  point; macOS and Linux remain local builds. It runs manually or for `v*` tags,
+  builds an NSIS installer on a repository self-hosted Windows x86-64 runner
+  using the native PowerShell entry point; macOS and Linux remain local builds.
+  It runs manually or for `v*` tags, never for pull requests. The build job has a
+  read-only repository token; tag publishing is isolated in a dependent
+  GitHub-hosted Linux job with write permission. The workflow
   retains the run artifact for seven days, and turns a tag result into a draft
   release. Windows signing remains unconfigured. The workflow was syntax-parsed
   and its static routing/retention/release contract is included in the **12
