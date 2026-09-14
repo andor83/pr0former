@@ -106,9 +106,9 @@ class BuildTests(unittest.TestCase):
         self.assertIn('make_target=ffmpeg.exe', ffmpeg_source)
         self.assertIn('make -j "$jobs" "$make_target"', ffmpeg_source)
 
-    def test_release_workflow_uses_self_hosted_windows_runner_and_bounded_artifacts(self):
+    def test_release_workflow_uses_hosted_windows_runner_and_bounded_artifacts(self):
         source = (ROOT / '.github/workflows/desktop-release.yml').read_text()
-        self.assertIn('runs-on: [self-hosted, Windows, X64]', source)
+        self.assertIn('runs-on: windows-latest', source)
         self.assertIn('runs-on: ubuntu-latest', source)
         self.assertNotIn('runs-on: macos-', source)
         self.assertNotIn('pull_request:', source)

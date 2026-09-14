@@ -37,13 +37,13 @@ build directory for `--notarize-only`; that command refreshes the root copy too.
 ### GitHub release builds
 
 `.github/workflows/desktop-release.yml` runs the native build entry point on a
-Windows x86-64 runner. macOS and Linux packages remain local builds on the readily
-available native machines. The workflow runs only when started manually in GitHub
-Actions or when a `v*` tag is pushed. Manual runs leave a seven-day downloadable
-NSIS installer on the workflow run. A semantic version tag such as `v0.1.0` also
-sets the bundle version and creates a **draft** GitHub Release with the Windows
-installer attached. Windows installer signing is not configured yet; inspect and
-test every bundle before publishing the draft release.
+GitHub-hosted Windows x86-64 runner. macOS and Linux packages remain local builds
+on the readily available native machines. The workflow runs only when started
+manually in GitHub Actions or when a `v*` tag is pushed. Manual runs leave a
+seven-day downloadable NSIS installer on the workflow run. A semantic version tag
+such as `v0.1.0` also sets the bundle version and creates a GitHub **prerelease**
+with the Windows installer attached. Windows installer signing is not configured
+yet; inspect and test every bundle before publishing it as a non-prerelease.
 
 The workflow caches Cargo downloads and the compiled, checksum-pinned Windows
 FFmpeg tree. It does not cache the much larger Rust target trees. This repository

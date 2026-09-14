@@ -663,31 +663,28 @@ Stabilization validation (2026-09-10):
   import, and physical audio/MIDI behavior on those systems remain manual and
   unverified.
 
-- Native Windows release automation (2026-09-13): the GitHub Actions workflow
-  builds an NSIS installer on a repository self-hosted Windows x86-64 runner
-  using the native PowerShell entry point; macOS and Linux remain local builds.
-  It runs manually or for `v*` tags, never for pull requests. The build job has a
+- Native Windows release automation (2026-09-14): the GitHub Actions workflow
+  builds an NSIS installer on a GitHub-hosted Windows x86-64 runner using the
+  native PowerShell entry point; macOS and Linux remain local builds. It runs
+  manually or for `v*` tags, never for pull requests. The build job has a
   read-only repository token; tag publishing is isolated in a dependent
-  GitHub-hosted Linux job with write permission. The workflow
-  retains the run artifact for seven days, and turns a tag result into a visible
-  prerelease with the installer attached. Windows signing remains unconfigured.
-  The workflow was syntax-parsed and its static routing, prerequisite, cache,
-  retention and release contract is included in the **12 passing** build tests.
-  Self-hosted run `34801066915` completed successfully in 26m22s using the
-  current pinned action versions. It restored the 252 MB Cargo/compiled-FFmpeg
-  cache with `zstd`, uploaded the unsigned 32,372,687-byte
-  `pr0former_0.1.0_x64-setup.exe` NSIS installer, then saved the refreshed Cargo,
-  FFmpeg and npm caches without the previous self-hosted gzip warning. The
-  downloaded installer's SHA-256 is
-  `609bdc2a792320a83ed6465f669f61950fe45aec283ce227f527fcb4e03c1701`.
-  The installer has not yet been launched, installed, or hardware-tested.
+  GitHub-hosted Linux job with write permission. The workflow retains the run
+  artifact for seven days, and turns a tag result into a visible prerelease with
+  the installer attached. Windows signing remains unconfigured. Its static
+  routing, prerequisite, cache, retention and release contract is included in
+  the build tests. The earlier self-hosted run `34801066915` completed
+  successfully in 26m22s and uploaded the unsigned 32,372,687-byte
+  `pr0former_0.1.0_x64-setup.exe` installer (SHA-256
+  `609bdc2a792320a83ed6465f669f61950fe45aec283ce227f527fcb4e03c1701`). The
+  GitHub-hosted configuration has not yet produced or launched an installer;
+  Windows installation, WebView, FFmpeg import, and hardware behavior remain
+  manual and unverified.
 
-- GitHub visibility (2026-09-13): `andor83/pr0former` was briefly public after
-  tracked filenames, current tracked contents, and Git history were checked for
-  common private-key/token patterns with no matches, then returned to private
-  while self-hosted release automation is being established. The tracked root
-  MIT license still permits a future open-source release. Ignored local data,
-  certificates, recordings, dependencies, and build outputs were not uploaded
+- GitHub visibility (2026-09-14): `andor83/pr0former` is public. Before the
+  initial public release, tracked filenames, current tracked contents, and Git
+  history were checked for common private-key/token patterns with no matches.
+  Ignored local data, certificates, recordings, dependencies, and build outputs
+  were not uploaded.
   by either visibility change.
 
 See [VALIDATION_HISTORY.md](VALIDATION_HISTORY.md) for dated prior runs, [AUDIO_ENGINE_AUDIT.md](AUDIO_ENGINE_AUDIT.md) for the September 8 audit, and [ARCHITECTURE.md](ARCHITECTURE.md) / [SCORE_EDITOR.md](SCORE_EDITOR.md) for current contracts and usage.
