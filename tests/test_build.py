@@ -121,6 +121,8 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(source.count('retention-days: 7'), 1)
         self.assertEqual(source.count('contents: write'), 1)
         self.assertIn('needs: build-windows', source)
+        self.assertIn('actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9', source)
+        self.assertIn('actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a', source)
         self.assertIn('actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c', source)
         self.assertIn('--prerelease --verify-tag', source)
         self.assertNotIn('--draft', source)
