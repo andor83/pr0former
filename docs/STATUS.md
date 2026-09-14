@@ -676,9 +676,14 @@ Stabilization validation (2026-09-10):
   successfully in 26m22s and uploaded the unsigned 32,372,687-byte
   `pr0former_0.1.0_x64-setup.exe` installer (SHA-256
   `609bdc2a792320a83ed6465f669f61950fe45aec283ce227f527fcb4e03c1701`). The
-  GitHub-hosted configuration has not yet produced or launched an installer;
-  Windows installation, WebView, FFmpeg import, and hardware behavior remain
-  manual and unverified.
+  GitHub-hosted run `34836051960` completed the Windows bundle job successfully
+  in 22m18s and produced the unsigned 32,380,070-byte
+  `pr0former_0.1.0_x64-setup.exe`, which is attached to the `v0.1.0`
+  prerelease. Its initial publishing job could not infer a repository because it
+  has no checkout; the current workflow explicitly passes `$GITHUB_REPOSITORY`
+  to every `gh release` command and has focused test coverage, but that corrected
+  publishing path has not yet run for a new tag. Windows installation, WebView,
+  FFmpeg import, and hardware behavior remain manual and unverified.
 
 - GitHub visibility (2026-09-14): `andor83/pr0former` is public. Before the
   initial public release, tracked filenames, current tracked contents, and Git
