@@ -67,11 +67,16 @@ function Test-Command([string]$Name) {
   return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
 function Refresh-ProcessPath {
+  $KnownPaths = @(
+    (Join-Path $env:ProgramFiles 'CMake\bin'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\CMake\bin'),
+    (Join-Path $env:USERPROFILE '.cargo\bin')
+  ) | Where-Object { Test-Path $_ }
   $Paths = @(
     [Environment]::GetEnvironmentVariable('Path', 'Machine'),
     [Environment]::GetEnvironmentVariable('Path', 'User'),
     $env:Path
-  )
+  ) + $KnownPaths
   $env:Path = (($Paths -join ';') -split ';' |
     Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
     Select-Object -Unique) -join ';'
@@ -162,6 +167,7 @@ function Assert-Success([string]$Step) {
   if ($LASTEXITCODE -ne 0) { throw "$Step failed (exit $LASTEXITCODE)." }
 }
 
+Refresh-ProcessPath
 $Missing = @(Get-MissingDependencies)
 if ($Missing.Count -gt 0) {
   Show-DependencyHelp $Missing
