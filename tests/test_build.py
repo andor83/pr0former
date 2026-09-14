@@ -100,6 +100,8 @@ class BuildTests(unittest.TestCase):
         self.assertIn('function Refresh-ProcessPath', source)
         self.assertIn("GetEnvironmentVariable('Path', 'Machine')", source)
         self.assertIn("Join-Path $env:ProgramFiles 'CMake\\bin'", source)
+        self.assertIn('function Test-PythonCandidate', source)
+        self.assertIn("Arguments @('-3', '--version')", source)
         ffmpeg_source = (ROOT / 'scripts/build-ffmpeg.sh').read_text()
         self.assertIn('make_target=ffmpeg.exe', ffmpeg_source)
         self.assertIn('make -j "$jobs" "$make_target"', ffmpeg_source)

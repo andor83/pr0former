@@ -93,10 +93,29 @@ function Test-VisualStudioCpp {
   $Install = & $VsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
   return $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($Install | Select-Object -First 1))
 }
+function Test-PythonCandidate([string]$Command, [string[]]$Arguments) {
+  if (-not (Test-Command $Command)) { return $false }
+  try {
+    $Version = (& $Command @Arguments 2>&1 | Out-String).Trim()
+    return $LASTEXITCODE -eq 0 -and $Version -match '^Python 3(\.|$)'
+  } catch {
+    return $false
+  }
+}
 function Get-Python {
-  if (Test-Command 'python3') { return 'python3' }
-  if (Test-Command 'python') { return 'python' }
-  if (Test-Command 'py') { return 'py' }
+  if (Test-PythonCandidate -Command 'py' -Arguments @('-3', '--version')) { return 'py' }
+  $Candidates = [System.Collections.Generic.List[string]]::new()
+  $PythonRoot = Join-Path $env:LOCALAPPDATA 'Programs\Python'
+  if (Test-Path $PythonRoot) {
+    Get-ChildItem $PythonRoot -Directory -Filter 'Python3*' |
+      Sort-Object Name -Descending |
+      ForEach-Object { $Candidates.Add((Join-Path $_.FullName 'python.exe')) }
+  }
+  $Candidates.Add('python3')
+  $Candidates.Add('python')
+  foreach ($Candidate in $Candidates) {
+    if (Test-PythonCandidate -Command $Candidate -Arguments @('--version')) { return $Candidate }
+  }
   return $null
 }
 function Test-MsysTools([string]$Root) {
