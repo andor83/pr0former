@@ -122,6 +122,12 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(source.count('contents: write'), 1)
         self.assertIn('needs: build-windows', source)
         self.assertIn('actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9', source)
+        self.assertIn('tar xz zstd python', source)
+        self.assertIn("$env:GITHUB_PATH", source)
+        self.assertLess(source.index('Install MSYS2 FFmpeg toolchain'),
+                        source.index('Use Node.js 24'))
+        self.assertLess(source.index('Install MSYS2 FFmpeg toolchain'),
+                        source.index('Cache Cargo downloads and compiled FFmpeg'))
         self.assertIn('actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a', source)
         self.assertIn('actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c', source)
         self.assertIn('--prerelease --verify-tag', source)

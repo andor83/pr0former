@@ -26,6 +26,22 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install MSYS2 FFmpeg toolchain
+        run: |
+          $roots = @('C:\msys64', 'C:\tools\msys64')
+          $root = $roots | Where-Object { Test-Path (Join-Path $_ 'usr\bin\bash.exe') } | Select-Object -First 1
+          if (-not $root) {
+            choco install msys2 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Chocolatey could not install MSYS2 ($LASTEXITCODE)" }
+            $root = $roots | Where-Object { Test-Path (Join-Path $_ 'usr\bin\bash.exe') } | Select-Object -First 1
+          }
+          if (-not $root) { throw 'MSYS2 was installed but its bash executable was not found.' }
+          "MSYS2_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $root 'usr\bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $bash = Join-Path $root 'usr\bin\bash.exe'
+          & $bash -lc 'pacman -Sy --needed --noconfirm make diffutils curl tar xz zstd python mingw-w64-ucrt-x86_64-gcc'
+          if ($LASTEXITCODE -ne 0) { throw "MSYS2 package installation failed ($LASTEXITCODE)" }
+
       - name: Use Node.js 24
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -62,21 +78,6 @@ jobs:
           key: desktop-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock', 'scripts/build-ffmpeg.sh') }}
           restore-keys: |
             desktop-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Install MSYS2 FFmpeg toolchain
-        run: |
-          $roots = @('C:\msys64', 'C:\tools\msys64')
-          $root = $roots | Where-Object { Test-Path (Join-Path $_ 'usr\bin\bash.exe') } | Select-Object -First 1
-          if (-not $root) {
-            choco install msys2 --yes --no-progress
-            if ($LASTEXITCODE -ne 0) { throw "Chocolatey could not install MSYS2 ($LASTEXITCODE)" }
-            $root = $roots | Where-Object { Test-Path (Join-Path $_ 'usr\bin\bash.exe') } | Select-Object -First 1
-          }
-          if (-not $root) { throw 'MSYS2 was installed but its bash executable was not found.' }
-          "MSYS2_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $bash = Join-Path $root 'usr\bin\bash.exe'
-          & $bash -lc 'pacman -Sy --needed --noconfirm make diffutils curl tar xz python mingw-w64-ucrt-x86_64-gcc'
-          if ($LASTEXITCODE -ne 0) { throw "MSYS2 package installation failed ($LASTEXITCODE)" }
 
       - name: Build Windows bundle
         run: .\build.ps1 --install-deps --bundles nsis --jobs 2
