@@ -7,6 +7,7 @@ mod discovery;
 mod hardware_meter;
 mod hosting;
 mod local_midi;
+mod piano_input;
 mod conductor_midi;
 mod loops;
 mod media;
@@ -22,6 +23,7 @@ mod resources;
 mod revisions;
 mod sample_library;
 mod samples;
+mod project_bundle;
 mod scripts;
 mod score_automation;
 mod settings;
@@ -673,6 +675,56 @@ async fn create_project(
     tx.commit().map_err(internal)?;
     Ok(Json(p))
 }
+/// Store a portable project as one validated, owned project. This deliberately
+/// rejects the archive before inserting anything, unlike create-then-update.
+async fn import_project(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(mut p): Json<Project>,
+) -> Api<Json<Project>> {
+    csrf(&headers)?;
+    let owner = user(&app, &headers)?;
+    let _guard = app.setup.lock().await;
+    p.id = uid();
+    store_import(&app, owner, p).await
+}
+async fn store_import(app: &App, owner: String, mut p: Project) -> Api<Json<Project>> {
+    p.revision = 0;
+    // People and machine-local bindings cannot be meaningful in another
+    // workspace. Enforce the portable-file contract at the trust boundary.
+    p.conductor = None;
+    p.local_audio_assignments.clear();
+    p.conducted.midi_bindings.clear();
+    for part in &mut p.parts {
+        part.performer = None;
+    }
+    p.validate().map_err(bad)?;
+    scripts::validate_graph(&p.graph, None).await.map_err(bad)?;
+    samples::validate_choices(&p).map_err(bad)?;
+    project_bundle::validate_assets(&p).map_err(bad)?;
+    settings::validate_routes(&p, &settings::read()).map_err(bad)?;
+    let mut db = app.db.lock().unwrap();
+    let tx = db.transaction().map_err(internal)?;
+    let body = serde_json::to_string(&p).map_err(internal)?;
+    tx.execute(
+        "INSERT INTO projects(id,body,revision) VALUES(?1,?2,0)",
+        params![p.id, body],
+    )
+    .map_err(internal)?;
+    tx.execute(
+        "INSERT INTO members(project_id,user_id,role) VALUES(?1,?2,'owner')",
+        params![p.id, owner],
+    )
+    .map_err(internal)?;
+    tx.execute(
+        "INSERT INTO revisions(project_id,revision,body) VALUES(?1,0,?2)",
+        params![p.id, body],
+    )
+    .map_err(internal)?;
+    tx.execute("INSERT INTO project_recents(user_id,project_id,opened) VALUES(?1,?2,(SELECT COALESCE(MAX(opened),0)+1 FROM project_recents WHERE user_id=?1))",params![owner,p.id]).map_err(internal)?;
+    tx.commit().map_err(internal)?;
+    Ok(Json(p))
+}
 async fn get_project(
     State(app): State<App>,
     headers: HeaderMap,
@@ -771,7 +823,7 @@ async fn update_project(
                 "Connected route target is read-only; disconnect it before editing",
             ));
         }
-        if matches!(node.kind.as_str(), "control_visualizer" | "control_input")
+        if node.kind == "control_visualizer"
             && previous
                 .graph
                 .nodes
@@ -877,15 +929,6 @@ async fn control_input(
         }
         send(&app, audio::Command::Bang(c.node))?;
         return Ok(Json(p));
-    }
-    if p.graph
-        .flatten()
-        .map_err(bad)?
-        .edges
-        .iter()
-        .any(|e| e.target == c.node && e.target_port == "in")
-    {
-        return Err(bad("Connected graphical controls are read-only"));
     }
     let node = p
         .graph
@@ -2258,6 +2301,7 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
         visualization_session.clone(),
     );
     let mut visualizers = false;
+    let mut piano = piano_input::Session::new(app.clone(), id.clone(), u.clone(), visualization_session.clone());
     let mut midi_window = tokio::time::Instant::now();
     let mut midi_messages = 0_u16;
     // Performer authorization (mode, assigned parts) is cached per socket and
@@ -2272,7 +2316,7 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                 if v["type"].as_str().is_some_and(|s|s.starts_with("conductor_midi_")) && v.get("user_id").is_some_and(|target|target!=&u) { continue; }
                 if v.get("session_id").is_some_and(|session|session!=&visualization_session) && v["type"].as_str().is_some_and(|s|s.starts_with("conductor_midi_")) {continue;}
                 let mine=v.get("project_id").and_then(Value::as_str)==Some(&id);
-                if mine && (v["type"]=="project" || v["type"]=="members_changed") {performer=None;local_midi.invalidate();}
+                if mine && (v["type"]=="project" || v["type"]=="members_changed") {performer=None;local_midi.invalidate();piano.invalidate();}
                 // Serialized once by the producer; non-subscribers take the variant without visualizations.
                 let text=if visualizers {&event.text} else {event.stripped.as_ref().unwrap_or(&event.text)};
                 if (v["type"]=="hardware_levels" || v["type"]=="audio_engine_status" || v["type"]=="system_audio" || v["type"]=="engine_status" || mine)&&socket_text(&mut socket, text.to_string()).await.is_err(){break;}
@@ -2297,6 +2341,17 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                         if v["type"]=="ping"{
                             if visualizers{let _=send(&app,audio::Command::Visualizers{session:visualization_session.clone(),project:id.clone(),enabled:true});}
                             let _=socket_text(&mut socket, json!({"type":"pong","client_time":v["client_time"],"server_time":audio::monotonic_ms()}).to_string()).await;
+                        }
+                        if v["type"]=="piano" {
+                            if let Err(error) = piano.handle(&v) {
+                                let _=socket_text(&mut socket,json!({"type":"piano_error","error":error}).to_string()).await;
+                                break; // Drop releases this socket's held notes, never replay a backlog.
+                            }
+                        }
+                        if v["type"]=="graph_control" {
+                            if let Err(error)=piano.control(&v) {
+                                let _=socket_text(&mut socket,json!({"type":"control_error","error":error}).to_string()).await;
+                            }
                         }
                         if matches!(v["type"].as_str(), Some("local_midi" | "local_midi_connect" | "local_midi_reset")) {
                             let result = local_midi.handle(&v);
@@ -2340,7 +2395,7 @@ async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers:
                 Some(Ok(_))=>{last_received=tokio::time::Instant::now();}
             },
             _=check.tick()=>{
-                performer=None;local_midi.invalidate();
+                performer=None;local_midi.invalidate();piano.invalidate();
                 let _=conductor_midi::enqueue(&app.conductor_midi,&id,&u,&visualization_session,json!({"type":"conductor_midi_heartbeat"}));
                 if user(&app,&headers).is_err() || role(&app,&id,&u).is_err() || last_received.elapsed() >= Duration::from_secs(30) {break;}
                 if tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Ping(Vec::new().into()))).await.map_or(true, |r| r.is_err()) {break;}
@@ -2493,6 +2548,9 @@ async fn main() {
         .route("/api/projects/{id}/preview", get(preview))
         .route("/api/projects/{id}/control", put(control_input))
         .route("/api/projects/{id}/piano", put(piano_note))
+        .route("/api/projects/{id}/export", get(project_bundle::export))
+        .route("/api/projects/bundle/inspect", post(project_bundle::inspect).layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)))
+        .route("/api/projects/bundle/import", post(project_bundle::import).layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)))
         .route("/api/projects/{id}/controller", put(controller_edit))
         .route("/api/projects/{id}/audition", post(audition))
         .route("/api/projects/{id}/loops/clear", put(clear_loop))
@@ -2515,6 +2573,7 @@ async fn main() {
         .route("/api/catalog", get(|| async { Json(catalog()) }))
         .route("/api/projects/{id}/scripts/compile", post(scripts::compile))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/import", post(import_project))
         .route("/api/projects/{id}/opened", post(accounts::opened))
         .route("/api/samples", get(sample_library::organize))
         .route(

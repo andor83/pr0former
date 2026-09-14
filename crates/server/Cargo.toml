@@ -38,3 +38,4 @@ rquickjs = { version = "0.13", default-features = false, features = ["std"] }
 rcgen = { version = "0.13", features = ["x509-parser"] }
 time = "0.3"
 base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -86,6 +86,10 @@ pub struct ClefChange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notation {
     #[serde(default)]
+    pub notehead: Option<String>,
+    #[serde(default)]
+    pub drum_mark: Option<String>,
+    #[serde(default)]
     pub onset: Option<Rational>,
     #[serde(default)]
     pub written_duration: Option<Rational>,
@@ -154,7 +158,7 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
                 || c.beat < 0.
                 || c.beat > 4096.
                 || c.beat <= last
-                || !["treble", "bass", "alto", "tenor"].contains(&c.clef.as_str())
+                || !["treble", "bass", "alto", "tenor", "percussion"].contains(&c.clef.as_str())
             {
                 return Err("Invalid staff clef change".into());
             }
@@ -236,7 +240,7 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
             || !ids.insert(&s.id)
             || s.name.trim().is_empty()
             || s.name.len() > 120
-            || !["treble", "bass", "alto", "tenor"].contains(&s.clef.as_str())
+            || !["treble", "bass", "alto", "tenor", "percussion"].contains(&s.clef.as_str())
             || !(-48..=48).contains(&s.transpose)
             || s.key_signature.as_ref().is_some_and(|k| {
                 ![
@@ -266,7 +270,9 @@ pub fn validate(part: &crate::Part) -> Result<(), String> {
             {
                 return Err("Rational notation time must agree with playback time".into());
             }
-            if !(-2..=2).contains(&v.octave)
+            if v.notehead.as_ref().is_some_and(|s| !["normal", "cross", "circle-cross", "diamond", "triangle", "triangle-open", "ghost"].contains(&s.as_str()))
+                || v.drum_mark.as_ref().is_some_and(|s| !["none", "roll-1", "roll-2", "roll-3", "buzz"].contains(&s.as_str()))
+                || !(-2..=2).contains(&v.octave)
                 || v.articulation.as_ref().is_some_and(|a| {
                     !["staccato", "tenuto", "accent", "marcato"].contains(&a.as_str())
                 })
@@ -535,6 +541,8 @@ mod tests {
         let n = &mut p.parts[0].notes[0];
         n.pitch = 60;
         n.notation = Some(Notation {
+            notehead: None,
+            drum_mark: None,
             onset: None,
             written_duration: None,
             tie_to: None,

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { headSuffix } from '../percussionNotation'
 import {
   Renderer,
   Stave,
@@ -15,6 +16,10 @@ import {
   GraceNote,
   Curve,
   Barline,
+  Tremolo,
+  Parenthesis,
+  Modifier,
+  Annotation,
 } from 'vexflow'
 import type { Part, Staff, ScoreTimeline, Note } from '../types'
 import {
@@ -515,7 +520,7 @@ function render() {
       .sort((a, b) => a.beat - b.beat || a.v.voice - b.v.voice)
     const chordMap = new Map<string, typeof fragments>()
     for (const item of fragments) {
-      const key = `${item.beat}:${item.v.voice}:${item.glyph}:${item.dots}:${item.n.rest ? item.n.id : ''}:${item.v.grace_to ? item.n.id : ''}:${item.v.articulation || ''}`
+      const key = `${item.beat}:${item.v.voice}:${item.glyph}:${item.dots}:${item.n.rest ? item.n.id : ''}:${item.v.grace_to ? item.n.id : ''}:${item.v.articulation || ''}:${item.v.drum_mark || ''}`
       if (!chordMap.has(key)) chordMap.set(key, [])
       chordMap.get(key)!.push(item)
     }
@@ -545,12 +550,22 @@ function render() {
             ?.clef || props.staff.clef,
         keys: item.heads.map(
           (h) =>
-            `${['c', 'd', 'e', 'f', 'g', 'a', 'b'][((h.v.step % 7) + 7) % 7]}${({ '-2': 'bb', '-1': 'b', '0': '', '1': '#', '2': '##' } as Record<string, string>)[String(h.v.alter)] || ''}/${Math.floor(h.v.step / 7)}`,
+            `${['c', 'd', 'e', 'f', 'g', 'a', 'b'][((h.v.step % 7) + 7) % 7]}${({ '-2': 'bb', '-1': 'b', '0': '', '1': '#', '2': '##' } as Record<string, string>)[String(h.v.alter)] || ''}/${Math.floor(h.v.step / 7)}${item.n.rest ? '' : headSuffix(h.v.notehead)}`,
         ),
         duration: item.glyph + (item.n.rest ? 'r' : ''),
         dots: item.dots,
         stemDirection: item.v.voice % 2 ? 1 : -1,
       })
+      if (!item.n.rest) {
+        item.heads.forEach((h, index) => {
+          if (h.v.notehead === 'ghost') {
+            note.addModifier(new Parenthesis(Modifier.Position.LEFT), index)
+            note.addModifier(new Parenthesis(Modifier.Position.RIGHT), index)
+          }
+        })
+        if (item.v.drum_mark?.startsWith('roll-')) note.addModifier(new Tremolo(Number(item.v.drum_mark.slice(-1))))
+        if (item.v.drum_mark === 'buzz') note.addModifier(new Annotation('Z').setVerticalJustification(Annotation.VerticalJustify.CENTER_STEM))
+      }
       if (item.v.articulation)
         note.addModifier(
           new Articulation(
@@ -656,6 +671,14 @@ function render() {
           if (el && automatic.has(h.n))
             tag(el, { kind: 'rest', beat: h.n.beat, rest: h.n })
           if (el && !automatic.has(h.n)) {
+            // Modifier text bounds can include the SVG origin. Keep the note's
+            // transparent hit target local so ghost/roll notes do not cover neighbors.
+            for (const hit of el.querySelectorAll(':scope > rect[opacity="0"]')) {
+              hit.setAttribute('x', String(note.getAbsoluteX() - 5))
+              hit.setAttribute('y', String((note.getYs()[index] ?? 0) - 12))
+              hit.setAttribute('width', '24')
+              hit.setAttribute('height', '24')
+            }
             el.dataset.selected = String(
               props.selected.has(noteKey(props.part.id, h.n.id)),
             )

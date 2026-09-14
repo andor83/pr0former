@@ -1,0 +1,26 @@
+import {test,expect} from '@playwright/test'
+test('context menu deletes one or selected bars and supports undo',async({page})=>{
+ const headers={'X-Pr0former':'1'},status=await(await page.request.get('/api/status')).json()
+ await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
+ let p=await(await page.request.post('/api/projects',{headers,data:{name:'Delete bars',mode:'structured'}})).json()
+ p.parts[0].notes=[0,4,8,12].map((beat,i)=>({id:`n${i}`,pitch:60+i,beat,duration:1,velocity:90,rest:false,tied:false}))
+ p.score={version:1,length:16,loop_score:false,meters:[],keys:[],repeats:[]}
+ p=await(await page.request.put(`/api/projects/${p.id}`,{headers,data:p})).json()
+ const load=async()=>(await(await page.request.get(`/api/projects/${p.id}`)).json()).project
+ await page.goto('/');await page.getByRole('button',{name:'Score & Parts',exact:true}).click()
+ const staff=page.locator('[data-score-part="part-1"] [data-staff-id]').first(),region=page.locator('[data-bar-region]')
+ await staff.click({position:{x:300,y:60},button:'right'})
+ await page.getByRole('menuitem',{name:'Delete bar',exact:true}).click()
+ await expect.poll(async()=>(await load()).score.length).toBe(12)
+ expect((await load()).parts[0].notes.map((n:any)=>n.beat)).toEqual([0,4,8])
+ await page.keyboard.press('ControlOrMeta+z')
+ await expect.poll(async()=>(await load()).score.length).toBe(16)
+ await staff.click({position:{x:300,y:60}})
+ await staff.click({position:{x:700,y:60},modifiers:['Shift']})
+ await expect(region).toHaveAttribute('data-start','0');await expect(region).toHaveAttribute('data-end','8')
+ await staff.click({position:{x:700,y:60},button:'right'})
+ await page.getByRole('menuitem',{name:'Delete bars',exact:true}).click()
+ await expect.poll(async()=>(await load()).score.length).toBe(8)
+ expect((await load()).parts[0].notes.map((n:any)=>[n.pitch,n.beat])).toEqual([[62,0],[63,4]])
+ await expect(region).toHaveCount(0)
+})

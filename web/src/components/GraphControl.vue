@@ -1,16 +1,25 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import FaderTrack from './FaderTrack.vue'
 import {roundSlider,formatSlider} from '../sliderNumbers'
 import type { GraphNode, Visualization } from '../types'
 const props=defineProps<{node:GraphNode;connected:boolean;data?:Visualization;stale:boolean;active:boolean;editable:boolean}>()
-const emit=defineEmits<{value:[value:number|string];bang:[]}>()
+const emit=defineEmits<{value:[value:number|string];preview:[value:number];bang:[]}>()
 const mode=computed(()=>props.node.parameters.mode??2),min=computed(()=>props.node.parameters.min??-100000),max=computed(()=>props.node.parameters.max??100000)
 function display(value:number|string|null|undefined){return mode.value===3&&typeof value==='number'?formatSlider(value):String(value??'')}
 const draft=ref(display(props.node.control_value)),focused=ref(false),error=ref('')
-watch(()=>props.node.control_value,value=>{if(!focused.value)draft.value=display(value)})
-watch(mode,()=>{draft.value=display(props.node.control_value);error.value=''})
+const pending=ref<number|string>()
+const chrome=computed(()=>props.node.parameters.hide_chrome!==1)
+const drag=ref<{x:number;value:number}|null>(null)
+const faderUnit=computed(()=>max.value===min.value?0:Math.max(0,Math.min(1,(Number(draft.value||0)-min.value)/(max.value-min.value))))
+function slideDown(e:PointerEvent){if(!props.editable)return;focused.value=true;drag.value={x:e.clientX,value:Number(draft.value)||0};(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)}
+function slideMove(e:PointerEvent){if(!drag.value)return;const value=roundSlider(Math.max(min.value,Math.min(max.value,drag.value.value+(e.clientX-drag.value.x)/140*(max.value-min.value))));draft.value=formatSlider(value);if(props.active)emit('preview',value)}
+function slideUp(e:PointerEvent){if(!drag.value)return;drag.value=null;edit(draft.value);focused.value=false;if((e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId))(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)}
+function bump(delta:number){const value=Number(draft.value||0);if(Number.isFinite(value))edit(String(Math.max(min.value,Math.min(max.value,value+delta))))}
+watch(()=>props.node.control_value,value=>{if(value===pending.value)pending.value=undefined;if(!focused.value&&pending.value===undefined)draft.value=display(value)})
+watch(mode,()=>{draft.value=display(props.active&&!props.stale?props.data?.value??props.node.control_value:props.node.control_value);error.value=''})
 const incoming=computed(()=>props.data?.value)
-watch(incoming,value=>{if(props.active&&!props.stale&&!focused.value&&!props.connected&&value!==undefined)draft.value=display(value)})
+watch(incoming,value=>{if(value===pending.value)pending.value=undefined;if(props.active&&!props.stale&&!focused.value&&pending.value===undefined&&value!==undefined)draft.value=display(value)},{immediate:true})
 function edit(text:string){
   draft.value=text;error.value=''
   if(mode.value===4){if(new TextEncoder().encode(text).length>256){error.value='Use at most 256 UTF-8 bytes';return}emit('value',text);return}
@@ -18,24 +27,23 @@ function edit(text:string){
   if(!text.trim()||!Number.isFinite(n)||n<min.value||n>max.value||(mode.value===1&&!Number.isInteger(n))){error.value=`Enter ${mode.value===1?'an integer':'a number'} from ${min.value} to ${max.value}`;return}
   const value=mode.value===3?Math.max(min.value,Math.min(max.value,roundSlider(n))):n
   if(mode.value===3)draft.value=formatSlider(value)
-  emit('value',value)
+  pending.value=value;emit('value',value)
 }
 </script>
 <template>
   <div class="graphical-control nodrag nopan nowheel" @dblclick.stop @keydown.stop @mousedown.stop @click.stop>
-    <template v-if="connected"><span class="connected-label">CONNECTED · READ ONLY</span><output :class="{dim:stale}">{{stale?'Engine value stale':incoming===undefined?'Waiting for engine':display(incoming)}}</output></template>
-    <template v-else>
       <button v-if="mode===0" class="button primary" :aria-label="`Trigger ${node.label}`" :disabled="!editable||!active" @click="emit('bang')">Bang</button>
       <template v-else>
-        <input v-if="mode===3" type="range" :aria-label="`${node.label} slider`" :min="min" :max="max" step="0.01" :value="draft||0" :disabled="!editable" @focus="focused=true" @blur="focused=false" @input="edit(($event.target as HTMLInputElement).value)">
-        <input :type="mode===4?'text':'number'" :aria-label="`${node.label} value`" :step="mode===1?1:mode===3?0.01:'any'" :min="min" :max="max" :value="draft|| (mode===4?'':0)" :disabled="!editable" @focus="focused=true" @blur="focused=false" @input="draft=($event.target as HTMLInputElement).value" @change="edit(($event.target as HTMLInputElement).value)">
+        <div v-if="mode===3" class="fader-gesture" role="slider" :tabindex="editable?0:-1" :aria-label="`${node.label} slider`" :aria-valuemin="min" :aria-valuemax="max" :aria-valuenow="Number(draft)||0" :aria-disabled="!editable" aria-orientation="horizontal" @pointerdown.prevent.stop="slideDown" @pointermove="slideMove" @pointerup="slideUp" @pointercancel="slideUp" @lostpointercapture="slideUp" @keydown.right.prevent="editable&&bump(0.01)" @keydown.left.prevent="editable&&bump(-0.01)" @keydown.up.prevent="editable&&bump(0.01)" @keydown.down.prevent="editable&&bump(-0.01)"><FaderTrack :unit="faderUnit" horizontal /></div>
+        <div class="input-box"><input :type="mode===4?'text':'number'" :aria-label="`${node.label} value`" :step="mode===1?1:mode===3?0.01:'any'" :min="min" :max="max" :value="draft|| (mode===4?'':0)" :disabled="!editable" @focus="focused=true" @blur="focused=false" @input="draft=($event.target as HTMLInputElement).value" @change="edit(($event.target as HTMLInputElement).value)" @keydown.up="mode!==4&&($event.preventDefault(),bump(1))" @keydown.down="mode!==4&&($event.preventDefault(),bump(-1))"><div v-if="mode===1||mode===2" class="steppers"><button :aria-label="`Increase ${node.label} by 1`" :disabled="!editable||Number(draft)>=max" @click="bump(1)">▴</button><button :aria-label="`Decrease ${node.label} by 1`" :disabled="!editable||Number(draft)<=min" @click="bump(-1)">▾</button></div></div>
       </template>
-      <small>{{['One-sample trigger','Integer','Float','Slider','Text'][mode]}}<template v-if="mode>0&&mode<4"> · {{min}} … {{max}}</template></small>
-      <p v-if="mode===0&&!active" class="feature-note">Enable the engine to trigger.</p>
+      <small v-if="chrome">{{['One-sample trigger','Integer','Float','Slider','Text'][mode]}}<template v-if="mode>0&&node.parameters.changes_only===1"> · changes only</template><template v-if="connected"> · input + manual override</template></small>
+      <p v-if="chrome&&mode===0&&!active" class="feature-note">Enable the engine to trigger.</p>
       <p v-if="error" role="alert" class="field-error">{{error}}</p>
-    </template>
   </div>
 </template>
 <style scoped>
-.graphical-control{position:absolute;top:103px;left:12px;right:12px;display:flex;flex-direction:column;gap:8px;font-size:11px}.graphical-control input{width:100%;padding:8px}.graphical-control small{font-size:9px;color:var(--muted)}.graphical-control output{overflow-wrap:anywhere;max-height:90px;overflow:auto;font-size:15px}.graphical-control .connected-label{font-size:8px}.graphical-control .field-error{font-size:9px;line-height:1.2}
+.graphical-control{position:relative;display:flex;flex-direction:column;gap:5px;font-size:11px}.graphical-control input{width:100%;min-width:0;padding:8px}.graphical-control small{font-size:9px;color:var(--muted)}.graphical-control output{overflow-wrap:anywhere;max-height:90px;overflow:auto;font-size:15px}.graphical-control .connected-label{font-size:8px}.graphical-control .field-error{font-size:9px;line-height:1.2}
+.input-box{display:flex;border:1px solid var(--amber);border-radius:5px;background:#392719;overflow:hidden}.input-box input{border:0;background:transparent;color:var(--amber);appearance:textfield;-moz-appearance:textfield}.input-box input::-webkit-inner-spin-button,.input-box input::-webkit-outer-spin-button{appearance:none;margin:0}.steppers{display:flex;flex-direction:column;width:28px;flex-shrink:0}.steppers button{padding:0;min-height:24px;border:0;border-radius:0;background:#493321;color:var(--amber);line-height:1}.steppers button:hover{background:#684726}
+.fader-gesture{min-height:36px;padding:2px 0;touch-action:none;cursor:ew-resize;border-radius:5px}.fader-gesture:focus-visible{outline:2px solid var(--cyan)}
 </style>

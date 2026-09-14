@@ -15,7 +15,7 @@ test('piano drag bends, glissandos through white and black keys, and cleans up',
   expect((await gesture({bend:8192})).status()).toBe(400)
   let latest:any
   const sent:any[]=[]
-  page.on('request',request=>{if(request.url().endsWith('/piano'))sent.push(request.postDataJSON())})
+  page.on('websocket',socket=>socket.on('framesent',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='piano')sent.push(m)}))
   page.on('websocket',socket=>socket.on('framereceived',({payload})=>{const m=JSON.parse(String(payload));if(m.type==='telemetry')latest=m}))
   await page.goto('/')
   await page.getByRole('button',{name:'Enable audio engine',exact:true}).click()

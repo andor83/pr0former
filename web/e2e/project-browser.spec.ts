@@ -1,5 +1,36 @@
 import {test,expect} from '@playwright/test'
 const headers={'X-Pr0former':'1'}
+test('imports portable projects with rename and overwrite conflict choices',async({page})=>{
+ const status=await(await page.request.get('/api/status')).json()
+ await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})
+ const source=await(await page.request.post('/api/projects',{headers,data:{name:`Transfer source ${Date.now()}`,mode:'freeform'}})).json()
+ const importedName=`Imported transfer ${Date.now()}`
+ const archive=(name:string,bpm=120)=>({format:'pr0former-project',version:1,project:{...source,id:'foreign-project',revision:99,name,bpm,conductor:'foreign-user',local_audio_assignments:{},conducted:{...source.conducted,midi_bindings:[]},parts:source.parts.map((part:any)=>({...part,performer:null}))}})
+ await page.goto('/')
+ await page.getByRole('button',{name:'Project browser',exact:true}).click()
+ let browser=page.getByRole('dialog',{name:'Project browser'})
+ await expect(browser.getByRole('button',{name:`Export ${source.name}`})).toBeVisible()
+ await browser.locator('input[type=file]').setInputFiles({name:'portable.pr0.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(archive(importedName)))})
+ await expect(browser).toHaveCount(0)
+ await expect(page.locator('.project-title')).toContainText(importedName)
+ const importedId=(await(await page.request.get('/api/projects')).json()).find((project:any)=>project.name===importedName).id
+ await page.getByRole('button',{name:'Project browser',exact:true}).click();browser=page.getByRole('dialog',{name:'Project browser'})
+ await expect(browser.getByRole('button',{name:importedName,exact:true})).toBeVisible()
+ await browser.locator('input[type=file]').setInputFiles({name:'conflict.pr0.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(archive(importedName)))})
+ const conflict=browser.getByRole('alertdialog',{name:'Project name conflict'})
+ await expect(conflict).toBeVisible()
+ const renamed=`Renamed transfer ${Date.now()}`
+ await conflict.getByLabel('Imported project name').fill(renamed)
+ await conflict.getByRole('button',{name:'Rename & import'}).click()
+ await expect(browser).toHaveCount(0)
+ await expect(page.locator('.project-title')).toContainText(renamed)
+ await page.getByRole('button',{name:'Project browser',exact:true}).click();browser=page.getByRole('dialog',{name:'Project browser'})
+ await expect(browser.getByRole('button',{name:importedName,exact:true})).toBeVisible()
+ await browser.locator('input[type=file]').setInputFiles({name:'overwrite.pr0.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(archive(importedName,155)))})
+ await browser.getByRole('alertdialog',{name:'Project name conflict'}).getByRole('button',{name:'Overwrite existing'}).click()
+ await expect(browser).toHaveCount(0)
+ await expect.poll(async()=>(await(await page.request.get(`/api/projects/${importedId}`)).json()).project.bpm).toBe(155)
+})
 test('per-user recent projects, metadata browsing and user administration',async({page,playwright})=>{
  const status=await(await page.request.get('/api/status')).json()
  await page.request.post(`/api/${status.bootstrap?'register':'login'}`,{headers,data:{username:'browser-test',password:'test1234'}})

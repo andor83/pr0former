@@ -1,5 +1,68 @@
 # Current implementation status
 
+Score creation now opens an instrument-preset modal with orchestral, keyboard,
+percussion and guitar choices, editable single/grand staff layout, clef,
+transposition and MIDI channel. Presets do not create synths or assign sounds.
+Percussion clefs and per-note normal/cross/circled-cross/diamond/triangle/ghost
+heads plus roll slashes and a buzz mark persist through server validation.
+Entry settings select defaults; Edit selected notes applies them to selections.
+These are visual notation only, not automatic GM drum mapping or roll playback;
+ordinary rhythmic flags still follow note duration.
+
+Project browser export now downloads a `.pr0` ZIP containing `project.json` and
+project-local sample WAVs under `samples/` (including unused samples, excluding
+resampling caches). Imports allocate fresh asset IDs and rewrite sampler and
+shortlist references. Overwrites retain previous audio files for old revisions.
+The manifest records archive/schema versions, software version, Git commit,
+dirty-build status and build timestamp. Newer software or unknown archive/schema
+versions are rejected with compatibility errors; older supported-schema projects
+pass the normal project validation, not a general migration system. Legacy JSON
+remains supported, but missing audio now fails import with an actionable message.
+Bundles have a 256 MiB expanded/upload limit and reject unexpected paths,
+duplicate entries, malformed WAVs and missing referenced samples. Sample catalog
+names/tags and live recorder-track files are not currently bundled; imported WAVs
+are discovered by the sample catalog as `Sample <id>`.
+
+Piano gestures now use the ordered authenticated project WebSocket, with held-note
+cleanup and bounded admission instead of serialized HTTP requests. Footer tempo
+edits are protected from live telemetry while typing. Graphical controls are
+compact, optionally hide all chrome, and support change-only output and manual
+override until the next incoming change/event. Integer/Float inputs have ±1
+arrows. Graphical sliders share the custom Sliders fader, preview over WebSocket,
+and persist once on release; library controls remain available during movement.
+Sliders-node controls were moved upward to clear their footer. Hardware timing
+and physical touch-device performance remain manual/unverified.
+
+Control follow-up validation: 292 Rust tests passed across core, DSP and server
+(one manual server benchmark ignored), including allocation guards and
+change-only/override regressions. All 117 frontend tests, the production build,
+and four focused Chromium cases passed. Browser checks cover piano bursts and
+disconnect release, drag/bend/touch gestures without HTTP, footer tempo editing,
+live slider previews without revision writes or library disabling, connected
+manual override and incoming resumption, compact chrome and ±1 arrows. Both
+slider orientations passed footer-clearance checks and their screenshots were
+visually inspected. These are software-clock checks, not hardware latency claims.
+
+Earlier score/import validation: 22 core and 104 server tests passed (one server
+benchmark ignored), 117 frontend tests and the production build passed, and seven
+focused Chromium cases passed. Browser coverage includes notation editing,
+instrument presets, bar extension, JSON compatibility, `.pr0` download, exact WAV
+round-trip, cancel/rename/overwrite, and recovery of a target with missing audio.
+The percussion engraving screenshot was inspected. No hardware timing was tested.
+
+Quick entry requests a new bar immediately after a successful note/rest fills
+the final bar. It shares the right-arrow confirmation and session suppression
+preference; completing an interior bar continues into the existing next bar.
+
+The score context menu offers Delete bar / Delete bars for the clicked bar or
+current bar selection. It uses the existing score-wide time splice and undo
+history, closes the gap across all parts, and requires at least one remaining bar.
+
+Drum pads have six numeric trigger inputs: either sign triggers from zero,
+with velocity 100; zero releases/rearms. DSP coverage checks all six notes,
+negative values, held values, sign changes and repeated triggers. Physical
+MIDI timing remains unverified.
+
 pr0former is a development alpha. Software validation does not establish physical audio latency, deadline reliability, iPad compatibility, or readiness for a 32-player performance.
 
 ## Linux standard-port setup (2026-09-13)
@@ -305,7 +368,7 @@ hardware were not tested, and the desktop application bundle was not repackaged.
 | Browser monitoring | WebRTC/Opus master and selected cue feeds; only subscribed dedicated feeds are collected. Feed leases expire after eight seconds without refresh. | Count-in tests receive actual master/cue audio. Conversion and telemetry still share the orchestration worker. |
 | Score and transport | Shared score, independent part launches, repeats/navigation, tempo map, notation/piano roll, staff routes and MIDI automation. Meter-aware metronome follows written position and bar origins through changes/repeats. | Sequencer/DSP tests and Chromium integration. External MIDI delivery is best effort. |
 | Conducted performance | One designated non-performing conductor; ordered animated set/tile editor; locked touch stage; next-pulse single and armed-group cues; one-shot or forced-repeat playback; timed per-performer successor queues; continuous synthesized performer notation/rest lane; part-local polymeter; targeted cue clicks; conductor-authoritative dynamics; MIDI Learn; and authenticated performer Web MIDI ingress. | Scheduler/core/frontend and focused Chromium coverage. Physical touch/MIDI/iPad, browser MIDI reconnect behavior, multi-client latency and performance-scale acceptance remain manual/unverified. |
-| Editing and saves | Project-owned score draft survives tab unmounts; flush waits for current and newer edits. Export, Save revision, project switching, performance entry and sign-out use the barrier. Failures retain the newest draft for explicit reapplication/discard. | Delayed/rejected save unit and browser regressions. Drafts are in browser memory, not offline durable storage. |
+| Editing and saves | Project-owned score draft survives tab unmounts; flush waits for current and newer edits. The project browser exports portable JSON and imports it as a new project or, after a same-name warning, a renamed or overwritten accessible project. New-project import validates before inserting it. Transfer excludes workspace people, local devices, local MIDI bindings and sample audio (keep server sample backups separately). Save revision, project switching, performance entry and sign-out use the barrier. Failures retain the newest draft for explicit reapplication/discard. | Delayed/rejected save unit and browser regressions. Drafts are in browser memory, not offline durable storage. |
 | Dynamics and phrasing | Staff overrides preserve part defaults for other staves. Ramp conversion preserves authored holds and curve shapes. New hairpins own an identifiable dynamics event and retain any authored starting mark for restoration; gesture previews are transient, with one commit/undo on release. Moving/removing owned playback updates its wedge. | Value-level ramp and hairpin tests plus browser editing. Hairpins crossing existing ramps/interior points are rejected instead of overwriting them; older wedges without owned events remain independent notation. |
 | UI | Custom graph node theme, paper score, visible save/conflict status, keyboard-focusable ramp points, coarse-pointer touch targets and reduced-motion support. The footer offers transient Play + Repeat and swaps Performance mode for End performance in place; the conducted cue deck scrolls vertically in short viewports. Save coordination, MIDI device lifetime and curve gesture transforms are separate modules. | Frontend tests/build and browser tests. Physical touch/Safari validation remains manual. |
 | Ensemble | Member browser with profile summaries, direct existing-user addition, invitation links and self-service square avatars. Owners can remove non-owners; assigned parts become unassigned in the same server transaction. | Rust crop/assignment tests and isolated HTTPS/API workflow. Role editing and the broader user profile editor remain future work. |

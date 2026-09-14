@@ -80,6 +80,23 @@ fn node(id: &str, kind: &str) -> Node {
     }
 }
 #[test]
+fn connected_control_overrides_and_change_events_do_not_allocate() {
+    let source=node("source","value");
+    let mut control=node("control","control_input");
+    control.parameters.insert("changes_only".into(),1.);
+    let graph=Graph { nodes:vec![source,control],edges:vec![Edge { id:"wire".into(),source:"source".into(),source_port:"out".into(),target:"control".into(),target_port:"in".into() }] };
+    let mut engine=pr0_dsp::Engine::prepare(graph,48000.).unwrap();
+    engine.render(&[],&mut [[0.;8]]);
+    CHECK.set(true);CALLS.set(0);
+    for value in 0..1000 {
+        engine.control("control",&ControlValue::Number(value as f64));
+        engine.render(&[],&mut [[0.;8];8]);
+        engine.parameter("source","value",value as f64).unwrap();
+        engine.render(&[],&mut [[0.;8];8]);
+    }
+    CHECK.set(false);assert_eq!(CALLS.get(),0);
+}
+#[test]
 fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activity() {
     let mut graph = Graph {
         nodes: [

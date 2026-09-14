@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { previewCurveGesture } from '../scoreCurveGesture'
+import { noteheads, drumMarks } from '../percussionNotation'
+import ScoreNewPart from './ScoreNewPart.vue'
 import { useScoreMidiInput } from '../scoreMidiInput'
 import { createScoreDraft, type ScoreDraft } from '../scoreDraft'
 import { readView, restoreScoreParts, scoreViewKey, writeView, type ScoreView } from '../viewMemory'
@@ -84,6 +86,7 @@ import {
 } from '../scoreRegion'
 const placement = ref<{ kind: string; value?: string } | null>(null)
 const entryArticulation = ref<string | null>(null)
+const entryNotehead = ref('normal'), entryDrumMark = ref('none')
 const onsetSnap = ref(0.125)
 function placeTool(kind: string, value?: string) {
   placement.value = { kind, value }
@@ -140,6 +143,7 @@ import {
 } from '@lucide/vue'
 const dialog = ref<
   | 'part'
+  | 'new-part'
   | 'shared'
   | 'entry'
   | 'note'
@@ -1187,24 +1191,17 @@ function deletePart() {
   })
 }
 function addPart() {
-  if (doc.value.parts.length >= 32) return
-  const next = clone(doc.value),
-    id = newId()
-  next.parts.push({
-    id,
-    name: `Part ${next.parts.length + 1}`,
-    performer: null,
-    view: 'notation',
-    clef: 'treble',
-    notes: [],
-    loop_beats: length.value,
-    instrument_node: null,
-    midi_channel: 1,
-    osc_address: '/pr0former/note',
-  })
-  visible.value = new Set([...visible.value, id])
-  focus(id)
-  void commit(next)
+  if (canEdit.value && doc.value.parts.length < 32) dialog.value = 'new-part'
+}
+async function createPart(created: Part) {
+  if (!canEdit.value || doc.value.parts.length >= 32) return
+  const next = clone(doc.value)
+  next.parts.push(created)
+  if (await commit(next)) {
+    visible.value = new Set([...visible.value, created.id])
+    focus(created.id)
+    dialog.value = null
+  }
 }
 function addStaff() {
   if (!part.value) return
@@ -1356,6 +1353,8 @@ function enterNotes(
       tuplet_actual: tupletActual,
       tuplet_normal: tupletNormal,
       articulation: entryArticulation.value,
+      notehead: entryNotehead.value,
+      drum_mark: entryDrumMark.value,
     }
     const n: Note = withNotation(
       {
@@ -1474,7 +1473,7 @@ function scrollToCaret() {
 /** Insert at the caret and advance it by the written duration (Finale Speedy Entry). */
 function insertAtCaret(heads: EntryHead[], options: { rest?: boolean; barEnd?:number } = {}) {
   const c = caret.value
-  if (!c || !canQueue.value || !heads.length) return
+  if (!c || !canQueue.value || !heads.length || pendingBar.value) return
   const at = { ...c },
     duration = caretDuration(),
     tie = tieNext.value,
@@ -1502,6 +1501,7 @@ function insertAtCaret(heads: EntryHead[], options: { rest?: boolean; barEnd?:nu
     beat: c.beat + (added[0]?.duration ?? (added.length ? duration : 0)),
     step: heads[0]!.step,
   }
+  if (added.length && caret.value.beat >= length.value - 1e-8) requestCaretBar()
   nextTick(scrollToCaret)
 }
 /** Stack another pitch onto the most recent entry without advancing. */
@@ -1547,7 +1547,7 @@ async function appendCaretBar() {
     }
     pendingBar.value = null
     error.value = ''
-    nextTick(scrollToCaret)
+    nextTick(() => { root.value?.focus({ preventScroll: true }); scrollToCaret() })
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
     // A limit/error must stay reviewable even when automatic creation is enabled.
@@ -1557,6 +1557,14 @@ async function appendCaretBar() {
   } finally {
     addingBar.value = false
   }
+}
+function requestCaretBar() {
+  const c = caret.value
+  if (!c || pendingBar.value || !canEdit.value) return
+  pendingBar.value = { caret: { ...c, beat: Math.min(length.value, c.beat) }, length: length.value, project: doc.value.id }
+  rememberAppend.value = false
+  error.value = ''
+  if (appendWithoutAsking.value) void appendCaretBar()
 }
 function moveCaret(direction: 1 | -1, byBar = false, repeat = false) {
   const c = caret.value,
@@ -1571,10 +1579,7 @@ function moveCaret(direction: 1 | -1, byBar = false, repeat = false) {
     byBar ? barLength.value : caretDuration())
   if (direction > 0 && beat >= length.value - 1e-8) {
     if (repeat || !canEdit.value) return
-    pendingBar.value = { caret: { ...c, beat: Math.min(length.value, c.beat) }, length: length.value, project: doc.value.id }
-    rememberAppend.value = false
-    error.value = ''
-    if (appendWithoutAsking.value) void appendCaretBar()
+    requestCaretBar()
     return
   }
   caret.value = { ...c, beat: Math.max(0, Math.min(length.value, beat)) }
@@ -1742,6 +1747,22 @@ function clearRegion() {
   if (!r || !canEdit.value) return
   void commit(clearRange(doc.value, r.part, r.staff, r.start, r.end))
 }
+async function deleteRegionBars(start: number, end: number) {
+  if (!canEdit.value) return
+  const bars = barsInRange(doc.value, start, end)
+  if (!bars.length) return
+  try {
+    if (await commit(editBars(doc.value, 'delete', bars[0]!.number, bars.length))) {
+      region.value = null
+      selected.value = new Set()
+      selectedElement.value = null
+      caret.value = null
+      root.value?.focus({ preventScroll: true })
+    }
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
 function pasteAt(partId: string, staffId: string, beat: number) {
   const clip = regionClipboard.value
   if (!clip || !canEdit.value) return
@@ -1832,6 +1853,12 @@ function contextMenu(event: MouseEvent) {
       { label: 'Barline style…', action: open('barline') },
       { label: '', separator: true },
       { label: 'Insert, add or delete bars…', action: open('bars') },
+      {
+        label: barsInRange(doc.value, current.start, current.end).length === 1 ? 'Delete bar' : 'Delete bars',
+        danger: true,
+        disabled: !canEdit.value || (current.start === 0 && current.end >= sharedTimeline(doc.value).length),
+        action: () => void deleteRegionBars(current.start, current.end),
+      },
       { label: '', separator: true },
       { label: 'Transpose, durations, voice & staff…', action: open('edit') },
       {
@@ -3909,6 +3936,13 @@ watch(
     /></ScoreDialog>
     <ScoreDialog
       :error="error"
+      v-if="dialog === 'new-part'"
+      title="New part"
+      wide
+      @close="dialog = null"
+    ><ScoreNewPart :length="length" :editable="canEdit" @create="createPart" @cancel="dialog = null" /></ScoreDialog>
+    <ScoreDialog
+      :error="error"
       v-if="part && dialog === 'part'"
       :title="`Part settings · ${part.name}`"
       @close="dialog = null"
@@ -4119,6 +4153,9 @@ watch(
       title="Entry settings"
       @close="dialog = null"
       ><div class="selection-inspector">
+        <label>Notehead<select v-model="entryNotehead" aria-label="Entry notehead"><option v-for="(label, value) in noteheads" :value="value">{{ label }}</option></select></label>
+        <label>Drum stem mark<select v-model="entryDrumMark" aria-label="Entry drum stem mark"><option v-for="(label, value) in drumMarks" :value="value">{{ label }}</option></select></label>
+        <p>Notation only. Duration controls rhythmic flags; roll marks do not generate extra hits.</p>
         <label
           >Voice<select v-model.number="voice" aria-label="Entry voice">
             <option v-for="v in 4" :key="v">{{ v }}</option>
@@ -4167,6 +4204,8 @@ watch(
       @close="dialog = null"
     >
       <div v-if="picked.length" class="selection-inspector">
+        <label>Notehead<select aria-label="Notehead" :disabled="!canEdit" :value="picked[0]!.n.notation?.notehead || 'normal'" @change="patchNotation({ notehead: ($event.target as HTMLSelectElement).value })"><option v-for="(label, value) in noteheads" :value="value">{{ label }}</option></select></label>
+        <label>Drum stem mark<select aria-label="Drum stem mark" :disabled="!canEdit" :value="picked[0]!.n.notation?.drum_mark || 'none'" @change="patchNotation({ drum_mark: ($event.target as HTMLSelectElement).value })"><option v-for="(label, value) in drumMarks" :value="value">{{ label }}</option></select></label>
         <label
           >Duration (quarter beats)<input
             type="number"

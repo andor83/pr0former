@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {computed,ref,onMounted,onBeforeUnmount,watch} from 'vue'
+import FaderTrack from './FaderTrack.vue'
 import type {GraphNode} from '../types'
 const props=defineProps<{node:GraphNode;values?:Record<string,number>;disabled:boolean;editable:boolean;connected:string[]}>()
 const emit=defineEmits<{control:[index:number,value:number|null|'cancel'|'clear']}>()
@@ -34,11 +35,11 @@ function up(e:PointerEvent,cancel=false){const d=drag.value;if(!d)return;drag.va
 function key(e:KeyboardEvent,i:number){if(locked(i))return;if(e.key==='Enter'||e.key===' '){e.preventDefault();learn(i);return}if(!['ArrowUp','ArrowRight','ArrowDown','ArrowLeft','Home','End'].includes(e.key))return;e.preventDefault();const delta=(props.node.parameters.step||((max.value-min.value)/127))*(e.shiftKey?10:1);set(i,e.key==='Home'?min.value:e.key==='End'?max.value:value(i)+(['ArrowUp','ArrowRight'].includes(e.key)?delta:-delta));delete local.value[i]}
 </script>
 <template>
-  <div ref="root" class="controllers nodrag nopan" :class="{horizontal}" @dblclick.stop @click.stop @pointerdown.stop>
+  <div ref="root" class="controllers nodrag nopan" :class="{horizontal,sliders:!knobs}" @dblclick.stop @click.stop @pointerdown.stop>
     <div v-for="i in count" :key="i" class="controller">
       <div class="gesture" :class="{learning:values?._learning===i,locked:locked(i-1),unassigned:!assigned(i-1)}" :title="!assigned(i-1)?'Unassigned · click to learn MIDI':knobs?'Drag to adjust · click to learn · double-click to unassign':'Drag to adjust · click to learn'" @dblclick.stop.prevent="clear(i-1)" role="slider" :tabindex="locked(i-1)?-1:0" :aria-label="`${knobs?'Knob':'Slider'} ${i}`" :aria-valuemin="min" :aria-valuemax="max" :aria-valuenow="value(i-1)" :aria-disabled="locked(i-1)" :aria-orientation="horizontal?'horizontal':'vertical'" @pointerdown="down($event,i-1)" @pointermove="move" @pointerup="up($event)" @pointercancel="up($event,true)" @keydown.stop="key($event,i-1)">
         <svg v-if="knobs" viewBox="0 0 72 72" aria-hidden="true"><path class="track" d="M 17 56 A 28 28 0 1 1 55 56" pathLength="100"/><path class="fill" d="M 17 56 A 28 28 0 1 1 55 56" pathLength="100" :stroke-dasharray="`${unit(i-1)*100} 100`"/><circle cx="36" cy="35" r="20"/><path class="pointer" d="M 36 35 L 36 20" :transform="`rotate(${-138+unit(i-1)*276} 36 35)`"/></svg>
-        <div v-else class="fader"><i :style="horizontal?{width:`${unit(i-1)*100}%`}:{height:`${unit(i-1)*100}%`}"/><b :style="horizontal?{left:`${unit(i-1)*100}%`}:{bottom:`${unit(i-1)*100}%`}"/></div>
+        <FaderTrack v-else :unit="unit(i-1)" :horizontal="horizontal" />
       </div>
       <output>{{value(i-1).toFixed(knobs?3:node.parameters.decimals??2)}}</output>
       <small>{{values?._learning===i?'Turn MIDI control… · Esc cancels':!assigned(i-1)?'Unassigned · click to learn':connected.includes(`slider_${i}`)?'Connected input':`${i} · Ch ${node.parameters[`channel_${i}`]??1} / CC ${node.parameters[`controller_${i}`]??i}`}}</small>
@@ -48,3 +49,4 @@ function key(e:KeyboardEvent,i:number){if(locked(i))return;if(e.key==='Enter'||e
 <style scoped>
 .controllers{position:relative;margin:55px 72px 34px;display:flex;gap:12px;align-items:flex-start}.controller{width:76px;display:flex;flex-direction:column;align-items:center;gap:4px}.gesture{width:72px;min-height:72px;touch-action:none;cursor:ns-resize;border-radius:6px}.gesture.learning{outline:1px solid var(--amber);background:#dfb87916}.gesture.unassigned{opacity:.5;filter:grayscale(1);cursor:pointer}.gesture.unassigned.learning{opacity:1;filter:none}.gesture.locked{opacity:.55;cursor:default}svg{width:72px;height:72px}.track,.fill{fill:none;stroke:#4d4232;stroke-width:5;stroke-linecap:round}.fill{stroke:#eda952}circle{fill:#272b29;stroke:#62543c}.pointer{stroke:#ffd092;stroke-width:3;stroke-linecap:round}.controller output{color:#edba77;font-variant-numeric:tabular-nums;font-size:12px}.controller small{font-size:8px;color:var(--muted);text-align:center}.fader{position:relative;width:7px;height:130px;margin:10px auto;background:#463d30;border-radius:5px}.fader i{position:absolute;bottom:0;width:100%;background:#eda952;border-radius:5px}.fader b{position:absolute;left:50%;width:30px;height:15px;transform:translate(-50%,50%);border:1px solid #edba77;border-radius:3px;background:#69523b}.horizontal{flex-direction:column}.horizontal .controller{width:180px;display:grid;grid-template-columns:140px 40px}.horizontal .gesture{width:140px;min-height:32px;cursor:ew-resize}.horizontal .fader{width:120px;height:7px;margin:12px 10px}.horizontal .fader i{height:100%;left:0}.horizontal .fader b{top:50%;width:15px;height:28px;transform:translate(-50%,-50%)}.horizontal small{grid-column:1 / -1}
 </style>
+<style scoped>.controllers.sliders{margin-top:25px;margin-bottom:0}</style>

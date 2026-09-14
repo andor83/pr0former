@@ -1,0 +1,63 @@
+import { test, expect } from '@playwright/test'
+const headers = { 'X-Pr0former': '1' }
+test('pr0 download restores sample audio, renames conflicts and overwrites without losing old audio', async ({ page }) => {
+  const status = await (await page.request.get('/api/status')).json()
+  await page.request.post(`/api/${status.bootstrap ? 'register' : 'login'}`, { headers, data: { username: 'browser-test', password: 'test1234' } })
+  const p = await (await page.request.post('/api/projects', { headers, data: { name: `Bundle ${Date.now()}`, mode: 'structured' } })).json()
+  const library = await (await page.request.get('/api/samples')).json()
+  const sample = library.find((s: any) => s.name.toLowerCase().includes('kick'))
+  expect(sample).toBeTruthy()
+  const added = await (await page.request.post(`/api/projects/${p.id}/samples/${sample.id}/add`, { headers })).json()
+  const url = `/api/projects/${p.id}`
+  p.graph.nodes.push({ id: 'bundle-sample', kind: 'sample', label: 'Bundled kick', channels: 2, x: 400, y: 200, parameters: { asset: added.asset } })
+  expect((await page.request.put(url, { headers, data: p })).ok()).toBe(true)
+  const exported = await page.request.get(`${url}/export`)
+  expect(exported.ok()).toBe(true)
+  const bytes = await exported.body()
+  expect(bytes.subarray(0, 2).toString()).toBe('PK')
+  const file = { name: 'bundle.pr0', mimeType: 'application/zip', buffer: bytes }
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Project browser', exact: true }).click()
+  const browser = page.getByRole('dialog', { name: 'Project browser', exact: true })
+  const downloadEvent = page.waitForEvent('download')
+  await browser.getByRole('button', { name: `Export ${p.name}`, exact: true }).click()
+  expect((await downloadEvent).suggestedFilename()).toBe(`${p.name}.pr0`)
+  await browser.locator('input[type=file]').setInputFiles(file)
+  const conflict = browser.getByRole('alertdialog', { name: 'Project name conflict' })
+  await expect(conflict).toBeVisible()
+  await conflict.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(conflict).toHaveCount(0)
+  await browser.locator('input[type=file]').setInputFiles(file)
+  await conflict.getByLabel('Imported project name').fill(`${p.name} copy`)
+  await conflict.getByRole('button', { name: 'Rename & import' }).click()
+  await expect(browser).toHaveCount(0)
+  await expect(page.locator('.project-title')).toContainText(`${p.name} copy`)
+  const all = await (await page.request.get('/api/projects')).json()
+  const copy = all.find((s: any) => s.name === `${p.name} copy`)
+  const opened = await page.request.get(`/api/projects/${copy.id}`)
+  expect(opened.ok()).toBe(true)
+  const imported = (await opened.json()).project
+  const restoredAsset = imported.graph.nodes.find((n: any) => n.id === 'bundle-sample').parameters.asset
+  expect(restoredAsset).not.toBe(added.asset)
+  const restoredCatalog = await (await page.request.get(`/api/projects/${copy.id}/samples`)).json()
+  const restored = restoredCatalog.find((s: any) => s.asset === restoredAsset)
+  const originalAudio = await (await page.request.get(`${url}/samples/${sample.id}/audio`)).body()
+  const restoredAudio = await page.request.get(`/api/projects/${copy.id}/samples/${restored.id}/audio`)
+  expect(restoredAudio.ok()).toBe(true)
+  expect(await restoredAudio.body()).toEqual(originalAudio)
+  // Reproduce a legacy JSON import with a missing project-local WAV. The
+  // overwrite dialog must not try to open/precache that broken target first.
+  const broken = (await (await page.request.get(url)).json()).project
+  broken.graph.nodes.find((n: any) => n.id === 'bundle-sample').parameters.asset = restoredAsset
+  expect((await page.request.put(url, { headers, data: broken })).ok()).toBe(true)
+  expect((await page.request.get(url)).ok()).toBe(false)
+  await page.getByRole('button', { name: 'Project browser', exact: true }).click()
+  await expect(browser.locator('input[type=file]')).toBeEnabled()
+  await browser.locator('input[type=file]').setInputFiles(file)
+  await conflict.getByRole('button', { name: 'Overwrite existing' }).click()
+  await expect(browser).toHaveCount(0)
+  await expect(page.locator('.project-title')).toContainText(p.name)
+  expect((await page.request.get(url)).ok()).toBe(true)
+  expect((await page.request.get(`${url}/samples/${sample.id}/audio`)).ok()).toBe(true)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})

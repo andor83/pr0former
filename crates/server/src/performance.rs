@@ -2489,6 +2489,8 @@ mod score_tests {
             n.velocity = 90;
             n.duration = 1.;
             n.notation = Some(Notation {
+                notehead: None,
+                drum_mark: None,
                 onset: None,
                 written_duration: None,
                 tie_to: None,

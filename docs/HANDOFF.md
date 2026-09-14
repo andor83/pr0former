@@ -19,7 +19,7 @@ Checkpoint date: 2026-09-07. Read AGENTS.md, ARCHITECTURE.md and STATUS.md befor
 - Git build identity, status API metadata and manual startup remote-version warnings.
 - Full-space node/subgraph library accordion; removed hint footer.
 - Selection-wide D duplication and group right-click Make subgraph / Duplicate / Delete.
-- Graphical control node with Bang, Integer, Float, Slider and Text. Numeric limits in the modal; incoming connected values are read-only and mirrored to output. Live manual value changes avoid graph recompilation.
+- Compact Graphical control node with Bang, Integer, Float, Slider and Text, optional hidden chrome and change-only output. Numeric limits are in the modal; connected values remain editable, with manual override until the next incoming change/event. Slider gestures preview over the project WebSocket and persist on release without graph recompilation.
 - Existing live editing, nested subgraphs/versioned libraries, native/browser input selection, FM and spectral tools remain in the branch. See STATUS.md for verification limits.
 
 ## Next accepted work: MIDI and OSC

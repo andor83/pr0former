@@ -894,8 +894,8 @@ pub fn catalog() -> Vec<Descriptor> {
         "Drum pads",
         "◍",
         "Control",
-        "Six clickable pads for testing drum patches. Each pad sends note-on/off for its MIDI note on the configured channel (General MIDI defaults: bass drum 36, snare 38, tom 1 45, tom 2 50, hi-hat 42, cymbal 49 on channel 10), forwards received typed MIDI, lights pads for matching received notes, and pulses the matching trigger output with the note velocity for one engine sample. Set pad notes and the channel in the modal.",
-        vec![],
+        "Six clickable pads for testing drum patches. Trigger inputs 1–6 fire on zero-to-nonzero transitions (positive or negative) at velocity 100; zero releases and rearms the pad. Each pad sends note-on/off for its configured MIDI note and channel, forwards received typed MIDI, lights matching notes, and pulses its trigger output with the note velocity for one engine sample. Set pad notes and the channel in the modal.",
+        (1..=6).map(|i| port(&format!("trigger_{i}"), Control)).collect(),
         pad_names
             .iter()
             .map(|(id, label, _)| {
@@ -1169,7 +1169,7 @@ pub fn catalog() -> Vec<Descriptor> {
         "Graphical control",
         "▤",
         "Control",
-        "Interactive graph control. A connected input is read-only and passes through unchanged. Unconnected Bang emits one engine-sample pulse; other modes use the stored literal.",
+        "Interactive compact control. Incoming changes update the displayed value; manual edits override until the next incoming change/event. Bang emits one engine-sample pulse. Change-only output emits the initial value and subsequent changes, holding its value silently between events. Hide chrome displays only the input and handles.",
         vec![port("in", Control)],
         vec![port("out", Control)],
         vec![
@@ -1177,6 +1177,8 @@ pub fn catalog() -> Vec<Descriptor> {
                 structural: true,
                 ..param("mode", "Control type", "", 0., 4., 2.)
             },
+            Parameter { structural: true, ..param("changes_only", "Output only on change", "", 0., 1., 0.) },
+            Parameter { structural: true, ..param("hide_chrome", "Hide title, header and footer", "", 0., 1., 0.) },
             Parameter {
                 structural: true,
                 ..param("min", "Minimum", "", -100000., 100000., -100000.)
@@ -2434,6 +2436,7 @@ impl Graph {
                 let min = n.parameters.get("min").copied().unwrap_or(-100000.);
                 let max = n.parameters.get("max").copied().unwrap_or(100000.);
                 if mode.fract() != 0.
+                    || ["changes_only", "hide_chrome"].iter().any(|key| n.parameters.get(*key).is_some_and(|v| *v != 0. && *v != 1.))
                     || min > max
                     || (mode == 1. && (min.fract() != 0. || max.fract() != 0.))
                 {
@@ -3066,7 +3069,7 @@ impl Project {
             }) {
                 return Err("OSC destination must be a numeric IP:port with a nonzero port".into());
             }
-            if !["treble", "bass", "alto", "tenor"].contains(&p.clef.as_str())
+            if !["treble", "bass", "alto", "tenor", "percussion"].contains(&p.clef.as_str())
                 || p.key_signature.as_ref().is_some_and(|k| {
                     ![
                         "Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B",

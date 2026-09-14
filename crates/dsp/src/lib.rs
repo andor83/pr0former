@@ -161,6 +161,7 @@ struct Voice {
 }
 mod controllers;
 struct RuntimeNode {
+    pad_triggers: [bool; 6],
     script: Option<Box<script::Bridge>>,
     script_config: Option<pr0_core::script::Script>,
     part_player: Option<Box<part_player::Player>>,
@@ -222,6 +223,8 @@ struct RuntimeNode {
     control_text: Option<visualizer::Text>,
     input_text: Option<visualizer::Text>,
     toggle_text: Option<visualizer::Text>,
+    control_input_seen: Option<visualizer::Datum>,
+    manual_override: bool,
     fallback: visualizer::Datum,
     analyzer: Option<Box<visualizer::Analyzer>>,
     voices: [Voice; 64],
@@ -457,16 +460,30 @@ impl RuntimeNode {
                 self.control_event_only = self.input_event_only[0];
             }
             "audio_to_control" => scalar = input[0] * self.p("scale") + self.p("offset"),
-            "control_visualizer" | "control_input" => {
+            "control_input" => {
+                let connected = !self.bindings.is_empty();
+                let incoming = self.input_text.map(visualizer::Datum::Text).unwrap_or(visualizer::Datum::Number(input[0]));
+                if connected && (!self.input_event_only[0] || self.input_events[0]) {
+                    if self.control_input_seen != Some(incoming) || self.input_events[0] { self.manual_override = false; }
+                    self.control_input_seen = Some(incoming);
+                }
+                if self.p("mode") == 0. {
+                    scalar = if self.bang { 1. } else if connected { input[0] } else { 0. };
+                    self.control_event = self.bang || self.input_events[0];
+                    self.bang = false;
+                } else {
+                    let value = if connected && !self.manual_override { self.control_input_seen.unwrap_or(incoming) } else { self.fallback };
+                    match value { visualizer::Datum::Number(v) => scalar=v, visualizer::Datum::Text(v) => self.control_text=Some(v) }
+                    self.control_event = scalar != self.previous || self.control_text != self.toggle_text || (!self.manual_override && self.input_events[0]);
+                    self.control_event_only = self.p("changes_only") == 1. || (connected && self.input_event_only[0]);
+                    self.previous=scalar;self.toggle_text=self.control_text;
+                }
+            }
+            "control_visualizer" => {
                 if self.bindings.is_empty() {
-                    if self.kind == "control_input" && self.p("mode") == 0. {
-                        scalar = self.bang as u8 as f64;
-                        self.bang = false;
-                    } else {
-                        match self.fallback {
-                            visualizer::Datum::Number(value) => scalar = value,
-                            visualizer::Datum::Text(value) => self.control_text = Some(value),
-                        }
+                    match self.fallback {
+                        visualizer::Datum::Number(value) => scalar = value,
+                        visualizer::Datum::Text(value) => self.control_text = Some(value),
                     }
                 } else {
                     scalar = input[0];
@@ -528,6 +545,7 @@ impl RuntimeNode {
                         self.midi_frame.push(message);
                     }
                     if self.kind == "sliders"
+                        && (!self.input_event_only[index] || self.input_events[index])
                         && self.bindings.iter().any(|b| {
                             !b.parameter
                                 && b.destination == index
@@ -568,6 +586,17 @@ impl RuntimeNode {
                 scalar = self.control[0];
             }
             "drum_pads" => {
+                for pad in 0..6 {
+                    let active = self.input[pad][0] != 0.;
+                    if active != self.pad_triggers[pad] {
+                        self.midi_frame.push(pr0_core::midi::Message {
+                            status: (if active { 0x90 } else { 0x80 }) | (self.p("channel") as u8 - 1),
+                            data1: self.values[pad] as u8,
+                            data2: if active { 100 } else { 0 },
+                        });
+                        self.pad_triggers[pad] = active;
+                    }
+                }
                 // Pad clicks and typed input share one raw frame: pads light for
                 // held notes and each matching note-on pulses that pad's trigger
                 // with the note velocity for one sample.
@@ -1632,6 +1661,8 @@ impl Engine {
                 control_text: None,
                 input_text: None,
                 toggle_text: None,
+                control_input_seen: None,
+                manual_override: false,
                 fallback: if n.kind == "control_input"
                     && n.parameters.get("mode") == Some(&4.)
                     && n.control_value.is_none()
@@ -1656,7 +1687,7 @@ impl Engine {
                 phase: 0.,
                 previous: if n.kind == "trigger" {
                     0.
-                } else if n.kind == "toggle" {
+                } else if n.kind == "toggle" || n.kind == "control_input" {
                     f64::NAN
                 } else {
                     -1.
@@ -1696,6 +1727,7 @@ impl Engine {
                     None
                 },
                 eq_previous: [f64::NAN; 15],
+                pad_triggers: [false; 6],
                 reverb: if n.kind == "reverb" {
                     vec![[0.; 8]; 8192]
                 } else {
@@ -2545,7 +2577,7 @@ impl Engine {
     pub fn control(&mut self, id: &str, value: &pr0_core::ControlValue) {
         if let Some(node) = self.nodes.iter_mut().find(|n| {
             n.id == id
-                && (n.kind == "toggle" || (n.kind == "control_input" && n.bindings.is_empty()))
+                && (n.kind == "toggle" || n.kind == "control_input")
         }) {
             if node.kind == "toggle" {
                 let pr0_core::ControlValue::Number(value) = value else {
@@ -2558,6 +2590,7 @@ impl Engine {
                 node.count = *value;
             }
             node.fallback = visualizer::Datum::prepare(Some(value));
+            if node.kind == "control_input" { node.manual_override=true; }
         }
     }
     pub fn tempo_connected(&self) -> bool {
@@ -2570,7 +2603,7 @@ impl Engine {
         let Some(n) = self
             .nodes
             .iter()
-            .find(|n| n.id == id && n.kind == "control_input" && n.bindings.is_empty())
+            .find(|n| n.id == id && n.kind == "control_input")
         else {
             return false;
         };
@@ -2635,7 +2668,7 @@ impl Engine {
         if let Some(node) = self.nodes.iter_mut().find(|n| {
             n.id == id
                 && (n.kind == "trigger"
-                    || (n.kind == "control_input" && n.bindings.is_empty() && n.p("mode") == 0.))
+                    || (n.kind == "control_input" && n.p("mode") == 0.))
         }) {
             node.bang = true;
             return true;
@@ -3573,6 +3606,53 @@ mod tests {
         assert!(
             matches!(&e.visualizations()["gui"],pr0_core::Visualization::Control{value:pr0_core::ControlValue::Text(s)} if s=="test")
         );
+    }
+    #[test]
+    fn graphical_control_changes_only_emits_initial_value_and_actual_changes() {
+        let mut node = visual_node("gui", "control_input", 1);
+        node.parameters.insert("mode".into(), 2.);
+        node.parameters.insert("changes_only".into(), 1.);
+        node.control_value = Some(pr0_core::ControlValue::Number(2.5));
+        let mut e = Engine::prepare(Graph { nodes: vec![node], edges: vec![] }, 48000.).unwrap();
+        e.render(&[], &mut [[0.; 8]]);
+        assert!(e.nodes[0].control_event_only && e.nodes[0].control_event);
+        for _ in 0..20 { e.render(&[], &mut [[0.; 8]]); assert!(!e.nodes[0].control_event); }
+        e.control("gui", &pr0_core::ControlValue::Number(2.5));
+        e.render(&[], &mut [[0.; 8]]); assert!(!e.nodes[0].control_event);
+        e.control("gui", &pr0_core::ControlValue::Number(0.));
+        e.render(&[], &mut [[0.; 8]]); assert!(e.nodes[0].control_event); assert_eq!(e.nodes[0].control[0], 0.);
+        e.render(&[], &mut [[0.; 8]]); assert!(!e.nodes[0].control_event);
+    }
+    #[test]
+    fn sliders_hold_change_only_graphical_input_between_events() {
+        let mut gui = visual_node("gui", "control_input", 1);
+        gui.parameters.insert("mode".into(), 2.);
+        gui.parameters.insert("changes_only".into(), 1.);
+        gui.control_value = Some(pr0_core::ControlValue::Number(0.75));
+        let panel = visual_node("panel", "sliders", 1);
+        let graph = Graph { nodes: vec![gui, panel], edges: vec![pr0_core::Edge { id: "in".into(), source: "gui".into(), source_port: "out".into(), target: "panel".into(), target_port: "slider_1".into() }] };
+        let mut e = Engine::prepare(graph, 48000.).unwrap();
+        e.render(&[], &mut [[0.; 8]; 100]);
+        assert_eq!(e.telemetry()["panel"]["_control_1"], 0.75);
+        e.control("gui", &pr0_core::ControlValue::Number(0.));
+        e.render(&[], &mut [[0.; 8]; 100]);
+        assert_eq!(e.telemetry()["panel"]["_control_1"], 0.);
+    }
+    #[test]
+    fn connected_graphical_control_manual_override_holds_until_input_changes() {
+        let mut source = visual_node("source", "value", 1);
+        source.parameters.insert("value".into(), 10.);
+        let mut gui = visual_node("gui", "control_input", 1);
+        gui.parameters.insert("mode".into(), 2.);
+        let graph=Graph { nodes:vec![source,gui], edges:vec![pr0_core::Edge { id:"in".into(),source:"source".into(),source_port:"out".into(),target:"gui".into(),target_port:"in".into() }] };
+        let mut e=Engine::prepare(graph,48000.).unwrap();
+        e.render(&[],&mut [[0.;8];10]);assert_eq!(e.telemetry()["gui"]["_out"],10.);
+        assert!(e.external_control("gui",&pr0_core::ControlValue::Number(7.5)));
+        e.render(&[],&mut [[0.;8];100]);assert_eq!(e.telemetry()["gui"]["_out"],7.5);
+        e.parameter("source","value",12.).unwrap();
+        e.render(&[],&mut [[0.;8];10]);assert_eq!(e.telemetry()["gui"]["_out"],12.);
+        e.control("gui",&pr0_core::ControlValue::Number(0.));
+        e.render(&[],&mut [[0.;8];100]);assert_eq!(e.telemetry()["gui"]["_out"],0.);
     }
 
     #[test]
@@ -5822,6 +5902,32 @@ mod feedback_and_pad_tests {
         );
         e.render(&[], &mut [[0.; 8]]);
         assert_eq!(e.telemetry()["pads"]["_pad1"], 1.);
+    }
+    #[test]
+    fn drum_pad_inputs_trigger_on_either_sign_and_rearm_at_zero() {
+        let mut nodes = vec![node("pads", "drum_pads", 100.), node("sink", "midi_output", 300.)];
+        let mut edges = vec![edge("pads", "midi", "sink", "midi")];
+        for i in 1..=6 {
+            nodes.push(node(&format!("v{i}"), "value", 0.));
+            edges.push(edge(&format!("v{i}"), "out", "pads", &format!("trigger_{i}")));
+        }
+        let mut e = Engine::prepare(Graph { nodes, edges }, 48000.).unwrap();
+        e.render(&[], &mut [[0.; 8]]);
+        for value in [0.25, -0.5] {
+            for i in 1..=6 { e.parameter(&format!("v{i}"), "value", value).unwrap(); }
+            e.render(&[], &mut [[0.; 8]]);
+            for note in [36, 38, 45, 50, 42, 49] {
+                assert_eq!(e.take_midi_message("sink"), Some(Message { status: 0x99, data1: note, data2: 100 }));
+            }
+            for i in 1..=6 { e.parameter(&format!("v{i}"), "value", -value).unwrap(); }
+            e.render(&[], &mut [[0.; 8]; 10]);
+            assert_eq!(e.take_midi_message("sink"), None, "nonzero holds and sign changes do not retrigger");
+            for i in 1..=6 { e.parameter(&format!("v{i}"), "value", 0.).unwrap(); }
+            e.render(&[], &mut [[0.; 8]]);
+            for note in [36, 38, 45, 50, 42, 49] {
+                assert_eq!(e.take_midi_message("sink"), Some(Message { status: 0x89, data1: note, data2: 0 }));
+            }
+        }
     }
     #[test]
     fn midi_to_control_pulses_note_on_and_note_off() {

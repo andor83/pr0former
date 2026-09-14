@@ -26,17 +26,15 @@ test('piano plays notes, forwards polyphony, highlights received keys and select
   expect((await page.request.put(`/api/projects/${p.id}`,{headers,data:invalid})).status()).toBe(400)
   const initial=(await(await page.request.get(`/api/projects/${p.id}`)).json()).project.revision
   const normalColor=await c.evaluate(el=>getComputedStyle(el).backgroundColor)
-  let allowNote!:()=>void
-  const delayedNote=new Promise<void>(resolve=>{allowNote=resolve})
-  await page.route(`**/api/projects/${p.id}/piano`,async route=>{await delayedNote;await route.continue()},{times:1})
+  let httpGestures=0
+  await page.route(`**/api/projects/${p.id}/piano`,async route=>{httpGestures++;await route.abort()})
   const box=(await c.boundingBox())!
   await page.mouse.move(box.x+box.width/2,box.y+box.height-10);await page.mouse.down()
-  // Local feedback must appear even before the server receives the press.
+  // Local feedback and remote sound must work even if the HTTP gesture route fails.
   await expect(c).toHaveAttribute('aria-pressed','true')
   expect(await c.evaluate(el=>getComputedStyle(el).backgroundColor)).not.toBe(normalColor)
-  await expect(receivedC).toHaveAttribute('aria-pressed','false')
-  allowNote()
   await expect(receivedC).toHaveAttribute('aria-pressed','true')
+  expect(httpGestures).toBe(0)
   expect(await receivedC.evaluate(el=>getComputedStyle(el).backgroundColor)).not.toBe(normalColor)
   await page.mouse.move(box.x+box.width/2,box.y-80);await page.mouse.up()
   await expect(receivedC).toHaveAttribute('aria-pressed','false')
@@ -102,6 +100,20 @@ test('piano plays notes, forwards polyphony, highlights received keys and select
   await expect(page.getByRole('button',{name:'Disable audio engine',exact:true})).toBeEnabled()
   expect(latest.values['Receive keys'].gate).toBe(1)
   await note(60,0)
+  await expect.poll(()=>latest?.values?.['Receive keys']?.gate).toBe(0)
+  // A rapid socket burst settles promptly, and disconnect releases
+  // a held note even when the browser never sends its note-off.
+  await page.evaluate(async id=>{
+    const socket=new WebSocket(`ws://${location.host}/api/projects/${id}/events`)
+    await new Promise<void>(resolve=>socket.onopen=()=>resolve())
+    ;(window as any).burstPiano=socket
+    for(let i=0;i<64;i++)for(const velocity of [100,0])socket.send(JSON.stringify({type:'piano',node:'Play keys',pitch:60,velocity}))
+    socket.send(JSON.stringify({type:'piano',node:'Play keys',pitch:64,velocity:100}))
+  },p.id)
+  await expect(source.getByRole('button',{name:'E4 MIDI 64',exact:true})).toHaveAttribute('aria-pressed','true')
+  await expect(c).toHaveAttribute('aria-pressed','false')
+  await page.evaluate(()=>(window as any).burstPiano.close())
+  await expect(source.locator('.piano-key.lit')).toHaveCount(0)
   await expect.poll(()=>latest?.values?.['Receive keys']?.gate).toBe(0)
   await page.getByRole('button',{name:'Disable audio engine',exact:true}).click()
   await expect(c).toBeDisabled()

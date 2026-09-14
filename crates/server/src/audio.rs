@@ -17,6 +17,7 @@ pub fn monotonic_ms() -> f64 {
     START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.
 }
 pub enum Command {
+    LiveControl { project: String, node: String, value: f64, revision: u64 },
     LocalMidi {
         project: String,
         node: String,
@@ -733,6 +734,11 @@ fn run(
                     };
                     if !accepted {
                         osc.reject();
+                    }
+                }
+                Command::LiveControl { project: id, node, value, revision } => {
+                    if project.as_ref().is_some_and(|p| p.id == id && p.revision == revision) {
+                        if let Some(e) = engine.as_mut() { e.external_control(&node, &pr0_core::ControlValue::Number(value)); }
                     }
                 }
                 Command::Control {

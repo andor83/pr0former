@@ -15,6 +15,30 @@ async function setup(page: Page, partial = false) {
   await expect.poll(async () => (await read()).parts[0].notes.length).toBe(1)
   return read
 }
+test('completing the final bar prompts immediately and remembered consent extends quick entry', async ({ page }) => {
+  const read = await setup(page)
+  const caret = page.locator('[data-entry-caret]'), prompt = page.getByRole('dialog', { name: 'Add a new bar?', exact: true })
+  // Setup entered the first quarter note. Fill the remaining three beats.
+  await page.keyboard.press('5')
+  await page.keyboard.press('5')
+  await expect(prompt).toHaveCount(0)
+  await page.keyboard.press('5')
+  await expect(prompt).toBeVisible()
+  await expect.poll(async () => (await read()).parts[0].notes.length).toBe(4)
+  expect((await read()).score.length).toBe(4)
+  await prompt.getByRole('checkbox').check()
+  await prompt.getByRole('button', { name: 'Add bar', exact: true }).click()
+  await expect(caret).toHaveAttribute('data-beat', '4')
+  await expect.poll(async () => (await read()).score.length).toBe(8)
+  // A whole note fills the newly appended bar and automatically adds the next.
+  await page.keyboard.press('7')
+  await expect.poll(async () => (await read()).score.length).toBe(12)
+  await expect(caret).toHaveAttribute('data-beat', '8')
+  await expect(prompt).toHaveCount(0)
+  await page.keyboard.press('5')
+  await expect.poll(async () => (await read()).parts[0].notes.at(-1).beat).toBe(8)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})
 test('arrows confirm a new bar, cancel stays in bounds, and session consent survives reload', async ({ page }) => {
   const read = await setup(page)
   const caret = page.locator('[data-entry-caret]'), prompt = page.getByRole('dialog', { name: 'Add a new bar?', exact: true })

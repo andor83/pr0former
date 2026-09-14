@@ -37,7 +37,7 @@ const accidentals = (k: string) => {
   return f === 0 ? '♮' : `${Math.abs(f)}${f > 0 ? '♯' : '♭'}`
 }
 const clefGlyph = (c: string) =>
-  ({ treble: '𝄞', bass: '𝄢', alto: '𝄡', tenor: '𝄡' })[c] ?? '𝄞'
+  ({ treble: '𝄞', bass: '𝄢', alto: '𝄡', tenor: '𝄡', percussion: 'Ⅱ' })[c] ?? '𝄞'
 const value = (event: Event) => (event.target as HTMLInputElement).value
 const update = (patch: Partial<Part>) => emit('update', { ...props.part, ...patch })
 const performanceMeters = computed(() => {
@@ -347,7 +347,7 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
                 :disabled="!editable"
                 @change="emit('staff', staff, { clef: value($event) })"
               >
-                <option v-for="c in ['treble', 'bass', 'alto', 'tenor']" :key="c">
+                <option v-for="c in ['treble', 'bass', 'alto', 'tenor', 'percussion']" :key="c">
                   {{ c }}
                 </option>
               </select></label
@@ -381,7 +381,7 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
           </div>
           <div class="sd-quick" role="radiogroup" aria-label="Clef glyphs">
             <button
-              v-for="c in ['treble', 'bass', 'alto', 'tenor']"
+              v-for="c in ['treble', 'bass', 'alto', 'tenor', 'percussion']"
               :key="c"
               type="button"
               role="radio"
@@ -502,7 +502,7 @@ function removePerformanceMeter(index:number) { update({performance_meters:perfo
                 step="0.25" /></label
             ><label
               >New clef<select v-model="newClef" aria-label="New clef">
-                <option v-for="c in ['treble', 'bass', 'alto', 'tenor']" :key="c">
+                <option v-for="c in ['treble', 'bass', 'alto', 'tenor', 'percussion']" :key="c">
                   {{ c }}
                 </option>
               </select></label
