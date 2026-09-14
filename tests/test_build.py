@@ -120,7 +120,8 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(source.count('contents: write'), 1)
         self.assertIn('needs: build-windows', source)
         self.assertIn('actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c', source)
-        self.assertIn('--draft --verify-tag', source)
+        self.assertIn('--prerelease --verify-tag', source)
+        self.assertNotIn('--draft', source)
 
     def test_interactive_choices(self):
         for answers, expected in [('y\ny\n', 'ROUTE <--bundles>'),

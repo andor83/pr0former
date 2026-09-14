@@ -90,7 +90,7 @@ jobs:
           retention-days: 7
 
   publish-release:
-    name: Publish draft release
+    name: Publish prerelease
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build-windows
     runs-on: ubuntu-latest
@@ -104,7 +104,7 @@ jobs:
           name: pr0former-windows-x86_64
           path: release-assets
 
-      - name: Create or refresh draft release
+      - name: Create or refresh prerelease
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -119,5 +119,5 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${files[@]}" \
-              --draft --verify-tag --generate-notes --title "pr0former $GITHUB_REF_NAME"
+              --prerelease --verify-tag --generate-notes --title "pr0former $GITHUB_REF_NAME"
           fi

@@ -669,8 +669,9 @@ Stabilization validation (2026-09-10):
   It runs manually or for `v*` tags, never for pull requests. The build job has a
   read-only repository token; tag publishing is isolated in a dependent
   GitHub-hosted Linux job with write permission. The workflow
-  retains the run artifact for seven days, and turns a tag result into a draft
-  release. Windows signing remains unconfigured. The workflow was syntax-parsed
+  retains the run artifact for seven days, and turns a tag result into a visible
+  prerelease with the installer attached. Windows signing remains unconfigured.
+  The workflow was syntax-parsed
   and its static routing/retention/release contract is included in the **12
   passing** build tests. Hosted run `34791040927` completed successfully in
   30m21s and uploaded the unsigned 31,651,930-byte
