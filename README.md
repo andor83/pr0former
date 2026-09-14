@@ -1,8 +1,8 @@
 # pr0former
 
-A self-hosted electroacoustic performance workspace: Vue scores and patches, a Rust DSP engine, shared musical time, MIDI/OSC output, and browser audio over WebRTC.
+A self-hosted electroacoustic performance workspace: A server/client model where an administrator can set up a server connected to real audio hardware, and have performers connect thru their own devices to achieve electroacoustic live performance bliss.  
 
-**Status: development alpha.** This is a working implementation foundation, not the completed performance-ready release described in the design. See [implementation status](docs/STATUS.md) for the exact remaining work and validation limits.
+**Status: development alpha.** I'll be honest, this is an AI slop project.  I'm a developer on the side, but I've worked with several tools in the past (Max/MSP, puredata, Ableton, etc). However, I've spent a lot of time testing and refining this tool and I think that its very usable. This is a working implementation foundation, not the completed performance-ready release described in the design. See [implementation status](docs/STATUS.md) for the exact remaining work and validation limits.
 
 ![Signal Graph](docs/workspace.png)
 
