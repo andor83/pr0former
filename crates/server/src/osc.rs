@@ -279,11 +279,7 @@ impl Runtime {
                                         } {
                                             Some((rest, rosc::OscPacket::Message(m)))
                                                 if rest.is_empty()
-                                                    && (action(&m).is_some()
-                                                        || crate::node_io::osc_note(&m)
-                                                            .is_some()
-                                                        || crate::node_io::osc_value(&m)
-                                                            .is_some()) =>
+                                                    && m.addr.starts_with('/') && m.addr.len() <= 256 =>
                                             {
                                                 messages.push(m)
                                             }

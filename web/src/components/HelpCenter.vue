@@ -5,11 +5,12 @@ import type { Descriptor } from '../types'
 import DocumentationGraph from './DocumentationGraph.vue'
 import SetupGuide from './SetupGuide.vue'
 import ScoreEntryGuide from './ScoreEntryGuide.vue'
+import ScriptGuide from './ScriptGuide.vue'
 
 const props = defineProps<{ descriptors: Descriptor[]; standalone?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 const dialog = ref<HTMLDialogElement>()
-const topic = ref<'quick-start' | 'architecture' | 'init' | 'build' | 'first-project' | 'performance' | 'interface' | 'score-entry' | 'nodes'>('quick-start')
+const topic = ref<'quick-start' | 'architecture' | 'init' | 'build' | 'first-project' | 'performance' | 'interface' | 'score-entry' | 'nodes' | 'scripting'>(new URLSearchParams(location.search).get('topic')==='scripting'?'scripting':'quick-start')
 const nodeCategory = ref('All nodes')
 const nodeSearch = ref('')
 const example = ref<Descriptor | null>(null)
@@ -75,6 +76,7 @@ onBeforeUnmount(() => { if (props.standalone) document.title = previousTitle })
         <button :class="{ active: topic === 'performance' }" @click="selectTopic('performance')">Performance modes</button>
         <button :class="{ active: topic === 'interface' }" @click="selectTopic('interface')">Interface guide</button>
         <button :class="{ active: topic === 'score-entry' }" @click="selectTopic('score-entry')">Score entry</button>
+        <button :class="{ active: topic === 'scripting' }" @click="selectTopic('scripting')">JavaScript scripting</button>
         <p>Reference</p>
         <button :class="{ active: topic === 'nodes' && nodeCategory === 'All nodes' }" @click="selectCategory('All nodes')">All nodes <span>{{ descriptors.length }}</span></button>
         <button v-for="category in categories" :key="category" :class="{ active: topic === 'nodes' && nodeCategory === category }" @click="selectCategory(category)">{{ category }} <span>{{ descriptors.filter(node => node.category === category).length }}</span></button>
@@ -83,6 +85,7 @@ onBeforeUnmount(() => { if (props.standalone) document.title = previousTitle })
       <main class="help-content" tabindex="-1">
         <SetupGuide v-if="topic === 'quick-start' || topic === 'architecture' || topic === 'init' || topic === 'build'" :topic="topic" />
 
+        <ScriptGuide v-else-if="topic === 'scripting'" />
         <ScoreEntryGuide v-else-if="topic === 'score-entry'" />
 
         <article v-else-if="topic === 'first-project'" class="help-article">

@@ -165,6 +165,7 @@ body{position:fixed;inset:0}
 
 .transport-right .browser-monitor-toggle{flex:0 0 36px;width:36px;min-width:36px;height:36px;min-height:36px;padding:8px;border:1px solid var(--line);border-radius:6px;margin-left:4px;overflow:hidden;position:relative}.transport-right .browser-monitor-toggle svg{position:relative;z-index:1}.transport-right .browser-monitor-toggle.monitor-on::after{content:'';position:absolute;inset:0;pointer-events:none;background:linear-gradient(to top,#2f9a5a 0 62%,#d0aa3a 62% 84%,#d64a3c 84% 100%);opacity:.7;clip-path:inset(calc((1 - var(--vu,0)) * 100%) 0 0 0);transition:clip-path .06s linear}.transport-right .browser-monitor-toggle.monitor-on{color:var(--cyan);border-color:var(--cyan);background:#203635}.transport-right .browser-monitor-toggle:disabled{opacity:.4}@media(pointer:coarse){.transport-right .browser-monitor-toggle{flex-basis:44px;width:44px;min-width:44px;height:44px;min-height:44px}}
 
+.parameter-modal.script-modal{width:min(1000px,96vw);max-width:1000px}.script-modal .parameter-list{max-height:75vh}.script-modal .script-editor{padding:0 0 16px}
 /* Give node settings labels real layout spacing, including embedded editors. */
 .node-parameter-modal .parameter-list label:has(>input:not([type=checkbox]):not([type=radio])),
 .node-parameter-modal .parameter-list label:has(>select),

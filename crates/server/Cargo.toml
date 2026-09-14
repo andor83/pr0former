@@ -34,6 +34,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 libc = "0.2"
 mdns-sd = "0.21"
 hostname = "0.4"
+rquickjs = { version = "0.13", default-features = false, features = ["std"] }
 rcgen = { version = "0.13", features = ["x509-parser"] }
 time = "0.3"
 base64 = "0.22"

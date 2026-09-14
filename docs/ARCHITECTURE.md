@@ -46,6 +46,44 @@ identity participates in graph-state compatibility so replacement does not retai
 an old shortlist or omit newly prepared samples. Allocation guards exercise rapid
 switches through all three consumers; they do not measure hardware latency.
 
+## JavaScript control nodes
+
+`js_control` stores source, an explicit restart revision, numeric input/output
+declarations and named-control bindings in `Node.script`. Core validates limits
+and derives per-node descriptors; the server re-executes changed declarations in
+QuickJS before accepting a project save, including when the engine is disabled.
+`POST projects/:id/scripts/compile` checks source and returns its manifest. The
+editor provides JavaScript highlighting/completion, Check and Apply, live values,
+runtime diagnostics, GUI Console integration, and the separately bundled
+[scripting guide](SCRIPTING.md) in both node Options and Help.
+
+Server preparation creates one bounded worker/runtime per script (maximum 16),
+with 16 MiB JS memory, 256 KiB stack, setup/event interrupt budgets and no host
+filesystem/network/module APIs. The DSP bridge contains only prepared state,
+atomic status and SPSC event/output rings. Rendering captures numeric changes,
+typed MIDI and metronome/tick timestamps, and applies admitted output commands;
+JavaScript, JSON, GC, exceptions and logging run outside rendering. Raw OSC
+arguments arrive through a separate bounded off-render queue from the configured
+project receiver. Message packets with arbitrary typed arguments are admitted;
+bundles and timetag scheduling remain unsupported.
+
+Ticks occur at the configured block cadence (not every sample). Click events
+follow the written denominator grid during playback and the graph grid otherwise.
+Reactive handlers have asynchronous latency. Future sample/beat commands use
+engine time, with beat targets preserved across tempo changes and old-generation
+commands canceled on reset. The bridges cap input/output queues and pending work;
+faults reset numeric outputs, withdraw named numeric publications and release
+tracked MIDI notes/sustain. OSC queue overload drops messages with diagnostics.
+
+Named bindings observe Send or Receive control nodes; script-owned numeric
+publications participate in Receive control arbitration without mutating a
+connected node's settings. Source/restart changes reset the VM; compatible
+unchanged scripts retain their worker and prepared state, with observation storage
+remapped during graph changes. Retired engines stop their workers when destroyed
+by the existing persistence worker. Source belongs in revisions; logs, effective
+values and diagnostics do not. Scripts do not extend the audio/spectral plugin
+contract or provide physical audio/MIDI deadline guarantees.
+
 ## Graph contracts
 
 Knobs and Sliders contain 1–8 MIDI CC controls. Each control has a channel and CC number, a numeric outlet, and (for Sliders) a matching numeric input. Received MIDI is forwarded unchanged; GUI gestures emit assigned CCs. Slider values apply range, step and decimal rounding in DSP. Connected slider inputs are read-only in the UI and controller API. Live values and learn state use fixed prepared arrays; telemetry serialization occurs outside rendering. MIDI Learn captures the next incoming CC and the initiating browser saves its channel/number as configuration. GUI values are transient; learned assignments and display options are project data.

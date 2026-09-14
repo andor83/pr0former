@@ -287,6 +287,7 @@ pub async fn save(
         .unwrap()
         .parent = None;
     graph.validate().map_err(bad)?;
+    crate::scripts::validate_graph(&graph, None).await.map_err(bad)?;
     // Copy originals into the immutable version, so another project does not depend on source-project files.
     let mut assets: BTreeSet<u32> = graph
         .nodes
@@ -491,6 +492,7 @@ pub async fn insert(
     candidate.graph.nodes.extend(graph.nodes.clone());
     candidate.graph.edges.extend(graph.edges.clone());
     candidate.validate().map_err(bad)?;
+    crate::scripts::validate_graph(&candidate.graph, Some(&p.graph)).await.map_err(bad)?;
     let mut written = vec![];
     let result: Api<Json<pr0_core::Project>> = async {
         if !assets.is_empty() {

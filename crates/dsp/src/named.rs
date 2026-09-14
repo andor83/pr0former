@@ -4,6 +4,9 @@ use crate::{
     visualizer::{Datum, Text},
 };
 pub struct Route {
+    pub script_seen: [u64; 256],
+    pub script_value: Option<Datum>,
+    pub script_source: Option<(usize,usize)>,
     pub name: Text,
     pub published_name: Text,
     pub ready: bool,
@@ -43,6 +46,7 @@ impl Route {
             pr0_core::Signal::Control
         };
         Self {
+            script_seen: [0;256], script_value: None, script_source: None,
             name,
             published_name: name,
             ready: false,

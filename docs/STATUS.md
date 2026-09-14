@@ -312,6 +312,32 @@ hardware were not tested, and the desktop application bundle was not repackaged.
 | MIDI/OSC | System settings and receiving/sending paths exist. Every graph MIDI source (Part MIDI, MIDI input, OSC-to-MIDI, Piano) receives raw channel messages and derives its five scalar outlets from the same frame that its typed `midi` output forwards, so the two paths cannot disagree. MIDI input keeps the channel byte; OSC-to-MIDI and Piano use channel 1. Piano decodes typed input (keys light, outlets move) and republishes scalar-driven notes. MIDI inputs accept several cables, concatenated in connection order per sample. A MIDI output forwards a typed cable raw and decodes scalar cables, never both. | Engine tests cover each source→sink pair over typed cables, fan-in order, reset propagation, scalar override and the single-send contract; external delivery remains best effort and physical MIDI hardware is unverified. |
 | Deployment/assets | Local fonts/assets, native HTTP/HTTPS and desktop packaging, Bash 3.2-compatible launcher. | Existing launcher/desktop validation is historical evidence; startup services are never installed/enabled by automated tests. |
 
+## JavaScript control scripting
+
+JavaScript control nodes (2026-09-13): implemented separate QuickJS workers,
+server-verified dynamic numeric ports, typed MIDI handlers/output, raw typed OSC
+message subscriptions, engine-block ticks, metronome subscriptions, named control
+observation/publication, engine-time timers and scheduled numeric/MIDI output.
+The modal includes a locally bundled CodeMirror editor with syntax highlighting,
+helper completion, examples, Check/Apply during engine operation, live values and
+runtime diagnostics. `console.log/info/warn/error/debug` reach the GUI Console.
+The full [Scripting guide](SCRIPTING.md) is also available in Options and Help.
+
+Verified: the Rust workspace suite passes (one existing manual software-throughput test
+ignored), including JS runtime/sandbox/API and server-manifest tests, exact engine
+sample scheduling, reset cancellation, named-publication replacement/fallback,
+unchanged worker migration across insertion/reordering, and allocation/deallocation
+guards for the bridge. Additional regressions cover live-start 96 kHz timers,
+command ordering and bounded MIDI/sustain releases. The 115 frontend tests and
+production build passed (existing
+large-chunk warnings remain); seven focused Chromium cases passed, including
+three scripting cases plus existing control/named-route regressions. These use a
+real isolated server, graph MIDI and local UDP OSC, and confirm live compilation,
+failure/restart behavior, GUI Console output and guide access. Hardware MIDI,
+audio latency, iPad/Safari, sustained multi-script loads and deadline reliability
+remain manual/unverified. Reactive JS outputs have asynchronous worker latency;
+this is not an audio-processing or sample-synchronous control feature.
+
 ## Remaining performance work
 
 - Dedicated real-time scheduling, command preparation and monitor conversion isolation; incompatible-graph crossfades.

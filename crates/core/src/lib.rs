@@ -1,5 +1,6 @@
 //! Versioned project model and graph validation. No device or UI dependencies.
 pub mod documentation;
+pub mod script;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -162,6 +163,8 @@ pub struct SampleChoice {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<script::Script>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sample_choices: Vec<SampleChoice>,
     /// Source score part for part_midi / part_player, or performer association for monitor_output.
@@ -2133,6 +2136,7 @@ pub fn catalog() -> Vec<Descriptor> {
             });
         }
     }
+    result.push(Descriptor { default_channels: 1, kind: "js_control".into(), label: "JavaScript control".into(), symbol: "JS".into(), category: "Control".into(), description: "Event-driven JavaScript with named numeric ports, MIDI, OSC, metronome and named control bindings. Open Options for the editor and complete scripting guide. Scripts run on a separate worker; reactive output has asynchronous latency.".into(), documentation: documentation::for_kind("js_control"), aliases: vec!["script".into(), "javascript".into(), "code".into()], inputs: vec![midi_port()], outputs: vec![midi_port()], parameters: vec![] });
     result
 }
 
@@ -2255,7 +2259,14 @@ impl Graph {
         }
         let descriptors = catalog();
         let mut ids = BTreeMap::new();
+        if self.nodes.iter().filter(|n| n.kind == "js_control").count() > script::MAX_SCRIPTS {
+            return Err("At most sixteen JavaScript control nodes are supported".into());
+        }
         for (i, n) in self.nodes.iter().enumerate() {
+            if let Some(script) = &n.script {
+                if n.kind != "js_control" { return Err("Script configuration belongs only to JavaScript control nodes".into()); }
+                script.validate()?;
+            }
             if ids.insert(n.id.clone(), i).is_some() {
                 return Err("Duplicate node ID".into());
             }
@@ -2524,10 +2535,12 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == self.nodes[s].kind)
                 .unwrap();
+            let sd = script::descriptor(&self.nodes[s], sd);
             let td = descriptors
                 .iter()
                 .find(|d| d.kind == self.nodes[t].kind)
                 .unwrap();
+            let td = script::descriptor(&self.nodes[t], td);
             if self.nodes[s].kind == "pitch_tracker"
                 && !sd
                     .outputs
@@ -2673,10 +2686,11 @@ impl Graph {
                 if ids[&edge.target] != start || feedback_edge[edge_index] || scheduled[s] {
                     continue;
                 }
-                let signal = descriptors
+                let source_descriptor = descriptors
                     .iter()
                     .find(|d| d.kind == self.nodes[s].kind)
-                    .unwrap()
+                    .unwrap();
+                let signal = script::descriptor(&self.nodes[s], source_descriptor)
                     .outputs
                     .iter()
                     .find(|p| p.id == edge.source_port)
@@ -3142,6 +3156,7 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         .map(|(id, kind, x, y)| {
             let d = catalog.iter().find(|d| d.kind == *kind).unwrap();
             Node {
+                script: None,
                 sample_choices: vec![],
                 part_id: None,
                 io: None,

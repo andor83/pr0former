@@ -38,6 +38,7 @@ unsafe impl GlobalAlloc for CheckedAllocator {
 static ALLOCATOR: CheckedAllocator = CheckedAllocator;
 fn node(id: &str, kind: &str) -> Node {
     Node {
+        script: None,
         sample_choices: vec![],
         id: id.into(),
         kind: kind.into(),

@@ -32,7 +32,7 @@ const visualization=computed(()=>telemetry?.value?.visualizations?.[props.id])
 const isMath = computed(() => props.data.descriptor.category === 'Math')
 // A renamed node keeps its type visible in small letters under the name.
 const renamed = computed(() => props.data.node.label.trim().toLowerCase() !== props.data.descriptor.label.trim().toLowerCase())
-const signal = computed(() => props.data.descriptor.outputs[0]?.signal || props.data.descriptor.inputs[0]?.signal || 'control')
+const signal = computed(() => props.data.node.kind==='js_control'?'control':props.data.descriptor.outputs[0]?.signal || props.data.descriptor.inputs[0]?.signal || 'control')
 const inputs = computed(() => [...props.data.descriptor.inputs, ...props.data.descriptor.parameters.filter(p => !p.structural).map(p => ({ id: p.id, label: p.label, signal: 'control' as const }))])
 const midiInputs = computed(() => inputs.value.filter(port => port.signal === 'midi'))
 const midiOutputs = computed(() => props.data.descriptor.outputs.filter(port => port.signal === 'midi'))
@@ -101,7 +101,7 @@ function controlSelect(event: MouseEvent) {
     <SampleSelectorButtons v-if="data.node.kind==='sample_selector'" :choices="data.node.sample_choices||[]" :index="data.active ? (telemetryStale??true) ? -1 : values?.index??-1 : data.connected.includes('index') ? -1 : data.node.parameters.index??0" :disabled="!data.editable||data.connected.includes('index')||(data.active&&(telemetryStale??true))" :connected="data.connected.includes('index')" @select="index=>data.parameter?.(id,'index',index)" />
     <GraphControl v-if="data.node.kind==='control_input'" :node="data.node" :connected="data.driven" :data="visualization" :stale="telemetryStale??true" :active="data.active" :editable="data.editable" @value="value=>data.setControl(id,value)" @bang="data.bang(id)" />
     <DataVisualizer v-if="visualizer" :kind="data.node.kind" :data="visualization" :sample-rate="telemetry?.sample_rate || 48000" :block-size="telemetry?.block_size || 128" :stale="telemetryStale??true" compact />
-    <button v-if="data.node.kind==='subgraph'" class="button small nodrag nopan" style="position:absolute;bottom:26px;left:12px" :aria-label="`Open ${data.node.label}`" @click.stop="data.open(id)">Open subgraph</button><div v-if="data.node.kind!=='pitch_tracker'" class="node-foot"><span>{{ signal === 'control' ? 'CONTROL' : `${data.node.channels} CH` }}</span><span class="node-readout">{{visualizer ? 'PASS THROUGH' : values ? formatValue(values._out) : '—'}}</span></div>
+    <button v-if="data.node.kind==='subgraph'" class="button small nodrag nopan" style="position:absolute;bottom:26px;left:12px" :aria-label="`Open ${data.node.label}`" @click.stop="data.open(id)">Open subgraph</button><div v-if="data.node.kind!=='pitch_tracker'" class="node-foot"><span>{{ signal === 'control' ? 'CONTROL' : `${data.node.channels} CH` }}</span><span class="node-readout">{{data.node.kind==='js_control' ? !data.active ? 'SCRIPT' : telemetry?.scripts?.[id]?.faulted ? 'SCRIPT STOPPED' : 'RUNNING' : visualizer ? 'PASS THROUGH' : values ? formatValue(values._out) : '—'}}</span></div>
     </div>
   </div>
 </template>

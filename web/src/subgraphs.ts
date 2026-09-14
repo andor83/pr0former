@@ -2,6 +2,10 @@ import { newId } from './id'
 import type { Descriptor, GraphNode, GraphEdge, Signal } from './types'
 export function nodeDescriptor(node: GraphNode, nodes: GraphNode[], catalog: Descriptor[]): Descriptor {
   const base = catalog.find(d => d.kind === node.kind)!
+  if(node.kind==='js_control'){
+    const ports=(items:{name:string}[])=>[...items.map(p=>({id:p.name,label:p.name,signal:'control' as const,fixed_channels:null})),{id:'midi',label:'MIDI',signal:'midi' as const,fixed_channels:null}]
+    return {...base,inputs:ports(node.script?.inputs??[]),outputs:ports(node.script?.outputs??[])}
+  }
   if(node.kind==='pitch_tracker')return {...base,outputs:base.outputs.slice(0,node.parameters.slots??1)}
   if(node.kind==='meter')return {...base,outputs:base.outputs.slice(0,1+Math.max(1,Math.min(8,node.channels)))}
   if(node.kind==='knobs'||node.kind==='sliders'){

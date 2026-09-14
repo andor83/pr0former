@@ -196,6 +196,7 @@ fn run(
     let mut meter_time = Instant::now();
     let mut deadline = Instant::now();
     let mut seq = 0_u64;
+    let mut script_logs = std::collections::BTreeMap::new();
     let mut next_tempo: Option<(f64, f64)> = None;
     let mut count_in: Option<pr0_dsp::count_in::CountIn> = None;
     let mut metronome = false;
@@ -658,7 +659,8 @@ fn run(
                 } => {
                     let accepted = if enabled && project.as_ref().is_some_and(|p| p.id == id) {
                         if let Some(e) = engine.as_mut() {
-                            match crate::osc::action(&message) {
+                            let script_accepted = crate::scripts::osc_event(&message, e);
+                            let accepted = match crate::osc::action(&message) {
                                 Some(crate::osc::Action::Control(node, value)) => {
                                     e.external_control(&node, &value)
                                 }
@@ -719,9 +721,10 @@ fn run(
                                             }
                                         }
                                     }
-                                    matched
+                                    matched || script_accepted
                                 }
-                            }
+                            };
+                            accepted || script_accepted
                         } else {
                             false
                         }
@@ -1210,6 +1213,7 @@ fn run(
                         e.analyze_visualizers();
                     }
                     let (debug, dropped)=e.take_console_entries();
+                    let scripts = crate::scripts::telemetry(e, &logs, p, &mut script_logs);
                     for entry in debug {
                         let value=match entry.value {pr0_core::ControlValue::Number(value)=>value.to_string(),pr0_core::ControlValue::Text(value)=>serde_json::to_string(&value).unwrap_or_default()};
                         logs.push(&p.id,"info",&format!("Console Out [{} · {}] sample {}: {}",entry.label,entry.node,entry.sample,value));
@@ -1231,7 +1235,7 @@ fn run(
                         }
                         error_logged = device_error.clone();
                     }
-                    let _=events.send(json!({
+                    let _=events.send(json!({"scripts":scripts,
 "type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"metronome":metronome,"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":persistence.error().unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"osc_messages":e.osc_messages(),"route_targets":e.route_targets(),"feedback_edges":e.feedback_edges(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
 ).into());
                 }

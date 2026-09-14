@@ -144,6 +144,7 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
     validate_choices(project)?;
     cache_project(project, rate)?;
     let mut engine = pr0_dsp::Engine::prepare(project.graph.clone(), rate as f64)?;
+    crate::scripts::prepare(&mut engine, &project.graph, crate::settings::read().block_size)?;
     let (beats, unit) = project.initial_meter();
     engine.set_meter(beats, unit);
     crate::loops::restore(project, &mut engine)?;

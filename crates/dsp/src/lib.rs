@@ -1,5 +1,6 @@
 //! Prepared DSP graph. `render` performs no allocation or locking.
 mod console;
+pub mod script;
 mod channels;
 mod clock_ratio;
 mod convolution;
@@ -160,6 +161,8 @@ struct Voice {
 }
 mod controllers;
 struct RuntimeNode {
+    script: Option<Box<script::Bridge>>,
+    script_config: Option<pr0_core::script::Script>,
     part_player: Option<Box<part_player::Player>>,
     controllers: Option<Box<controllers::Controllers>>,
     midi_pending: Box<midi_events::Buffer>,
@@ -437,6 +440,9 @@ impl RuntimeNode {
             }
         }
         match self.kind.as_str() {
+            "js_control" => {
+                if let Some(script) = &self.script { self.control = script.outputs; scalar = self.control[0]; }
+            }
             "sample_selector" => {
                 let index = self.p("index");
                 scalar = if index.is_finite() && index >= 0. {
@@ -1390,6 +1396,7 @@ impl RuntimeNode {
 pub struct ConsoleEntry { pub node: String, pub label: String, pub sample: u64, pub value: pr0_core::ControlValue }
 
 pub struct Engine {
+    script_nodes: Vec<usize>,
     console: console::Buffer,
     nodes: Vec<RuntimeNode>,
     order: Vec<usize>,
@@ -1431,12 +1438,15 @@ impl Engine {
         let mut nodes = Vec::new();
         for n in &graph.nodes {
             let d = descriptors.iter().find(|d| d.kind == n.kind).unwrap();
+            let d = pr0_core::script::descriptor(n, d);
             let values: Vec<f64> = d
                 .parameters
                 .iter()
                 .map(|p| n.parameters.get(&p.id).copied().unwrap_or(p.default))
                 .collect();
             nodes.push(RuntimeNode {
+                script: None,
+                script_config: n.script.clone(),
                 clock_ratio: clock_ratio::ClockRatio::default(),
                 channel_map: channels::ChannelMap::default(),
                 adsr: envelope::Adsr::default(),
@@ -1708,10 +1718,12 @@ impl Engine {
                 .iter()
                 .find(|d| d.kind == nodes[s].kind)
                 .unwrap();
+            let sd = pr0_core::script::descriptor(&graph.nodes[s], sd);
             let td = descriptors
                 .iter()
                 .find(|d| d.kind == nodes[t].kind)
                 .unwrap();
+            let td = pr0_core::script::descriptor(&graph.nodes[t], td);
             let source_port = sd
                 .outputs
                 .iter()
@@ -1892,6 +1904,7 @@ impl Engine {
             .map(|(i, _)| i)
             .collect();
         Ok(Self {
+            script_nodes: nodes.iter().enumerate().filter(|(_,n)|n.kind == "js_control").map(|(i,_)|i).collect(),
             console: console::Buffer::new(),
             nodes,
             priority,
@@ -2058,6 +2071,7 @@ impl Engine {
             return;
         }
         let meter = (self.graph_clock.bar_beats, self.graph_clock.beat_length);
+        let script_routes_changed = self.nodes.len() != previous.nodes.len() || self.nodes.iter().zip(&previous.nodes).any(|(a,b)|a.id != b.id || a.script_config != b.script_config);
         self.graph_clock = previous.graph_clock;
         (self.graph_clock.bar_beats, self.graph_clock.beat_length) = meter;
         for index in 0..self.nodes.len() {
@@ -2067,6 +2081,8 @@ impl Engine {
             };
             let source = &previous.nodes[source_index];
             let compatible = target.kind == source.kind
+                && target.script_config == source.script_config
+                && target.script.is_some() == source.script.is_some()
                 && target.sample_choices == source.sample_choices
                 && target.sample_bank.iter().map(|s| s.0).eq(source.sample_bank.iter().map(|s| s.0))
                 && (target.route.is_none()
@@ -2134,6 +2150,9 @@ impl Engine {
             let source = &mut previous.nodes[source_index];
             std::mem::swap(target, source);
             std::mem::swap(&mut target.bindings, &mut source.bindings);
+            if script_routes_changed { if let (Some(a),Some(b)) = (&mut target.script,&mut source.script) {
+                for (old,new) in a.bindings.iter_mut().zip(&mut b.bindings) { std::mem::swap(&mut old.observed,&mut new.observed); }
+            } }
             for (old, new) in target.midi_lanes.iter_mut().zip(&mut source.midi_lanes) {
                 std::mem::swap(&mut old.source, &mut new.source);
             }
@@ -2159,10 +2178,13 @@ impl Engine {
                 }
             }
         }
+        if script_routes_changed { for node in &mut self.nodes { if let Some(route) = &mut node.route {
+            route.script_seen.fill(0); route.script_value = None; route.script_source = None;
+        } } }
         for source in 0..previous.nodes.len() {
-            let Some(player) = &mut previous.nodes[source].part_player else { continue };
             let mut releases = midi_events::Buffer::new();
-            player.stop(&mut releases);
+            if let Some(player) = &mut previous.nodes[source].part_player { player.stop(&mut releases); }
+            if let Some(script) = &mut previous.nodes[source].script { script.release(&mut releases); }
             if releases.len == 0 { continue; }
             for old in &previous.nodes {
                 if old.bindings.iter().any(|b| b.source == source && b.signal == pr0_core::Signal::Midi) {
@@ -2661,6 +2683,7 @@ impl Engine {
         };
         route.error = driven && node.target_text.is_none();
         if route.name != name {
+            route.script_seen.fill(0); route.script_value = None; route.script_source = None;
             route.name = name;
             route.seen.fill(0);
             route.value = visualizer::Datum::Number(0.);
@@ -2742,6 +2765,44 @@ impl Engine {
                 receive.control_source = Some(source);
             }
         }
+        if signal == pr0_core::Signal::Control {
+            let had_script = receive.script_source.is_some();
+            if best != usize::MAX { receive.script_value = None; receive.script_source = None; }
+            let mut present = false;
+            let mut script_fallback: Option<(usize,usize,usize,visualizer::Datum)> = None;
+            for si in 0..self.script_nodes.len() {
+                let source = self.script_nodes[si];
+                let Some(script) = &self.nodes[source].script else { continue };
+                let count = script.bindings.len();
+                for bi in 0..count {
+                    let b = &self.nodes[source].script.as_ref().unwrap().bindings[bi];
+                    let Some(value) = b.published.filter(|_| b.name == name && !name.as_str().is_empty()) else { continue };
+                    let serial = b.serial;
+                    let rank = self.priority[source];
+                    if script_fallback.as_ref().is_none_or(|f|rank < f.2) { script_fallback=Some((source,bi,rank,value)); }
+                    let r = self.nodes[idx].route.as_mut().unwrap();
+                    present |= r.script_source == Some((source,bi));
+                    r.connected += 1;
+                    if r.script_seen[si * 16 + bi] != serial && rank < best {
+                        r.script_value = Some(value); r.script_source = Some((source,bi));
+                        r.control_source = None; present = true; best = rank;
+                        self.nodes[idx].control_event = true;
+                    }
+                    self.nodes[idx].route.as_mut().unwrap().script_seen[si * 16 + bi] = serial;
+                }
+            }
+            let r = self.nodes[idx].route.as_mut().unwrap();
+            if !present { r.script_value = None; r.script_source = None; }
+            if !present && had_script && best == usize::MAX {
+                if let Some((source,bi,rank,value)) = script_fallback {
+                    if fallback.as_ref().is_none_or(|native|rank < native.1) {
+                        r.script_value=Some(value);r.script_source=Some((source,bi));r.control_source=None;
+                    }
+                }
+            }
+            if let Some(value) = r.script_value { r.value = value; }
+        }
+        let receive = self.nodes[idx].route.as_mut().unwrap();
         if signal == pr0_core::Signal::Spectral && receive.spectral_source != spectrum_source {
             receive.spectral_source = spectrum_source;
             if let Some((source, _)) = spectrum_source {
@@ -2941,6 +3002,11 @@ impl Engine {
                             });
                     }
                 }
+                if self.nodes[idx].script.is_some() {
+                    let node = &mut self.nodes[idx];
+                    let connected = std::array::from_fn(|port| node.bindings.iter().any(|b| !b.parameter && b.signal == pr0_core::Signal::Control && b.destination == port));
+                    node.script.as_mut().unwrap().tick(self.graph_clock, self.clock.running, self.part_metronome, &node.input, connected, node.input_events, &mut node.midi_frame);
+                }
                 self.nodes[idx].process(&self.graph_clock, &hardware, self.part_metronome);
                 let node=&mut self.nodes[idx];
                 if node.kind=="console_out" && node.bindings.iter().any(|b|!b.parameter && b.destination==0)
@@ -2990,6 +3056,7 @@ impl Engine {
                     }
                 }
             }
+            self.observe_scripts();
             for x in out.iter_mut() {
                 *x = x.clamp(-1., 1.);
             }
@@ -3082,6 +3149,10 @@ impl Engine {
                 if n.sample_input.is_some() {
                     values.insert("_sample_id".into(), n.selected_sample.map(|i| n.sample_bank[i].0 as f64).unwrap_or(0.));
                     values.insert("_sample_missing".into(), if n.sample_request > 0. && n.selected_sample.is_none() { 1. } else { 0. });
+                }
+                if let Some(script) = &n.script {
+                    for i in 0..script.config.inputs.len() { values.insert(format!("_script_input_{i}"), script.inputs[i]); }
+                    for i in 0..script.config.outputs.len() { values.insert(format!("_script_output_{i}"), script.outputs[i]); }
                 }
                 if let Some(tracker) = &n.pitch_tracker {
                     for slot in 0..n.p("slots") as usize {
@@ -6406,7 +6477,7 @@ mod unified_midi_tests {
 mod console_tests {
     use super::*;
     use pr0_core::{ControlValue, Edge, Node};
-    fn node(id:&str,kind:&str)->Node { Node {sample_choices:vec![],id:id.into(),kind:kind.into(),label:id.into(),x:0.,y:0.,channels:1,parameters:Default::default(),part_id:None,io:None,library:None,parent:None,control_value:None} }
+    fn node(id:&str,kind:&str)->Node { Node {script:None,sample_choices:vec![],id:id.into(),kind:kind.into(),label:id.into(),x:0.,y:0.,channels:1,parameters:Default::default(),part_id:None,io:None,library:None,parent:None,control_value:None} }
     fn engine()->Engine {
         Engine::prepare(Graph {nodes:vec![node("source","control_input"),node("debug","console_out")],edges:vec![Edge{id:"wire".into(),source:"source".into(),source_port:"out".into(),target:"debug".into(),target_port:"in".into()}]},48000.).unwrap()
     }

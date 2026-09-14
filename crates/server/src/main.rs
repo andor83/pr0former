@@ -22,6 +22,7 @@ mod resources;
 mod revisions;
 mod sample_library;
 mod samples;
+mod scripts;
 mod score_automation;
 mod settings;
 mod subgraphs;
@@ -748,6 +749,7 @@ async fn update_project(
     for target in p.local_audio_assignments.values() { role(&app,&id,target).map_err(|_|bad("Assign local audio inputs to ensemble members"))?; }
     sample_library::assign_roots(&app.db.lock().unwrap(), &previous, &mut p)?;
     p.validate().map_err(bad)?;
+    scripts::validate_graph(&p.graph, Some(&previous.graph)).await.map_err(bad)?;
     samples::validate_choices(&p).map_err(bad)?;
     validate_conductor(&app, &p)?;
     let active = app.active.lock().unwrap().as_deref() == Some(&id);
@@ -2511,6 +2513,7 @@ async fn main() {
         .route("/api/logout", post(logout))
         .route("/api/me", get(me).put(accounts::update_self))
         .route("/api/catalog", get(|| async { Json(catalog()) }))
+        .route("/api/projects/{id}/scripts/compile", post(scripts::compile))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{id}/opened", post(accounts::opened))
         .route("/api/samples", get(sample_library::organize))

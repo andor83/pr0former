@@ -1,5 +1,10 @@
 # Writing a source plugin
 
+For event-driven JavaScript control nodes, use the separate
+[Scripting guide](SCRIPTING.md). The native Rust DSP plugin contract below is
+unchanged; JavaScript runs outside audio rendering and cannot process audio or
+spectral buffers.
+
 Start with `plugins/gain/src/lib.rs`. It implements the small `pr0_dsp::AudioPlugin` trait: prepare, reset, process, and latency reporting. It demonstrates smoothed gain over interleaved buffers. This is a source extension API; there is no runtime dynamic library loader or untrusted plugin sandbox.
 
 ## Adding a graph node today

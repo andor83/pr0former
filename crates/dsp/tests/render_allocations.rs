@@ -36,8 +36,34 @@ unsafe impl GlobalAlloc for CheckedAllocator {
 }
 #[global_allocator]
 static ALLOCATOR: CheckedAllocator = CheckedAllocator;
+#[test]
+fn script_bridge_commands_events_overflow_and_replacement_do_not_allocate() {
+    use pr0_dsp::script::{Action, Bridge, Command};
+    let mut n=node("js","js_control");
+    let config=pr0_core::script::Script { outputs:vec![pr0_core::script::Input{name:"value".into(),initial:0.}], bindings:vec![pr0_core::script::Binding{kind:"publish".into(),name:"bus".into()}],..Default::default() };
+    n.script=Some(config.clone());
+    let mut r=node("receiver","receive_control");r.control_value=Some(ControlValue::Text("bus".into()));
+    let graph=Graph{nodes:vec![n,r],edges:vec![]};
+    let mut e=pr0_dsp::Engine::prepare(graph.clone(),48000.).unwrap();let(b,mut w)=Bridge::new(config.clone());e.attach_script("js",b);
+    let mut replacement=pr0_dsp::Engine::prepare(graph,48000.).unwrap();let(b,_new_worker)=Bridge::new(config);replacement.attach_script("js",b);
+    let named=pr0_dsp::script::prepare_value(&ControlValue::Number(0.5));
+    CHECK.set(true);CALLS.set(0);
+    for sample in 0..4096 {
+        let action=if sample%2==0{Action::Output{port:0,value:sample as f64}}else{Action::Named{binding:0,value:named}};
+        assert!(w.commands.push(Command{action,sample,beat:None,generation:0}).is_ok());
+        e.render(&[],&mut[[0.;8]]);
+        while w.events.pop().is_ok(){}
+    }
+    replacement.carry_node_state(&mut e);
+    replacement.render(&[],&mut[[0.;8];128]);
+    w.shared.fault.store(true,std::sync::atomic::Ordering::Release);
+    replacement.render(&[],&mut[[0.;8];128]);
+    CHECK.set(false);
+    assert_eq!(CALLS.get(),0,"script bridge must never allocate or free while rendering or carrying state");
+}
 fn node(id: &str, kind: &str) -> Node {
     Node {
+        script: None,
         sample_choices: vec![],
         id: id.into(),
         kind: kind.into(),
