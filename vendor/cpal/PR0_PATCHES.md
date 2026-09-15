@@ -15,4 +15,8 @@ without enumerating unrelated devices. It does not alter global ALSA config.
 identity, freeing its COM-allocated string. Friendly names remain display labels.
 This avoids collapsing identically named endpoints into one route.
 
+`src/platform/mod.rs`: `#[allow(dead_code)]` on the unused `NotSendSyncAcrossAllPlatforms`
+marker. Upstream 0.16.0 never constructs it; Cargo hides that warning for registry
+crates but not for this path dependency. No behaviour change.
+
 Other platform backends are unchanged. Reassess these patches on CPAL upgrades.

@@ -752,6 +752,9 @@ mod platform_impl {
 // TODO: Remove these in favour of using negative trait bounds if they stabilise.
 
 // A marker used to remove the `Send` and `Sync` traits.
+// pr0former: unused in upstream 0.16.0; silenced because a path dependency is
+// not lint-capped the way a registry crate is.
+#[allow(dead_code)]
 struct NotSendSyncAcrossAllPlatforms(std::marker::PhantomData<*mut ()>);
 
 impl Default for NotSendSyncAcrossAllPlatforms {
