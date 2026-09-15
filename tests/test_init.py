@@ -371,3 +371,78 @@ fi
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MacSigningTests(unittest.TestCase):
+    """The signing step is checked with stubbed Apple tools; no Keychain is touched."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="pr0former sign ")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        shutil.copyfile(Path(__file__).resolve().parents[1] / "init.sh", self.root / "init.sh")
+        server = self.root / "target/release/pr0-server"
+        server.parent.mkdir(parents=True)
+        server.write_text("#!/bin/bash\n")
+        server.chmod(0o700)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.stub("uname", 'echo Darwin')
+        self.stub("codesign", 'printf "%s\\n" "$*" >> "$PR0_TEST_TRACE"; case " $* " in *" --verify "*) exit 0 ;; esac; exit "${PR0_TEST_CODESIGN_STATUS:-0}"')
+        self.identities('  1) AAAA "Developer ID Application: Test Person (TEAM1234)"\n     1 valid identities found\n')
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith(("PR0_", "APPLE_"))}
+        self.env["PATH"] = str(self.bin) + ":" + os.environ["PATH"]
+        self.env["PR0_TEST_TRACE"] = str(self.root / "trace")
+
+    def stub(self, name, body):
+        path = self.bin / name
+        path.write_text("#!/bin/bash\n" + body + "\n")
+        path.chmod(0o755)
+
+    def identities(self, listing):
+        (self.root / "identities.txt").write_text(listing)
+        self.stub("security", 'cat "$(dirname -- "$0")/../identities.txt"')
+
+    def sign(self, *args):
+        return subprocess.run(["/bin/bash", str(self.root / "init.sh"), "--sign", *args],
+                              env=self.env, capture_output=True, text=True, timeout=12)
+
+    def trace(self):
+        return (self.root / "trace").read_text() if (self.root / "trace").exists() else ""
+
+    def test_signs_with_the_single_developer_id_identity(self):
+        result = self.sign()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Signed target/release/pr0-server as Developer ID Application: Test Person (TEAM1234)", result.stdout)
+        self.assertIn("--force --sign Developer ID Application: Test Person (TEAM1234) --identifier org.pr0former.server --timestamp=none", self.trace())
+
+    def test_explicit_identity_wins_and_apple_development_is_a_fallback(self):
+        self.env["PR0_CODESIGN_IDENTITY"] = "pr0former"
+        self.assertIn("--sign pr0former --identifier org.pr0former.server", self.sign().stdout + self.trace())
+        del self.env["PR0_CODESIGN_IDENTITY"]
+        (self.root / "trace").unlink()
+        self.identities('  1) BBBB "Apple Development: Test Person (ABCDE12345)"\n     1 valid identities found\n')
+        result = self.sign()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--sign Apple Development: Test Person (ABCDE12345) ", self.trace())
+
+    def test_ambiguous_or_missing_identities_fail_sign_with_guidance(self):
+        self.identities('  1) AAAA "Developer ID Application: One (TEAM1234)"\n  2) CCCC "Developer ID Application: Two (TEAM5678)"\n     2 valid identities found\n')
+        result = self.sign()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No code-signing identity found", result.stderr)
+        self.assertIn("PR0_CODESIGN_IDENTITY", result.stderr)
+        self.assertEqual(self.trace(), "")
+
+    def test_codesign_failure_is_reported_with_keychain_guidance(self):
+        self.env["PR0_TEST_CODESIGN_STATUS"] = "1"
+        result = self.sign()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Signing as Developer ID Application: Test Person (TEAM1234) failed", result.stderr)
+        self.assertIn("from a terminal on the Mac", result.stderr)
+
+    def test_sign_conflicts_with_other_actions_and_needs_a_build(self):
+        self.assertEqual(self.sign("--update").returncode, 2)
+        (self.root / "target/release/pr0-server").unlink()
+        result = self.sign()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("A release build is required", result.stderr)

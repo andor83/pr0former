@@ -9,6 +9,7 @@ STARTUP_ONLY=false
 START_ONLY=false
 STOP_ONLY=false
 UPDATE_ONLY=false
+SIGN_ONLY=false
 UPDATE_AND_START=false
 SETUP_SSL=false
 REMOVE_SSL=false
@@ -26,6 +27,7 @@ pr0former initial setup
   ./init.sh --start     Start the built server in the foreground (Ctrl-C to stop)
   ./init.sh --stop      Stop servers launched by --start from this project
   ./init.sh --update    Rebuild frontend and release server using locked dependencies
+  ./init.sh --sign      macOS: re-sign the built server with a stable code-signing identity
   ./init.sh --uas       Pull latest Git changes, rebuild, and start in the foreground
   ./init.sh --startup   Interactively enable or disable startup only
   ./init.sh --setup-ssl Create a local certificate for HTTPS (restart to apply)
@@ -38,6 +40,9 @@ pr0former initial setup
   --port PORT          Override the bind port for --start/--uas (1–65535)
 
 macOS: startup uses a LaunchAgent for the current user, at login.
+macOS: builds are code-signed with PR0_CODESIGN_IDENTITY, APPLE_SIGNING_IDENTITY, or the
+single installed Developer ID Application / Apple Development identity, so the microphone
+consent macOS records against the signature survives rebuilds. --sign re-signs a build.
 Linux: startup uses a systemd user service, at login.
 The script asks before installing dependencies or changing startup services.
 On Linux, --allow-low-ports requests sudo only for setcap, not for the server.
@@ -64,6 +69,7 @@ while [ "$#" -gt 0 ]; do
     --start) START_ONLY=true ;;
     --stop) STOP_ONLY=true ;;
     --update) UPDATE_ONLY=true ;;
+    --sign) SIGN_ONLY=true ;;
     --uas) UPDATE_AND_START=true ;;
     --setup-ssl) SETUP_SSL=true ;;
     --remove-ssl) REMOVE_SSL=true ;;
@@ -82,7 +88,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 mode_count=0
-for selected in "$START_ONLY" "$STOP_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$UPDATE_AND_START" "$SETUP_SSL" "$REMOVE_SSL" "$ALLOW_LOW_PORTS"; do
+for selected in "$START_ONLY" "$STOP_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$SIGN_ONLY" "$UPDATE_AND_START" "$SETUP_SSL" "$REMOVE_SSL" "$ALLOW_LOW_PORTS"; do
   if [ "$selected" = true ]; then mode_count=$((mode_count + 1)); fi
 done
 if [ "$mode_count" -gt 1 ]; then printf 'Select only one launcher action.\n' >&2; exit 2; fi
@@ -353,7 +359,7 @@ if [ "$REMOVE_SSL" = true ]; then
   exit 0
 fi
 
-if [ "$UPDATE_ONLY" != true ] && [ ! -t 0 ]; then
+if [ "$UPDATE_ONLY" != true ] && [ "$SIGN_ONLY" != true ] && [ ! -t 0 ]; then
   printf 'Setup needs an interactive terminal. Run ./init.sh in your terminal.\n' >&2
   exit 1
 fi
@@ -650,6 +656,7 @@ PLIST
           launchctl enable "gui/$(id -u)/$SERVICE_ID"
           launchctl bootstrap "gui/$(id -u)" "$plist"
           printf 'Startup enabled and server started. Logs: %s/data/logs\n' "$PROJECT_DIR"
+          printf 'If macOS asks for microphone access, allow it on the Mac'"'"'s screen: the audio device list waits for that answer.\n'
           ;;
         Linux)
           required systemctl
@@ -703,17 +710,61 @@ UNIT
   esac
 }
 
+# macOS ties microphone consent to the server's code signature. The linker's
+# ad-hoc signature is a hash of each build, so every rebuild is a new, unconsented
+# program: its first input-device probe waits on a privacy prompt that a
+# LaunchAgent or ssh launch can never answer, and browsers hang on "Loading
+# project". A stable identity carries one consent across rebuilds. Chosen from
+# PR0_CODESIGN_IDENTITY, then APPLE_SIGNING_IDENTITY, then the single installed
+# "Developer ID Application" or "Apple Development" identity. Pass `required` to
+# fail instead of warning when signing is not possible.
+sign_server_binary() {
+  local required="${1:-}" binary="$PROJECT_DIR/target/release/pr0-server"
+  local identity="${PR0_CODESIGN_IDENTITY:-${APPLE_SIGNING_IDENTITY:-}}" prefix candidates output
+  [ "$PLATFORM" = Darwin ] || return 0
+  if [ -z "$identity" ]; then
+    for prefix in 'Developer ID Application: ' 'Apple Development: '; do
+      # A missing or failing security tool means "no identity", not a failed build.
+      candidates="$({ security find-identity -v -p codesigning 2>/dev/null || true; } | sed -n "s/.*\"\($prefix[^\"]*\)\".*/\1/p" | sort -u)"
+      if [ -n "$candidates" ] && [ "$(printf '%s\n' "$candidates" | wc -l | tr -d ' ')" = 1 ]; then identity="$candidates"; break; fi
+    done
+  fi
+  if [ -z "$identity" ]; then
+    printf '\n\033[31mNo code-signing identity found; the server keeps its ad-hoc signature.\033[0m\nmacOS then asks for microphone access again after every rebuild, on the Mac'"'"'s screen, and a server started by the LaunchAgent or over ssh waits on that dialog.\nInstall a Developer ID or Apple Development certificate (or set PR0_CODESIGN_IDENTITY), then run ./init.sh --sign.\n' >&2
+    if [ "$required" = required ]; then return 1; fi
+    return 0
+  fi
+  if output="$(codesign --force --sign "$identity" --identifier "$SERVICE_ID" --timestamp=none "$binary" 2>&1)" && codesign --verify --strict "$binary" 2>/dev/null; then
+    printf 'Signed target/release/pr0-server as %s (identifier %s).\n' "$identity" "$SERVICE_ID"
+    return 0
+  fi
+  printf '\n\033[31mSigning as %s failed:\033[0m %s\nThe server keeps its ad-hoc signature, so macOS asks for microphone access again after every rebuild.\nIf the login Keychain is locked or codesign is not yet authorized for this key, run ./init.sh --sign once from a terminal on the Mac, or run ./scripts/setup-macos-signing.sh over ssh -t first.\n' "$identity" "$output" >&2
+  if [ "$required" = required ]; then return 1; fi
+  return 0
+}
+
 build_application() {
   local restore_low_ports=false
   if has_low_port_permission; then restore_low_ports=true; fi
   printf '\nInstalling locked frontend dependencies and building the application…\n'
   (cd "$PROJECT_DIR/web" && npm ci && npm run build)
   (cd "$PROJECT_DIR" && cargo build --release --locked)
+  sign_server_binary
   if [ "$restore_low_ports" = true ] && ! has_low_port_permission; then
     printf '\nThe rebuild replaced the capable server binary; restoring its low-port permission.\n'
     allow_low_ports
   fi
 }
+
+if [ "$SIGN_ONLY" = true ]; then
+  if [ "$PLATFORM" != Darwin ]; then printf -- '--sign applies to macOS only.\n' >&2; exit 2; fi
+  if [ ! -x "$PROJECT_DIR/target/release/pr0-server" ]; then
+    printf 'A release build is required. Run ./init.sh first (or cargo build --release).\n' >&2
+    exit 1
+  fi
+  sign_server_binary required
+  exit 0
+fi
 
 if [ "$UPDATE_ONLY" = true ]; then
   printf '\npr0former · update build\nProject: %s\n' "$PROJECT_DIR"

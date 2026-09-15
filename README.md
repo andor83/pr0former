@@ -14,7 +14,7 @@ A self-hosted electroacoustic performance workspace: A server/client model where
 
 The interactive script checks dependencies, offers installation, installs the locked frontend dependencies, builds the frontend and release server, offers tests, and asks about startup configuration. Run it as your normal user in a terminal. Homebrew/system package installation may request administrator access.
 
-After changing or pulling source, rebuild with `./init.sh --update`. This noninteractive command installs the locked frontend dependencies, rebuilds the frontend, and builds the release server, reusing up-to-date Cargo artifacts. Existing build tools are required. It does not pull source, alter startup configuration, or restart a running server; restart the server after a successful update.
+After changing or pulling source, rebuild with `./init.sh --update`. This noninteractive command installs the locked frontend dependencies, rebuilds the frontend, and builds the release server, reusing up-to-date Cargo artifacts. Existing build tools are required. It does not pull source, alter startup configuration, or restart a running server; restart the server after a successful update. On macOS the rebuilt server is then code-signed with a stable identity; see [macOS code signing and microphone consent](#macos-code-signing-and-microphone-consent).
 
 ```sh
 ./init.sh --uas
@@ -51,6 +51,16 @@ Stops servers launched with `--start` from this project, including from another 
 This opens the startup menu directly: enable startup, disable startup and stop the service, generate only a launch script, or leave configuration unchanged. macOS uses a per-user LaunchAgent; Linux uses a systemd user service. Services start at login, not before login. No startup service is installed merely by cloning the project or running tests.
 
 The script is stored under `.local/start-pr0former.sh`. Service configuration uses absolute paths, so rerun `--startup` after moving the repository. Application data stays in `data/`; disabling startup preserves it.
+
+### macOS code signing and microphone consent
+
+macOS remembers microphone consent per code signature. A bare `cargo build` leaves the server with an ad-hoc signature that changes on every build, so each rebuild is a new program to the privacy system: the first request for the audio device list waits for a consent dialog on the Mac's screen. A server started by the LaunchAgent or over SSH has nobody to answer that dialog, and browsers hang on "Loading project" with no error. `./init.sh` and `./init.sh --update` therefore sign the built server with a stable identity, chosen from `PR0_CODESIGN_IDENTITY`, then `APPLE_SIGNING_IDENTITY`, then the single installed "Developer ID Application" or "Apple Development" certificate. The signature identifier is `org.pr0former.server`, so one consent covers every later build signed with the same certificate.
+
+```sh
+./init.sh --sign
+```
+
+Re-signs an existing build without rebuilding. Signing needs the login Keychain unlocked and `codesign` authorized for the key, which an SSH session cannot grant on its own: run `--sign` once from a terminal on the Mac and choose "Always Allow", or run `./scripts/setup-macos-signing.sh` over `ssh -t`. Without a usable identity the build still succeeds with a red warning; then either allow the microphone on the Mac's screen after each rebuild or start the server with `PR0_DISABLE_NATIVE_DEVICES=1`.
 
 For moving to another server or continuing development in a new session, see [the migration and development handoff](docs/HANDOFF.md).
 
