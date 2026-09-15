@@ -27,6 +27,7 @@ mod project_bundle;
 mod scripts;
 mod score_automation;
 mod settings;
+mod linux_audio;
 mod subgraphs;
 mod tls;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
@@ -2535,6 +2536,7 @@ async fn main() {
         .route("/api/projects/{id}/system/osc", put(osc::put))
         .route("/api/status", get(status))
         .route("/api/system/audio", get(settings::get))
+        .route("/api/system/audio/linux", get(linux_audio::get))
         .route("/api/system/stats", get(resource_stats))
         .route(
             "/api/projects/{id}/system/audio",

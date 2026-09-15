@@ -2,6 +2,14 @@
 
 ## Current execution model
 
+Native route identity and platform discovery are detailed in [NATIVE_AUDIO.md](NATIVE_AUDIO.md).
+Linux adds explicit PulseAudio/PipeWire-compatible ALSA PCMs and direct ALSA
+card/device routes; Windows uses opaque WASAPI endpoint IDs with friendly labels.
+Native metadata discovery is single-flight cached for 30 seconds and releases
+device handles; Linux inspection subprocesses are bounded and run off the audio
+worker. No render/callback IO or scheduling contract changes. These paths require
+physical Linux/Windows validation; they are not verified pro-audio performance.
+
 `pr0-core` owns serde project types, the node catalog, deterministic graph validation, and the starter project. `pr0-dsp` compiles a graph into a stable topological schedule with preallocated node buffers, state, filter sections, delay lines, and bindings. `pr0-server` owns accounts, SQLite revisions, transport, device I/O, WebRTC, and external MIDI/OSC.
 
 The orchestration worker groups rendering into configurable 32, 64, 128, 256, 512, or 1024-frame blocks at 44.1, 48, 88.2, or 96 kHz (defaults: 128 frames / 48 kHz). Internal event boundaries still split processing at individual samples. The block choice controls worker scheduling; CPAL uses the driver’s default callback buffer. Native output queues target at least two observed driver callbacks, two DSP blocks, and 10 ms of samples, capped below the 16,384-frame ring capacity. The driver callback size is observed through an atomic maximum; an initial 1,024-frame callback estimate primes the queue with silence before stream startup. This avoids repeatedly starving callbacks larger than the DSP block, at the cost of additional queued latency. It does not guarantee deadlines under arbitrary worker stalls or callback sizes beyond the bounded capacity. Without hardware output it follows a monotonic software schedule. With hardware output, a bounded SPSC ring is filled according to device consumption, targeting a small queue. CPAL input/output callbacks only move samples through bounded rings; they do not run codecs or access application locks. The DSP worker is **not yet a dedicated OS-priority realtime callback engine**. Allocation-free rendering alone does not establish deadline reliability; see STATUS.
@@ -512,7 +520,9 @@ preferences, but an inventory refresh no longer directly occupies the thread tha
 refills native output and supplies browser monitor PCM. Native-disabled test mode
 also skips MIDI enumeration. The Monitor screen discovers inventory on opening;
 its two-second timer fetches only process statistics. Explicit settings/device
-refreshes continue to rediscover hardware.
+refreshes reuse native audio metadata for up to 30 seconds before rediscovering
+hardware; MIDI enumeration remains separate. Linux topology inspection has its
+own five-second cache.
 
 The orchestration loop processes at most 16 queued commands before checking output
 pacing/rendering again, preserving FIFO order without allowing a continuous

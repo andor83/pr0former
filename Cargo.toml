@@ -1,6 +1,10 @@
 [workspace]
 members = ["crates/core", "crates/dsp", "crates/server", "plugins/gain"]
 resolver = "2"
+exclude = ["vendor/cpal"]
+
+[patch.crates-io]
+cpal = { path = "vendor/cpal" }
 
 [workspace.package]
 edition = "2024"
@@ -12,4 +16,3 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pr0-core = { path = "crates/core" }
 pr0-dsp = { path = "crates/dsp" }
-

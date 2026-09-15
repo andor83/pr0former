@@ -59,12 +59,15 @@ pub fn read() -> Settings {
 fn merge_discovered(s: &mut Settings, outputs: &[(u32, String)], inputs: &[(u32, String)]) -> bool {
     let mut changed = false;
     for (id, name) in outputs {
+        if name.starts_with("wasapi:") {
+            if let Some(i)=s.interfaces.iter_mut().find(|i|i.id==*id && !i.name.starts_with("wasapi:")) {i.name=name.clone();changed=true;}
+        }
         if s.interfaces.len() < 64 && name.len() <= 256 && !s.interfaces.iter().any(|i| i.id == *id)
         {
             s.interfaces.push(Interface {
                 id: *id,
                 name: name.clone(),
-                enabled: true,
+                enabled: !name.starts_with("pulse:DEVICE=") && !name.starts_with("hw:CARD="),
                 correct_latency: false,
                 latency_ms: 0.,
             });
@@ -72,6 +75,9 @@ fn merge_discovered(s: &mut Settings, outputs: &[(u32, String)], inputs: &[(u32,
         }
     }
     for (id, name) in inputs {
+        if name.starts_with("wasapi:") {
+            if let Some(i)=s.input_interfaces.iter_mut().find(|i|i.id==*id && !i.name.starts_with("wasapi:")) {i.name=name.clone();changed=true;}
+        }
         if s.input_interfaces.len() < 64
             && name.len() <= 256
             && !s.input_interfaces.iter().any(|i| i.id == *id)
@@ -79,7 +85,7 @@ fn merge_discovered(s: &mut Settings, outputs: &[(u32, String)], inputs: &[(u32,
             s.input_interfaces.push(InputInterface {
                 id: *id,
                 name: name.clone(),
-                enabled: true,
+                enabled: !name.starts_with("pulse:DEVICE=") && !name.starts_with("hw:CARD="),
             });
             changed = true;
         }
@@ -244,7 +250,7 @@ async fn apply(
         return Err(bad("Deactivate the show before changing system audio"));
     }
     validate(&s).map_err(bad)?;
-    let detected = audio::output_devices();
+    let (detected,detected_inputs) = tokio::task::spawn_blocking(||(audio::output_devices(),audio::input_devices())).await.map_err(internal)?;
     for i in &s.interfaces {
         if i.enabled
             && device.is_none_or(|target| target == ("output", i.id))
@@ -255,7 +261,6 @@ async fn apply(
             ));
         }
     }
-    let detected_inputs = audio::input_devices();
     for i in &s.input_interfaces {
         if i.enabled
             && device.is_none_or(|target| target == ("input", i.id))
@@ -349,6 +354,28 @@ impl Logs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_linux_routes_require_opt_in() {
+        let mut s=Settings::default();
+        merge_discovered(&mut s,&[(1,"pulse:DEVICE=hdmi".into()),(2,"hw:CARD=USB,DEV=0".into())],&[(3,"hw:CARD=USB,DEV=0".into())]);
+        assert!(s.interfaces.iter().all(|i|!i.enabled));
+        assert!(!s.input_interfaces[0].enabled);
+        s.interfaces[0].enabled=true;
+        merge_discovered(&mut s,&[(1,"pulse:DEVICE=hdmi".into())],&[]);
+        assert!(s.interfaces[0].enabled);
+    }
+    #[test]
+    fn windows_identity_upgrade_preserves_route_id_and_saved_preferences() {
+        let mut s=Settings::default();
+        merge_discovered(&mut s,&[(42,"Speakers".into())],&[]);
+        s.interfaces[0].enabled=false;
+        s.interfaces[0].latency_ms=12.;
+        assert!(merge_discovered(&mut s,&[(42,"wasapi:endpoint-a".into())],&[]));
+        assert_eq!(s.interfaces.len(),1);
+        assert_eq!(s.interfaces[0].name,"wasapi:endpoint-a");
+        assert!(!s.interfaces[0].enabled);
+        assert_eq!(s.interfaces[0].latency_ms,12.);
+    }
     #[test]
     fn discovery_enables_new_devices_and_preserves_disabled_choices_across_reconnect() {
         let mut s = Settings::default();

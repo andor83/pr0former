@@ -5,17 +5,17 @@ const props = defineProps<{ value: number; disabled: boolean }>()
 const emit = defineEmits<{ change: [value: number] }>()
 const devices = ref<any>(), settings = ref<any>(), error = ref('')
 let timer: ReturnType<typeof setInterval> | undefined
-const available = computed(() => (devices.value?.input_interfaces || []) as {id:number;name:string}[])
+const available = computed(() => (devices.value?.input_interfaces || []) as {id:number;name:string;label?:string;backend?:string}[])
 const enabled = computed(() => ((settings.value?.input_interfaces || []) as {id:number;name:string;enabled:boolean}[]).filter(i => i.enabled && available.value.some(d => d.id === i.id)))
 const selected = computed(() => props.value || enabled.value[0]?.id)
-async function refresh() { try { const [s,d] = await Promise.all([api('/system/audio'),api('/devices')]); settings.value=s;devices.value=d;error.value='' } catch(e) { error.value=String(e) } }
+async function refresh() { try { const [s,d] = await Promise.all([api('/audio/config'),api('/devices')]); settings.value=s;devices.value=d;error.value='' } catch(e) { error.value=String(e) } }
 onMounted(() => { void refresh();timer=setInterval(refresh,2000) })
 onBeforeUnmount(() => clearInterval(timer))
 </script>
 <template>
   <select aria-label="Input interface" :value="value" :disabled="disabled" @change="emit('change', Number(($event.target as HTMLSelectElement).value))">
     <option :value="0">First enabled input</option>
-    <option v-for="i in available" :key="i.id" :value="i.id" :disabled="!enabled.some(d=>d.id===i.id)">{{i.name}}{{enabled.some(d=>d.id===i.id)?'':' · disabled'}}</option>
+    <option v-for="i in available" :key="i.id" :value="i.id" :disabled="!enabled.some(d=>d.id===i.id)">{{i.label||i.name}}{{i.backend?` · ${i.backend}`:''}}{{enabled.some(d=>d.id===i.id)?'':' · disabled'}}</option>
     <option v-if="value && !available.some(i=>i.id===value)" :value="value" disabled>Selected input unavailable — choose another</option>
   </select>
   <p v-if="!devices && !error" class="feature-note">Checking native inputs…</p>

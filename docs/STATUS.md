@@ -1,5 +1,20 @@
 # Current implementation status
 
+Native device routing follow-up: Linux discovers individually named PulseAudio
+sinks/sources (including PipeWire's Pulse server), opens exact endpoint PCMs, and
+exposes explicit ALSA card/device pairs including nonzero HDMI devices. These new
+Linux routes are opt-in. The details panel shows ports, profiles and defaults;
+native `pw-dump` fallback is diagnostic only. Windows selections now use opaque
+WASAPI endpoint IDs while showing friendly labels, preserving unambiguous legacy
+numeric route IDs. macOS CoreAudio behavior is unchanged. A local CPAL 0.16 patch
+skips the absent `/dev/dsp` OSS probe; native inventory is cached for 30 seconds.
+See [NATIVE_AUDIO.md](NATIVE_AUDIO.md) for dependencies, routing workflow and limits.
+299 core/DSP/server tests and 117 frontend tests pass, along with the production
+build and five focused browser fixture/API cases. CPAL's Windows backend passes
+Windows-target type checking; this is not a full Windows application build.
+Physical Linux/Windows audio, pro-audio gear, hotplug and latency remain unverified.
+This does not add ASIO, exclusive WASAPI, or integer-format direct ALSA streams.
+
 Score creation now opens an instrument-preset modal with orchestral, keyboard,
 percussion and guitar choices, editable single/grand staff layout, clef,
 transposition and MIDI channel. Presets do not create synths or assign sounds.

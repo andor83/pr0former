@@ -4,7 +4,7 @@ import { api } from '../api'
 import type { GraphNode } from '../types'
 const props = defineProps<{node: GraphNode; sampleRate: number; disabled: boolean}>()
 const emit = defineEmits<{change: [parameters: Record<string, number>]}>()
-type Device = {id: number; name: string; channels: number | null; error?: string}
+type Device = {id: number; name: string; label?:string; channels: number | null; error?: string}
 const devices = ref<{input_interfaces: Device[]; interfaces: Device[]}>()
 const settings = ref<{input_interfaces: {id:number;enabled:boolean}[]; interfaces: {id:number;enabled:boolean}[]}>()
 const error = ref('')
@@ -23,7 +23,7 @@ const routes = computed(() => Array.from({length: props.node.channels}, (_, i) =
 const options = computed(() => Array.from({length: count.value || 64}, (_, i) => i + 1))
 async function refresh() {
   try {
-    const [d, s] = await Promise.all([api<NonNullable<typeof devices.value>>('/devices'), api<NonNullable<typeof settings.value>>('/system/audio')])
+    const [d, s] = await Promise.all([api<NonNullable<typeof devices.value>>('/devices'), api<NonNullable<typeof settings.value>>('/audio/config')])
     devices.value = d; settings.value = s; error.value = ''
   } catch (e) { error.value = String(e) }
 }
@@ -41,7 +41,7 @@ watch(() => props.sampleRate, refresh)
   <section class="parameter-row device-routing" aria-label="Physical channel routing">
     <div class="parameter-heading"><h3 aria-label="Channel routing">Channel routing<HelpNote label="Channel routing">{{input ? 'Each signal channel reads its chosen physical input. Reusing an input duplicates it; None produces silence.' : 'Signal channels sharing a destination are summed. Mix to stereo sends odd channels left and even channels right, and adjusts Output gain for headroom. Manual mappings retain the current gain.'}}<template v-if="selected.length > 1"><br /><br />This mapping applies to every enabled output interface. Destinations beyond an interface’s channel count are ignored.</template></HelpNote></h3><span class="small-tag">{{node.channels}} SIGNAL CHANNELS</span></div>
     <p v-if="!devices && !error" class="feature-note">Checking interface channels…</p>
-    <p v-for="device in selected" :key="device.id" class="feature-note">{{device.name}} · {{device.channels ? `${device.channels} physical ${input ? 'inputs' : 'outputs'} at ${sampleRate} Hz` : device.error || 'Channel count unavailable'}}</p>
+    <p v-for="device in selected" :key="device.id" class="feature-note">{{device.label||device.name}} · {{device.channels ? `${device.channels} physical ${input ? 'inputs' : 'outputs'} at ${sampleRate} Hz` : device.error || 'Channel count unavailable'}}</p>
     <p v-if="devices && !selected.length" class="feature-note">No available interface selected. Configure routes for physical channels 1–64; unavailable channels stay silent.</p>
 
     <p v-if="error" class="field-error" role="alert">{{error}}</p>

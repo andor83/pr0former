@@ -28,6 +28,7 @@ test('native channel routing persists mixdowns, none, high input channels and un
     input_interfaces:[{id:101,name:'64-channel input fixture',enabled:true}],
     interfaces:[{id:102,name:'Stereo output fixture',enabled:true}],
   }}))
+  await page.route('**/api/audio/config',route=>route.fulfill({json:{sample_rate:48000,block_size:128,input_interfaces:[{id:101,name:'64-channel input fixture',enabled:true}],interfaces:[{id:102,name:'Stereo output fixture',enabled:true}]}}))
   await page.goto('/')
   await page.getByRole('button',{name:'Choose project'}).click()
   await page.getByRole('button',{name:'Physical channel routing',exact:true}).click()

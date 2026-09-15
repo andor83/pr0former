@@ -1356,6 +1356,9 @@ fn device_config(
     rate: u32,
     input: bool,
 ) -> Result<cpal::StreamConfig, String> {
+    let route_channels = device.name().ok().filter(|name| name.starts_with("pulse:DEVICE="))
+        .and_then(|name|crate::linux_audio::route(&name,input))
+        .and_then(|v|v["channels"].as_u64()).map(|v|v as u16);
     let configs: Vec<_> = if input {
         device
             .supported_input_configs()
@@ -1371,6 +1374,7 @@ fn device_config(
         .into_iter()
         .filter(|c| {
             c.sample_format() == cpal::SampleFormat::F32
+                && route_channels.is_none_or(|channels|c.channels()==channels)
                 && (1..=MAX_DEVICE_CHANNELS).contains(&(c.channels() as usize))
                 && c.min_sample_rate().0 <= rate
                 && c.max_sample_rate().0 >= rate
@@ -1383,24 +1387,75 @@ fn device_details(rate: u32, input: bool) -> Vec<Value> {
     if native_disabled() {
         return vec![];
     }
-    let host = cpal::default_host();
-    let devices = if input {
-        host.input_devices()
-    } else {
-        host.output_devices()
-    };
-    devices
-        .map(|devices| {
-            devices
-                .filter_map(|device| {
-                    let name = device.name().ok()?;
-                    let config = device_config(&device, rate, input);
-                    Some(json!({"id":device_id(&name), "name":name,
-            "channels":config.as_ref().map(|c|c.channels).ok(), "error":config.err()}))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    // Keep metadata, not device handles: retaining ALSA handles can reserve
+    // physical PCMs. Single-flight caching prevents every browser refresh from
+    // repeatedly opening every device in both directions.
+    type Inventory = (Instant, u32, [Vec<Value>; 2]);
+    static CACHE: OnceLock<std::sync::Mutex<Option<Inventory>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    if cache.as_ref().is_none_or(|(at, r, _)| *r != rate || at.elapsed() >= Duration::from_secs(30)) {
+        let mut rows: [Vec<Value>; 2] = Default::default();
+        if let Ok(devices) = cpal::default_host().devices() {
+            let devices:Vec<_>=devices.collect();
+            let labels:Vec<_>=devices.iter().filter_map(|d|d.name().ok()).collect();
+            let saved=crate::settings::read();
+            for device in devices {
+                let Ok(label) = device.name() else { continue };
+                let Ok(name) = device_key(&device) else { continue };
+                for (index, direction) in [false, true].into_iter().enumerate() {
+                    // Unsupported directions are not selectable routes.
+                    let supported = if direction {device.supports_input()} else {device.supports_output()};
+                    if !supported { continue; }
+                    let previous:Vec<_>=if direction {saved.input_interfaces.iter().map(|i|(i.id,i.name.as_str())).collect()}
+                        else {saved.interfaces.iter().map(|i|(i.id,i.name.as_str())).collect()};
+                    let unique=labels.iter().filter(|n|**n==label).count()==1;
+                    let id=route_id(&name,&label,unique,&previous);
+                    let display=if !unique && name!=label {format!("{label} · {name}")}else{label.clone()};
+                    let config = device_config(&device, rate, direction);
+                    rows[index].push(json!({"id":id,"name":name,"label":display,"backend":if cfg!(target_os="windows"){"WASAPI (shared)"}else if cfg!(target_os="linux"){"ALSA"}else{"CoreAudio"},
+                        "channels":config.as_ref().map(|c|c.channels).ok(),"error":config.err()}));
+                }
+            }
+        }
+        #[cfg(target_os="linux")]
+        for route in crate::linux_audio::discover_routes() {
+            let name=route["name"].as_str().unwrap();
+            let input=route["input"].as_bool().unwrap();
+            let device:cpal::Device=cpal::platform::AlsaDevice::from_pcm_name(name).into();
+            let config=device_config(&device,rate,input);
+            rows[usize::from(input)].push(json!({"id":device_id(name),"name":name,"label":route["label"],
+                "backend":route["backend"],"channels":config.as_ref().map(|c|c.channels).ok(),"error":config.err()}));
+        }
+        *cache = Some((Instant::now(), rate, rows));
+    }
+    cache.as_ref().unwrap().2[usize::from(input)].clone()
+}
+
+fn device_key(device:&cpal::Device)->Result<String,String> {
+    #[cfg(target_os="windows")]
+    if let cpal::platform::DeviceInner::Wasapi(device)=device.as_inner() {
+        return device.endpoint_id().map(|id|format!("wasapi:{id}")).map_err(|e|e.to_string());
+    }
+    device.name().map_err(|e|e.to_string())
+}
+fn route_id(key:&str,label:&str,unique:bool,previous:&[(u32,&str)])->u32 {
+    previous.iter().find(|(_,name)|*name==key || (key.starts_with("wasapi:") && unique && *name==label))
+        .map(|(id,_)|*id).unwrap_or_else(||device_id(key))
+}
+fn selected_device(name:&str,input:bool)->Result<cpal::Device,String> {
+    #[cfg(target_os="linux")]
+    if name.starts_with("pulse:DEVICE=") || name.starts_with("hw:CARD=") {
+        if crate::linux_audio::route(name,input).is_none() {
+            return Err(format!("Selected route is unavailable; refresh devices: {name}"));
+        }
+        return Ok(cpal::platform::AlsaDevice::from_pcm_name(name).into());
+    }
+    let mut matching=cpal::default_host().devices().map_err(|e|e.to_string())?
+        .filter(|d|if input {d.supports_input()} else {d.supports_output()})
+        .filter(|d|device_key(d).ok().as_deref()==Some(name) || (!name.starts_with("wasapi:") && d.name().ok().as_deref()==Some(name)));
+    let device=matching.next().ok_or_else(||format!("Interface unavailable: {name}"))?;
+    if matching.next().is_some(){return Err(format!("Ambiguous interface name: {name}; select a specific endpoint in System settings"));}
+    Ok(device)
 }
 
 fn open_input(
@@ -1467,14 +1522,8 @@ pub fn input_devices() -> Vec<(u32, String)> {
     if native_disabled() {
         return vec![];
     }
-    cpal::default_host()
-        .input_devices()
-        .map(|ds| {
-            ds.filter_map(|d| d.name().ok())
-                .map(|name| (device_id(&name), name))
-                .collect()
-        })
-        .unwrap_or_default()
+    device_details(crate::settings::read().sample_rate, true).iter()
+        .filter_map(|d| Some((d["id"].as_u64()? as u32, d["name"].as_str()?.to_owned()))).collect()
 }
 fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, String> {
     let mut inputs = vec![];
@@ -1482,14 +1531,7 @@ fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, Strin
         if native_disabled() {
             return Err("Native devices are disabled by PR0_DISABLE_NATIVE_DEVICES".into());
         }
-        let device = cpal::default_host()
-            .input_devices()
-            .map_err(|e| e.to_string())?
-            .find(|d| {
-                d.name()
-                    .is_ok_and(|name| name == selected.name && device_id(&name) == selected.id)
-            })
-            .ok_or_else(|| format!("Input {} is unavailable", selected.name))?;
+        let device = selected_device(&selected.name,true)?;
         let errors = Arc::new(AtomicU64::new(0));
         let (stream, queue, channels) = open_input(device, settings.sample_rate, errors.clone())
             .map_err(|e| format!("Input {}: {e}", selected.name))?;
@@ -1507,6 +1549,14 @@ fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, Strin
 
 #[cfg(test)]
 mod input_startup_tests {
+    #[test]
+    fn endpoint_ids_survive_renames_and_legacy_upgrade_without_merging_duplicate_names() {
+        assert_eq!(super::route_id("wasapi:endpoint-a","Speakers",true,&[(42,"Speakers")]),42);
+        assert_eq!(super::route_id("wasapi:endpoint-a","Renamed",true,&[(42,"wasapi:endpoint-a")]),42);
+        assert_ne!(super::route_id("wasapi:endpoint-a","Speakers",false,&[(42,"Speakers")]),42);
+        assert_ne!(super::route_id("wasapi:endpoint-a","Speakers",false,&[]),super::route_id("wasapi:endpoint-b","Speakers",false,&[]));
+        assert_eq!(super::route_id("CoreAudio name","CoreAudio name",true,&[]),super::device_id("CoreAudio name"));
+    }
     #[test]
     fn no_selected_inputs_allows_engine_startup_without_opening_devices() {
         let mut settings = crate::settings::Settings::default();
@@ -1526,22 +1576,8 @@ pub fn output_devices() -> Vec<(u32, String)> {
     if native_disabled() {
         return vec![];
     }
-    cpal::default_host()
-        .output_devices()
-        .map(|ds| {
-            ds.filter_map(|d| d.name().ok())
-                .map(|name| {
-                    // Stable, exactly representable numeric route ID; zero is the all-enabled route.
-                    let id = name
-                        .bytes()
-                        .fold(2166136261_u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
-                        % 999999999
-                        + 1;
-                    (id, name)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    device_details(crate::settings::read().sample_rate, false).iter()
+        .filter_map(|d| Some((d["id"].as_u64()? as u32, d["name"].as_str()?.to_owned()))).collect()
 }
 struct Output {
     id: u32,
@@ -1576,11 +1612,7 @@ fn open_outputs(
         if native_disabled() {
             return Err("Native devices are disabled by PR0_DISABLE_NATIVE_DEVICES".into());
         }
-        let device = cpal::default_host()
-            .output_devices()
-            .map_err(|e| e.to_string())?
-            .find(|d| d.name().ok().as_deref() == Some(&selected.name))
-            .ok_or_else(|| format!("Interface unavailable: {}", selected.name))?;
+        let device = selected_device(&selected.name,false)?;
         let config = device_config(&device, settings.sample_rate, false)
             .map_err(|e| format!("{}: {e}", selected.name))?;
         let channels = config.channels as usize;
