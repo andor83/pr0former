@@ -61,7 +61,7 @@ fn inventory(app: &App, state: &State, id: &str, user: Option<&str>) {
         .get(id)
         .map(|local| local.devices.clone())
         .unwrap_or_default();
-    let server = server_ports();
+    let server = server_ports(app.config.native_devices);
     event(
         app,
         id,
@@ -70,8 +70,8 @@ fn inventory(app: &App, state: &State, id: &str, user: Option<&str>) {
         json!({"local":local,"server":server,"selected_set":state.selected.get(id)}),
     );
 }
-fn server_ports() -> Vec<String> {
-    if std::env::var_os("PR0_DISABLE_NATIVE_DEVICES").is_some() {
+fn server_ports(native_devices: bool) -> Vec<String> {
+    if !native_devices {
         return vec![];
     }
     midir::MidiInput::new("pr0former conductor inventory")
@@ -627,7 +627,7 @@ pub fn start(app: App, rx: Receiver<Message>) {
             }
             if ports_at.elapsed() >= Duration::from_secs(1) {
                 ports_at = Instant::now();
-                let available = server_ports();
+                let available = server_ports(app.config.native_devices);
                 let mut wanted = load(&app, &project)
                     .ok()
                     .map(|p| {
@@ -658,7 +658,7 @@ pub fn start(app: App, rx: Receiver<Message>) {
                 inputs.retain(|port, _| wanted.contains(port) && available.contains(port));
                 for port in wanted {
                     if !inputs.contains_key(&port) {
-                        match crate::node_io::open_input(&port) {
+                        match crate::node_io::open_input(app.config.native_devices, &port) {
                             Ok(input) => {
                                 inputs.insert(port, input);
                             }

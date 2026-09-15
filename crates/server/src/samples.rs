@@ -1,4 +1,10 @@
-use crate::{Api, App, bad, can_edit, csrf, load, role, user};
+use crate::{
+    Api, App, bad, can_edit,
+    config::RuntimeConfig,
+    csrf,
+    import::{ImportLimits, ImportSource},
+    internal, load, role, user,
+};
 use axum::{
     Json,
     extract::{Multipart, Path, State},
@@ -6,10 +12,8 @@ use axum::{
 };
 use serde_json::Value;
 
-pub fn directory(project: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into()))
-        .join("samples")
-        .join(project)
+pub fn directory(config: &RuntimeConfig, project: &str) -> std::path::PathBuf {
+    config.project_samples_dir(project)
 }
 pub async fn upload(
     State(app): State<App>,
@@ -40,75 +44,36 @@ pub async fn upload(
     let source = temporary.0.join("input");
     let converted = temporary.0.join("converted.wav");
     tokio::fs::write(&source, &bytes).await.map_err(bad)?;
-    let rate = crate::settings::read().sample_rate;
-    // fd is seekable but cannot open nested local files or network URLs from uploaded playlists.
-    let mut command = tokio::process::Command::new(
-        std::env::var_os("PR0_FFMPEG").unwrap_or_else(|| "ffmpeg".into()),
-    );
-    command
-        .kill_on_drop(true)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-threads",
-            "1",
-            "-protocol_whitelist",
-            "fd",
-            "-i",
-            "fd:",
-            "-map",
-            "0:a:0",
-            "-vn",
-            "-sn",
-            "-dn",
-            "-map_metadata",
-            "-1",
-            "-t",
-            "31",
-            "-ar",
-        ])
-        .arg(rate.to_string())
-        .args(["-c:a", "pcm_f32le", "-fs", "200000000", "-f", "wav"])
-        .arg(&converted)
-        .stdin(std::process::Stdio::from(
-            std::fs::File::open(&source).map_err(bad)?,
-        ));
-    let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
-        .await
-        .map_err(|_| bad("Audio conversion timed out"))?
-        .map_err(|e| bad(format!("FFmpeg is required for audio import: {e}")))?;
-    if !output.status.success() {
-        return Err(bad(format!(
-            "Audio conversion failed. Install FFmpeg with the fd protocol and select a supported audio file: {}",
-            String::from_utf8_lossy(&output.stderr)
-                .chars()
-                .take(600)
-                .collect::<String>()
-        )));
-    }
-    let wav = hound::WavReader::open(&converted).map_err(bad)?;
-    let spec = wav.spec();
-    let frames = wav.duration();
-    if !(1..=8).contains(&spec.channels) || frames == 0 || frames > rate * 30 {
-        return Err(bad("Use audio with 1–8 channels and at most 30 seconds"));
-    }
-    drop(wav);
+    drop(bytes);
+    let rate = crate::settings::read(&app.config).sample_rate;
+    // The runtime never discovers or launches a converter itself: it asks the
+    // capability the host installed. Decoding, resampling and WAV writing are
+    // CPU-bound and run on a blocking worker, never on an async executor and
+    // never anywhere near render or device callbacks.
+    let importer = app.config.importer.clone();
+    let limits = ImportLimits::for_rate(rate);
+    let input = ImportSource::file(&source);
+    let destination = converted.clone();
+    let channels = tokio::task::spawn_blocking(move || {
+        importer
+            .decode(&input, &limits)
+            .and_then(|audio| audio.write_wav(&destination).map(|()| audio.channels()))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(bad)?;
     let result = crate::sample_library::register(&app, &id, &u, &name, &converted, None).await?;
     let asset = result["asset"].as_u64().unwrap() as u32;
     let project = id.clone();
-    tokio::task::spawn_blocking(move || cache_asset(&project, asset, rate))
+    let config = app.config.clone();
+    tokio::task::spawn_blocking(move || cache_asset(&config, &project, asset, rate))
         .await
         .map_err(bad)?
         .map_err(bad)?;
     app.logs.push(
         &id,
         "info",
-        &format!(
-            "Imported sample {asset}: {rate} Hz float WAV, {} channels",
-            spec.channels
-        ),
+        &format!("Imported sample {asset}: {rate} Hz float WAV, {channels} channels"),
     );
     let _ = app
         .events
@@ -123,9 +88,9 @@ impl Drop for ImportDirectory {
 }
 
 /// Project-scoped numeric IDs never name arbitrary filesystem paths.
-pub fn validate_choices(project: &pr0_core::Project) -> Result<(), String> {
+pub fn validate_choices(config: &RuntimeConfig, project: &pr0_core::Project) -> Result<(), String> {
     for choice in project.graph.nodes.iter().flat_map(|n| &n.sample_choices) {
-        if !directory(&project.id)
+        if !directory(config, &project.id)
             .join(format!("{}.wav", choice.asset))
             .is_file()
         {
@@ -138,16 +103,20 @@ pub fn validate_choices(project: &pr0_core::Project) -> Result<(), String> {
     Ok(())
 }
 
-pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
-    let rate = crate::settings::read().sample_rate;
-    crate::settings::validate_routes(project, &crate::settings::read())?;
-    validate_choices(project)?;
-    cache_project(project, rate)?;
+pub fn prepare(
+    config: &RuntimeConfig,
+    project: &pr0_core::Project,
+) -> Result<pr0_dsp::Engine, String> {
+    let settings = crate::settings::read(config);
+    let rate = settings.sample_rate;
+    crate::settings::validate_routes(project, &settings)?;
+    validate_choices(config, project)?;
+    cache_project(config, project, rate)?;
     let mut engine = pr0_dsp::Engine::prepare(project.graph.clone(), rate as f64)?;
-    crate::scripts::prepare(&mut engine, &project.graph, crate::settings::read().block_size)?;
+    crate::scripts::prepare(&mut engine, &project.graph, settings.block_size)?;
     let (beats, unit) = project.initial_meter();
     engine.set_meter(beats, unit);
-    crate::loops::restore(project, &mut engine)?;
+    crate::loops::restore(&config.loops_dir(), project, &mut engine)?;
     let mut total = 0;
     let shortlist: std::collections::BTreeSet<u32> = project
         .graph
@@ -182,7 +151,7 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
             assets.insert(default_asset);
         }
         for asset in assets {
-            let mut reader = hound::WavReader::open(cache_path(&project.id, asset, rate))
+            let mut reader = hound::WavReader::open(cache_path(config, &project.id, asset, rate))
                 .map_err(|e| format!("Sample {asset}: {e}"))?;
             let spec = reader.spec();
             if node.kind == "convolution_reverb" {
@@ -260,12 +229,16 @@ pub fn prepare(project: &pr0_core::Project) -> Result<pr0_dsp::Engine, String> {
     Ok(engine)
 }
 
-fn cache_path(project: &str, asset: u32, rate: u32) -> std::path::PathBuf {
-    directory(project).join(format!("{asset}-{rate}-v1.wav"))
+fn cache_path(config: &RuntimeConfig, project: &str, asset: u32, rate: u32) -> std::path::PathBuf {
+    directory(config, project).join(format!("{asset}-{rate}-v1.wav"))
 }
-pub fn cache_project(project: &pr0_core::Project, rate: u32) -> Result<(), String> {
+pub fn cache_project(
+    config: &RuntimeConfig,
+    project: &pr0_core::Project,
+    rate: u32,
+) -> Result<(), String> {
     let mut assets = std::collections::BTreeSet::new();
-    if let Ok(entries) = std::fs::read_dir(directory(&project.id)) {
+    if let Ok(entries) = std::fs::read_dir(directory(config, &project.id)) {
         for entry in entries {
             let path = entry.map_err(|e| e.to_string())?.path();
             if path.extension().and_then(|s| s.to_str()) == Some("wav") {
@@ -291,16 +264,22 @@ pub fn cache_project(project: &pr0_core::Project, rate: u32) -> Result<(), Strin
         }
     }
     for asset in assets {
-        cache_asset(&project.id, asset, rate)?;
+        cache_asset(config, &project.id, asset, rate)?;
     }
     Ok(())
 }
-pub(crate) fn cache_asset(project: &str, asset: u32, rate: u32) -> Result<(), String> {
-    let dest = cache_path(project, asset, rate);
+pub(crate) fn cache_asset(
+    config: &RuntimeConfig,
+    project: &str,
+    asset: u32,
+    rate: u32,
+) -> Result<(), String> {
+    let dest = cache_path(config, project, asset, rate);
     if dest.exists() {
         return Ok(());
     }
-    let mut reader = hound::WavReader::open(directory(project).join(format!("{asset}.wav")))
+    let mut reader =
+        hound::WavReader::open(directory(config, project).join(format!("{asset}.wav")))
         .map_err(|e| e.to_string())?;
     let spec = reader.spec();
     let raw: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {

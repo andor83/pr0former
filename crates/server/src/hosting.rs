@@ -1,4 +1,6 @@
-//! Opt-in desktop HTTPS hosting. TLS preparation and discovery stay off audio threads.
+//! Opt-in local-network HTTPS hosting for embedded runtimes. TLS preparation
+//! and discovery stay off audio threads, and the certificate directory comes
+//! from the host's typed configuration rather than the process environment.
 use axum::{
     Router,
     http::{StatusCode, header},
@@ -165,9 +167,16 @@ fn private_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-pub async fn start(router: Router, desktop_token: String, port: u16) -> Result<Hosting, String> {
-    let directory =
-        PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into())).join("hosting");
+/// `private_token` is the embedded owner's session: LAN clients presenting it
+/// are rejected, so the private identity can never leave the loopback listener.
+pub async fn start(
+    config: &crate::config::RuntimeConfig,
+    router: Router,
+    private_token: String,
+    port: u16,
+) -> Result<Hosting, String> {
+    let directory = config.hosting_dir();
+    let discovery = config.discovery;
     let certs = tokio::task::spawn_blocking(move || certificates(&directory))
         .await
         .map_err(|e| e.to_string())??;
@@ -259,7 +268,7 @@ pub async fn start(router: Router, desktop_token: String, port: u16) -> Result<H
                     .and_then(|v| v.to_str().ok())
                     .is_some_and(|cookie| {
                         cookie.split(';').any(|part| {
-                            part.trim().strip_prefix("pr0_session=") == Some(desktop_token.as_str())
+                            part.trim().strip_prefix("pr0_session=") == Some(private_token.as_str())
                         })
                     });
                 async move {
@@ -296,7 +305,7 @@ pub async fn start(router: Router, desktop_token: String, port: u16) -> Result<H
     let setup = tokio::spawn(async move {
         let _ = axum::serve(setup_listener, setup_router).await;
     });
-    let discovery = crate::discovery::advertise(address, true);
+    let discovery = crate::discovery::advertise(address, true, discovery);
     Ok(Hosting {
         status: json!({"enabled":true,"url":url,"setup_url":format!("http://{}.local:{setup_port}",certs.hostname),"port":address.port(),"ca_path":certs.ca_path,"ca_fingerprint":fingerprint,"server_fingerprint":server_fingerprint}),
         handle,

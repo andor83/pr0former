@@ -118,7 +118,7 @@ Local audio input starts the shared WebRTC/Opus microphone session automatically
 
 SQLite uses WAL and foreign keys. Tables hold users, expiring sessions, projects, memberships, invitation tokens, and revision snapshots. Each project update checks an expected change counter (`Project.revision`) and atomically replaces its working copy. Saved revision history is separate and coalesces edits into a snapshot once per minute or on manual save. Stale edits return HTTP 409. Project updates broadcast to authorized WebSocket subscribers. Each connection subscribes before loading and sending the current project snapshot; broadcast-queue overflow also sends a fresh snapshot. Browsers ignore older revisions and stale socket callbacks, preserving the current stage view and part selection through reconnects.
 
-Current collaboration is optimistic revision-based; fine-grained edit leases and separate published performance revisions remain pending. Owners can add an existing enabled account directly or create a single-use invitation valid for seven days. Removing a non-owner membership atomically clears that user's part assignments, advances the project working revision when assignments changed, and closes that user's project monitor. User avatars are stored in SQLite and server-normalized to center-cropped 256×256 PNGs; users can currently change only their own avatar. The first account bootstraps without an invite; subsequent account registration requires an unused invitation. Tokens are random and passwords use Argon2. Session cookies are HttpOnly/SameSite=Strict and Secure when native HTTPS is enabled. Mutating API requests require `X-Pr0former: 1`; WebSocket requests require a same-origin Origin.
+Current collaboration is optimistic revision-based; fine-grained edit leases and separate published performance revisions remain pending. Owners can add an existing enabled account directly or create a single-use invitation valid for seven days. Removing a non-owner membership atomically clears that user's part assignments, advances the project working revision when assignments changed, and closes that user's project monitor. User avatars are stored in SQLite and server-normalized to center-cropped 256×256 PNGs; users can currently change only their own avatar. The first account bootstraps without an invite; subsequent account registration requires an unused invitation. Tokens are random and passwords use Argon2. Session cookies are HttpOnly/SameSite=Strict and Secure when native HTTPS is enabled. Mutating API requests require `X-Pr0former: 1`; WebSocket requests require a same-origin Origin. Every response the runtime serves — API, WebSocket upgrade, static interface, and every rejection — carries `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a `Referrer-Policy` floor of `same-origin`, applied as one layer after all routes and the fallback are registered, because axum's `Router::layer` wraps only the routes that already exist when it is called. A handler may set a stricter value: the one-time session handoff sets `Referrer-Policy: no-referrer`, since its single-use path is itself the credential.
 
 ## HTTP and realtime contracts
 
@@ -127,6 +127,7 @@ All paths below are under `/api`:
 | Endpoint | Purpose |
 |---|---|
 | `GET status`, `GET catalog` | Bootstrap/server status and node descriptors |
+| `GET /__session-bootstrap/{token}` | Embedded runtimes only: one-time private-owner session handoff to the owning application's own webview. Never registered on the hosting router or in server mode. |
 | `POST register/login/logout`, `GET/PUT me` | Local authentication |
 | `GET/POST projects`, `POST projects/import` | List/create projects; atomically validate and import a portable project as a new owned project |
 | `GET/PUT projects/:id` | Load/update with revision check |
@@ -137,7 +138,7 @@ All paths below are under `/api`:
 | `POST projects/:id/invite`, `POST join` | Invitation creation/redemption |
 | `GET/POST projects/:id/members`, `DELETE projects/:id/members/:user` | Browse, add and remove project membership |
 | `GET projects/:id/members/candidates`, `GET/PUT users/:id/avatar` | Existing-user selection and normalized profile avatars |
-| `GET/POST projects/:id/samples` | List project samples / import audio through FFmpeg |
+| `GET/POST projects/:id/samples` | List project samples / import audio through the host's configured importer |
 | `GET devices`, `POST projects/:id/audio` | Native device discovery and input/output enablement |
 | `GET/POST/DELETE projects/:id/media` | Connected input identities, WebRTC SDP negotiation and disconnect |
 | `WS projects/:id/events` | Project revisions, timing, and telemetry |
@@ -348,7 +349,15 @@ SQLite `sample_library` stores ownership, origin project, editable name/descript
 
 The sidebar lists only the current project's associations. The full browser lists samples owned by the signed-in user or marked global. Audio and metadata endpoints require project membership plus sample ownership, global visibility or an existing association with that project. Project association preserves access for all members, even after global sharing is removed. The sample owner or editors of its origin project can edit metadata; only its owner can change global visibility. Metadata uses a separate optimistic revision check and does not mutate graph undo/history. Audio is immutable, so imported project copies remain stable.
 
-FFmpeg is a runtime/setup dependency with the seekable `fd` input protocol. Upload conversion reads only its supplied file descriptor, with nested file/network protocols excluded. The first audio stream becomes 32-bit float WAV at the current configured engine sample rate; channel count is preserved. Uploads remain limited to 64 MB, 30 seconds and 1–8 channels. Conversion is serialized under the setup lock, runs in a separate child process with a 60-second timeout and bounded output size, and never runs in DSP/device callbacks. Original compressed upload bytes are temporary; the normalized WAV master is retained. Existing rate-cache preparation remains off-thread.
+Audio import is a host-owned capability, not a hard-coded converter path. `RuntimeConfig` carries an `Arc<dyn AudioImporter>`; the runtime never discovers or launches a converter itself. The trait takes one already-received local blob or file and returns interleaved finite `f32` at the configured engine sample rate with 1–8 channels and at most 30 seconds, which upload writes as the canonical 32-bit float WAV the catalog and DSP caches already read. Every ceiling — input bytes, source rate, channel count, decoded frames, decoded memory, converter timeout and converter output bytes — is an explicit field checked against the declared stream before a decoded buffer is allocated and again before each buffer grows.
+
+The standalone server and the desktop application install a chain: the pure-Rust in-process decoder first, then their configured FFmpeg. An embedded or mobile host installs the pure-Rust decoder alone and involves no executable; a host with no import capability installs none and upload reports the missing capability. A chain falls through only when an importer reports that it does not know the container or codec. Limit violations, policy violations, corrupt data and converter failures stop the chain where they happened, so a file one decoder refused is never handed to another.
+
+The pure-Rust decoder is a pinned Symphonia release with an explicit conservative feature set (no system library, no C cross-build, iOS-compilable). It covers WAV (PCM, IEEE float, ADPCM), AIFF/AIFF-C, CAF, FLAC, MP3, MP4/M4A (AAC-LC, ALAC), ADTS AAC and Ogg (Vorbis, FLAC). It identifies the container from the bytes rather than the upload's filename, selects the first audio track and ignores video/subtitle/metadata tracks, converts interleaved samples to `f32`, and resamples to the project rate with the same offline windowed-sinc path the rate caches use. MKV/WebM, Opus and MPEG Layer I/II are deliberately not enabled.
+
+The retained FFmpeg importer keeps its full hardening: the child reads only its supplied file descriptor with `fd` as the sole whitelisted protocol, so an uploaded playlist cannot reach another local file or a network URL; exactly the first audio stream is mapped and video/subtitle/data/metadata are dropped; duration, written bytes, thread count and a 60-second wall-clock timeout bound the process, which is killed when it overruns; and failures carry the converter's own diagnostics. It is compiled only for targets that can spawn a process — iOS/iPadOS and Android exclude the module entirely — so on those hosts `import::standard` yields the in-process chain whatever converter name it is given, and no configuration can reach a child process.
+
+Uploads remain limited to 64 MB, 30 seconds and 1–8 channels, and import remains serialized under the setup lock. Decoding, resampling and WAV writing run on blocking workers, never on an async executor and never in DSP/device callbacks. Original compressed upload bytes are temporary; the normalized WAV master is retained. Existing rate-cache preparation remains off-thread.
 
 Browser preview is local audition audio independent of show transport: sidebar/full-browser buttons play at most three seconds, while the metadata modal decodes the complete waveform for every channel and supports full playback and seeking. Native output routing and hardware-clock timing are not claimed for these browser previews.
 
@@ -437,29 +446,53 @@ These implementations have synthetic/reference and graph/browser validation, not
 
 ## Desktop distribution
 
-The independent `desktop/src-tauri` workspace packages the existing server as a
-sidecar and serves the same Vue build. Desktop startup binds `127.0.0.1:0`,
+The independent `desktop/src-tauri` workspace embeds the shared application
+runtime (`pr0_runtime`, the library target of the `pr0-server` package) in its
+own process and serves the same Vue build; it repeats the repository's vendored
+CPAL patch so both hosts build the same device layer. It is organized as a Tauri
+2 library entry point (`run()` in `src/lib.rs`) with a thin desktop launcher, so
+menus, the connection chooser, certificate pinning, window layouts, discovery
+browsing, the hosting dialog, the profile lock and the bundled converter are all
+compiled behind `cfg(desktop)`; an iOS/iPadOS host module sits beside them, and
+it now compiles, links and packages for an iOS simulator target, and a launched
+simulator application reaches its interface, creates a project, opens and closes
+CoreAudio output across background/foreground cycles (see
+`docs/IPAD_RUNTIME_PLAN.md` and STATUS; no physical device has been run). FFmpeg remains the one
+bundled external binary, now reached only for formats the in-process decoder
+does not cover, and is referenced only by the desktop host. Desktop startup binds `127.0.0.1:0`,
 ignores bind/TLS overrides, and creates a persistent local owner only in a fresh
 or previously initialized desktop database. A `desktop_owner` identity mapping
-is created only in desktop mode. It never upgrades an existing server user into
-an administrator. A random expiring session crosses the private stdout pipe and
-is installed as an HttpOnly cookie by the native shell. `/api/me` identifies this
+is created only in embedded mode. It never upgrades an existing server user into
+an administrator. A random expiring session is returned in process. The
+shell never handles it: the runtime publishes a one-time
+`/__session-bootstrap/<token>` URL on its private Host-guarded loopback
+listener, the shell navigates its webview there exactly once, and the runtime
+replies with the same HttpOnly/SameSite=Strict session cookie login issues plus
+a `303` redirect to `/`. The token is two v4 UUIDs, compared in constant time,
+single use, bounded to eight attempts and two minutes, revoked by shutdown, and
+never added to the router local-network hosting serves or to a standalone
+server. This replaced host-side `WebviewWindow::set_cookie`, which aborts the
+process on iOS. `/api/me` identifies this
 exact session as `is_desktop_session`; its account menu disables Sign out and the logout API
 refuses to revoke it. Ordinary logout preserves this private session, while app
 shutdown revokes it. User creation, invitations, remote sign-out and project
 authorization remain available. The performance frontend has no Tauri capabilities. Host checks restrict requests
-to the assigned loopback authority. Frontend and FFmpeg locations can be set with
-`PR0_WEB_ROOT` and `PR0_FFMPEG` while standalone defaults remain unchanged.
+to the assigned loopback authority. The desktop passes its data, recordings and
+frontend locations to the runtime as typed configuration, and installs an
+importer built from its bundled converter path rather than passing a path the
+runtime would have to interpret; the standalone server still reads
+`PR0_WEB_ROOT` and `PR0_FFMPEG` with unchanged defaults.
 
 Opt-in desktop hosting adds a separate HTTPS LAN listener over the same router
-and engine. Private pipe commands start/stop it; remote webviews have no hosting
+and engine. The hosting dialog's native command starts/stops it directly on the
+in-process runtime handle; remote webviews have no hosting
 capability. The LAN listener rejects the launcher's private session and preserves
 normal account/project authorization. A persistent profile-local CA signs host
 certificates; a separate HTTP listener serves only public certificate bootstrap
 resources. Certificate generation, TLS, mDNS advertisement and discovery run off
 audio threads. The local listener remains private and available when hosting stops.
-A future iPad Tauri shell is client-only and must omit the server sidecar and host
-controls; no mobile build is supplied here.
+A future iPad Tauri shell would embed the same runtime; see
+`docs/IPAD_RUNTIME_PLAN.md`. No mobile build is supplied here.
 
 Packaged connection/hosting dialogs have narrowly scoped native permissions and
 validate their actual local origin. Performance webviews have no native IPC
@@ -469,10 +502,13 @@ trust store is unchanged. Native window metadata is derived from the current
 server/project URL and saved outside project state; same-project windows copy
 only that server's cookies. Remote sessions use private storage.
 
-The launcher owns a per-profile OS file lock and child stdin. Pipe EOF requests a
-new orchestration Shutdown command; outside render/device callbacks, it closes
-devices, releases notes, finalizes loops/recordings and waits for disk barriers.
-The launcher bounds its exit wait at 30 seconds. No DSP scheduling or device
+The launcher holds a per-profile OS file lock for the application's lifetime and
+owns the runtime handle. Quitting calls the runtime's one ordered shutdown, which
+stops listeners, drops hosting and mDNS, then issues the orchestration Shutdown
+command; outside render/device callbacks, it closes
+devices, releases notes, finalizes loops/recordings and waits for disk barriers,
+and finally revokes the private session. The launcher bounds its exit wait at 30
+seconds and has no process to terminate if that is exceeded. No DSP scheduling or device
 callback work moves into the webview. Profile data and recordings live outside
 the application bundle. `build.sh` builds the native macOS/Linux host target and
 forwards Git Bash on Windows to `build.ps1`; the PowerShell entry point builds the
@@ -511,6 +547,49 @@ not an instantaneous physical-disconnect guarantee. Presence lives entirely in
 server memory and is neither project data nor undo history.
 
 ## Device discovery and playback continuity
+
+### Two device models
+
+The runtime supports two platform device models behind one boundary in
+`crates/server/src/native_audio.rs`, selected at compile time.
+
+*Enumerated devices* — macOS, Linux, Windows and the standalone server — are
+unchanged: the machine has a list of physical endpoints, each is asked what
+formats it supports, and a performer may enable any number of them in either
+direction.
+
+*Logical routes* — iOS/iPadOS — present exactly one output route and one input
+route with fixed identities (`ios:default-output`, `ios:default-input`) and
+stable numeric IDs derived from those names, so a saved choice and its latency
+compensation survive a reboot and a change of physical route. Channel counts and
+the current rate come from the host's `AudioRoutes` capability, which reads
+`AVAudioSession`; resolution goes straight to CPAL's default device. Nothing on
+that path enumerates devices or asks CPAL what a device supports, and the
+enumerating code is not compiled for the target at all.
+
+That is a correctness requirement. CPAL's iOS backend answers
+`supported_input_configs` by constructing a RemoteIO audio unit and calling
+`AudioUnitInitialize`, and AudioToolbox `abort()`s the process when that call's
+RPC to the audio server times out — so merely listing devices to fill a settings
+page could kill the application, and did. See `docs/IPAD_RUNTIME_PLAN.md`
+Phase 5.
+
+### Native capture authorization
+
+Two typed capability questions gate a native input, in this order and both away
+from any callback: `CaptureSupport` — whether the host's audio backend can open
+capture at all — and then `CaptureAuthorization` (granted, denied, restricted,
+undetermined, or not required on platforms that do not gate it). A permission is
+requested when a performer enables a capture route, never at launch and never
+when the backend cannot record; the request does not block, so the attempt that
+triggered it reports "not granted yet" and the next one proceeds. Discovery
+never enables a capture route by itself. The iOS host currently reports
+`CaptureSupport::Unimplemented`, so native input is refused with that sentence,
+no microphone prompt is produced, and the `playAndRecord` category is never
+selected. Hosts on enumerating platforms install no capability and are
+unaffected.
+
+### Inventory refresh
 
 Audio/MIDI inventory enumeration runs in a blocking-pool task on the HTTP side,
 not on the audio orchestration worker. GET /api/devices combines that inventory
@@ -803,3 +882,108 @@ shared presentation state. Preparation permits editors to rehearse ordinary cues
 locked performances preserve conductor cue authority. The native control worker's
 poll and external transport are best effort, not a physical timing guarantee.
 See [conducted MIDI usage](CONDUCTED_MIDI.md) and STATUS for validation limits.
+
+## Audio hardware suspension and the iOS session (2026-09-15)
+
+`RuntimeHandle` carries one platform-lifecycle control shared by every host:
+`suspend_audio` closes the native output and input streams, and `resume_audio`
+reopens them. Both are idempotent, and both are also available as
+`suspend_audio_blocking`/`resume_audio_blocking` for a host that has to complete
+a transition on an operating-system callback thread with no async runtime.
+`audio_suspended` reports the current state, which `/api/devices` and engine
+telemetry also publish as `audio_suspended`.
+
+The transition happens on the orchestration worker, between DSP blocks, through
+the same ordered command queue as engine enablement and shutdown; it adds
+nothing to `Engine::render` or to a device callback. Suspension closes the
+streams and stops rendering: it does not fall back to the software schedule, so
+the engine sample clock, transport position, prepared graph, node routing, loop
+buffers and open recordings are exactly where resume finds them, and a
+backgrounded application does not advance a silent performance against the wall
+clock.
+
+The worker keeps a standing hardware *intent* rather than a snapshot of what was
+open when the system interrupted. Suspension does not change it; enabling or
+disabling the engine sets both directions, and the hardware-output toggle sets
+one, whether or not a device can be touched at that moment. Resume reconciles:
+it opens whichever wanted direction is closed, and only those. So enabling the
+engine while the hardware is closed is honoured by the next resume; hardware
+output stopped while suspended stays closed; hardware output requested while
+suspended is opened; and an owner who never enabled the engine is never started
+by a lifecycle event. The two directions are opened independently on resume — a
+capture device the system will not hand back does not also keep the loudspeaker
+closed — while engine enablement keeps its existing all-or-nothing rule. A
+failed open leaves the intent set, so a repeated resume or the next foreground
+retries it, which is also how a stream that failed under a route that vanished
+reopens on its replacement. Deactivating a show withdraws the capture intent
+along with the capture it closes, so nothing reopens a microphone for a runtime
+with no project loaded, and shutdown withdraws both. A device that refuses to
+reopen leaves the runtime resumed and reports a device error rather than leaving
+it suspended. After shutdown a suspend request is satisfied and a resume request
+reports that there is nothing to resume; a transition that loses a race with
+shutdown is answered the same way rather than reporting a lost channel.
+Standalone-server and desktop behavior is unchanged: neither host calls these
+methods, and no listener, HTTP route, database or private session is touched by
+one.
+
+`pr0_runtime::audio_preferences` reads the saved sample rate, block size and
+whether any native input is enabled, without opening a device or starting an
+engine, so a host can prepare platform audio before the runtime opens anything.
+`RuntimeConfig::audio_policy` is the same decision as a capability: an optional
+`AudioPolicy` the orchestration worker calls immediately before it opens a
+native stream, with the exact settings it is about to open with. It exists
+because the recording category has to follow an actually enabled input, and a
+performer can enable one in the running application — a host-side read at launch
+would open that input against a playback-only session. It runs on the
+orchestration worker, never in a render or device callback, and a failure is
+reported rather than fatal. Only the iOS host supplies one.
+
+`RuntimeConfig::audio_routes` is the second iOS capability: an optional
+`AudioRoutes` that answers what the platform's current route carries, whether
+the host's audio backend can open capture at all (`CaptureSupport`), and what
+the user has decided about the microphone (`CaptureAuthorization`), plus a
+non-blocking request for that decision. The iOS host answers all of it from
+`AVAudioSession` — property reads and a permission read, never an audio unit.
+Its input-related reads are themselves gated on capture support, because on
+iPadOS 26.5 asking `AVAudioSession` about input availability is enough to put
+the microphone prompt on screen, and an application that cannot record must not
+ask. Every other host installs no capability and keeps enumerating devices
+exactly as before.
+
+The session category follows all four facts — a backend that can record, an
+enabled input, a permitting authorization and a connected input route — rather
+than the saved settings alone. That is not tidiness: with `playAndRecord`
+installed, initializing RemoteIO on an iPadOS 26.5 simulator logs
+`Initialize: RPC timeout. Apparently deadlocked. Aborting now.` and `abort()`s,
+and it did so while opening the *output* stream. Selecting the recording
+category is therefore what costs playback too, so it is selected only when
+capture is genuinely going to be opened.
+
+The Tauri iOS/iPadOS shell uses both. `desktop/src-tauri/src/audio_session.rs`
+installs an `AVAudioSession` policy before the runtime can open a device —
+`playback`, or `playAndRecord` with speaker/Bluetooth-A2DP/AirPlay options when
+the saved settings enable a native input, with the default mode, the engine's
+configured sample rate as the preferred rate and its block as the preferred I/O
+buffer duration. Selecting the recording category from an actually enabled input
+keeps the microphone prompt attached to a feature in use. It then observes four
+system events for the life of the process: an interruption beginning suspends
+the hardware and an interruption ending resumes it when the system asks for a
+resume; losing the current route reopens the streams on the replacement route
+rather than pausing, because this is an instrument under the performer's control
+and the shell has no resume affordance; a media-services reset reconfigures the
+session and reopens; and leaving the foreground suspends and deactivates the
+session while becoming active reapplies the policy and resumes. Each handler
+completes its transition before returning, inside bounded deadlines (two seconds
+to close, three to reopen), so a background event cannot be overtaken by an
+earlier resume and the hardware is actually closed inside the window iOS allows.
+Nothing reopens the hardware while the application is not in the foreground.
+Application exit runs the runtime's ordered shutdown first and only then hands
+the session back.
+
+There is deliberately no background-audio entitlement and no keep-awake policy,
+so leaving the foreground stops audio. The policy decisions are unit tested on a
+build machine and the whole bridge is compiled for the iOS targets; a simulator
+run has exercised startup configuration and three background/foreground
+suspend/resume cycles. No interruption, route change, media-services reset or
+physical audio has been observed on an iPad, and none of this establishes iPad
+audio latency, route behavior or reliability.

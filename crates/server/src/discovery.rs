@@ -67,8 +67,10 @@ fn service(socket: SocketAddr, https: bool, hostname: &str) -> Result<ServiceInf
     Ok(info)
 }
 
-pub fn advertise(socket: SocketAddr, https: bool) -> Option<Advertisement> {
-    if socket.ip().is_loopback() || std::env::var("PR0_DISCOVERY").as_deref() == Ok("0") {
+/// `enabled` is the host's typed discovery capability (`RuntimeConfig::discovery`),
+/// not an environment lookup. Loopback listeners are never advertised.
+pub fn advertise(socket: SocketAddr, https: bool, enabled: bool) -> Option<Advertisement> {
+    if socket.ip().is_loopback() || !enabled {
         return None;
     }
     let result = (|| -> Result<Advertisement, String> {

@@ -1,28 +1,11 @@
+//! Opt-in local-network hosting, controlled directly on the embedded runtime.
+//!
+//! The dialog's command calls `RuntimeHandle::host_on_lan`/`stop_hosting`/
+//! `hosting_status` in process. There is no control pipe, pending-reply bridge
+//! or cached status any more: every answer is the runtime's own current state.
 use serde_json::{Value, json};
-use std::{
-    io::Write,
-    sync::{Mutex, mpsc},
-    time::Duration,
-};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-pub struct Bridge {
-    status: Mutex<Value>,
-    pending: Mutex<Option<mpsc::Sender<Value>>>,
-}
-pub fn start(app: &AppHandle) {
-    app.manage(Bridge {
-        status: Mutex::new(json!({"enabled":false})),
-        pending: Mutex::new(None),
-    });
-}
-pub fn reply(app: &AppHandle, status: Value) {
-    let bridge = app.state::<Bridge>();
-    *bridge.status.lock().unwrap() = status.clone();
-    if let Some(sender) = bridge.pending.lock().unwrap().take() {
-        let _ = sender.send(status);
-    }
-}
 fn allowed(window: &WebviewWindow) -> bool {
     if window.label() != "hosting" {
         return false;
@@ -65,47 +48,18 @@ pub async fn hosting_control(
     if !allowed(&window) {
         return Err("Open hosting settings from the desktop Server menu.".into());
     }
-    let bridge = app.state::<Bridge>();
-    let Some(enabled) = enabled else {
-        return Ok(bridge.status.lock().unwrap().clone());
-    };
-    let (sender, receiver) = mpsc::channel();
-    {
-        let mut pending = bridge.pending.lock().unwrap();
-        if pending.is_some() {
-            return Err("A hosting change is already in progress.".into());
-        }
-        *pending = Some(sender);
-    }
-    let sent = (|| -> Result<(), String> {
-        let server = app
-            .try_state::<crate::SharedServer>()
-            .ok_or("The bundled engine is still starting.")?;
-        let mut server = server.lock().map_err(|e| e.to_string())?;
-        let stdin = server
-            .child
-            .as_mut()
-            .and_then(|child| child.stdin.as_mut())
-            .ok_or("The bundled engine is not running.")?;
-        writeln!(
-            stdin,
-            "{}",
-            json!({"hosting":enabled,"port":port.unwrap_or(8443)})
-        )
-        .and_then(|_| stdin.flush())
-        .map_err(|e| e.to_string())
-    })();
-    if let Err(error) = sent {
-        bridge.pending.lock().unwrap().take();
-        return Err(error);
-    }
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        receiver.recv_timeout(Duration::from_secs(30))
+    // Resolved before awaiting: Tauri's state borrow must not be held across an
+    // await point.
+    let runtime = crate::runtime::engine(&app)?;
+    Ok(match enabled {
+        // The dialog opens with `null` to read the current state.
+        None => runtime.hosting_status().await,
+        Some(false) => runtime.stop_hosting().await,
+        // A refused port or certificate failure is reported in the dialog
+        // rather than as a command error, so the toggle stays usable.
+        Some(true) => match runtime.host_on_lan(port.unwrap_or(8443)).await {
+            Ok(status) => status,
+            Err(error) => json!({"enabled": false, "error": error}),
+        },
     })
-    .await;
-    bridge.pending.lock().unwrap().take();
-    match result {
-        Ok(Ok(status)) => Ok(status),
-        _ => Err("Hosting did not respond. Reopen this dialog to check its status.".into()),
-    }
 }

@@ -97,7 +97,7 @@ async fn stop(app: &App, project: &str) -> Result<(), String> {
     let (tx, rx) = oneshot::channel();
     enqueue(
         app,
-        audio::Command::Enable(project.into(), false, settings::read(), tx),
+        audio::Command::Enable(project.into(), false, settings::read(&app.config), tx),
     )
     .await?;
     // Enable(false) closes devices and flushes loop/archive writers before replying.

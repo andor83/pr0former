@@ -307,7 +307,9 @@ pub async fn save(
     for asset in assets {
         bytes.push((
             asset,
-            tokio::fs::read(crate::samples::directory(&project).join(format!("{asset}.wav")))
+            tokio::fs::read(
+                crate::samples::directory(&app.config, &project).join(format!("{asset}.wav")),
+            )
                 .await
                 .map_err(|_| {
                     bad(format!(
@@ -413,7 +415,7 @@ pub async fn insert(
             let mut linked = Vec::new();
             let mut fallback = Vec::new();
             for (i, (sample, _, bytes)) in crate::sample_library::BUNDLED_KIT.iter().enumerate() {
-                match crate::sample_library::attach(&db, &project, sample) {
+                match crate::sample_library::attach(&app.config, &db, &project, sample) {
                     Ok(asset) => linked.push((bundled_placeholder(i), asset)),
                     Err(_) => fallback.push((bundled_placeholder(i), bytes.to_vec())),
                 }
@@ -496,14 +498,15 @@ pub async fn insert(
     let mut written = vec![];
     let result: Api<Json<pr0_core::Project>> = async {
         if !assets.is_empty() {
-            tokio::fs::create_dir_all(crate::samples::directory(&project))
+            tokio::fs::create_dir_all(crate::samples::directory(&app.config, &project))
                 .await
                 .map_err(internal)?;
         }
         for (old, bytes) in assets {
             let (asset, mut file, path) = loop {
                 let asset = (uuid::Uuid::new_v4().as_u128() % 999999999 + 1) as u32;
-                let path = crate::samples::directory(&project).join(format!("{asset}.wav"));
+                let path =
+                    crate::samples::directory(&app.config, &project).join(format!("{asset}.wav"));
                 match tokio::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)

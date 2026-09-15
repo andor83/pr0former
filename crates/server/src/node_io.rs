@@ -77,7 +77,10 @@ pub struct Outputs {
     error: Arc<Mutex<Option<String>>>,
 }
 impl Outputs {
-    pub fn new(osc: Arc<crate::osc::Runtime>) -> Self {
+    /// `native_devices` comes from the host's runtime configuration, so a host
+    /// without MIDI hardware reports an explicit capability error instead of
+    /// opening ports.
+    pub fn new(osc: Arc<crate::osc::Runtime>, native_devices: bool) -> Self {
         let (tx, rx) = sync_channel(4096);
         let panic = Arc::new(AtomicBool::new(false));
         let reset = panic.clone();
@@ -91,7 +94,14 @@ impl Outputs {
             while let Ok(command) = rx.recv() {
                 if reset.swap(false, Ordering::AcqRel) {
                     while rx.try_recv().is_ok() {}
-                    release(&mut held, &[], &mut midi, &osc, &worker_error);
+                    release(
+                        &mut held,
+                        &[],
+                        &mut midi,
+                        &osc,
+                        &worker_error,
+                        native_devices,
+                    );
                     continue;
                 }
                 let command = match command {
@@ -102,7 +112,14 @@ impl Outputs {
                     } => {
                         let kind = message.status >> 4;
                         if kind == 11 && matches!(message.data1, 120 | 123) {
-                            release(&mut held, &[node.clone()], &mut midi, &osc, &worker_error);
+                            release(
+                                &mut held,
+                                &[node.clone()],
+                                &mut midi,
+                                &osc,
+                                &worker_error,
+                                native_devices,
+                            );
                         }
                         let route = match route {
                             Route::Midi(port, _) => Route::Midi(port, (message.status & 15) + 1),
@@ -119,7 +136,8 @@ impl Outputs {
                                 cc: false,
                             })
                         } else {
-                            if let Err(e) = send_message(&route, message, &mut midi) {
+                            if let Err(e) = send_message(&route, message, &mut midi, native_devices)
+                            {
                                 *worker_error.lock().unwrap() = Some(e)
                             };
                             continue;
@@ -129,9 +147,14 @@ impl Outputs {
                 };
                 match command {
                     Command::Midi { .. } => unreachable!(),
-                    Command::Reset(nodes) => {
-                        release(&mut held, &nodes, &mut midi, &osc, &worker_error)
-                    }
+                    Command::Reset(nodes) => release(
+                        &mut held,
+                        &nodes,
+                        &mut midi,
+                        &osc,
+                        &worker_error,
+                        native_devices,
+                    ),
                     Command::Value { route, value } => {
                         if let Err(e) = send_value(&route, &value, &osc) {
                             *worker_error.lock().unwrap() = Some(e);
@@ -149,6 +172,7 @@ impl Outputs {
                                         &mut midi,
                                         &osc,
                                         &worker_error,
+                                        native_devices,
                                     );
                                     *worker_error.lock().unwrap()=Some("Too many overlapping identical MIDI notes; node notes released".into());
                                     continue;
@@ -163,13 +187,27 @@ impl Outputs {
                                 continue;
                             }
                         }
-                        if let Err(e) = send(&event.route, event.note, event.cc, &mut midi, &osc) {
+                        if let Err(e) = send(
+                            &event.route,
+                            event.note,
+                            event.cc,
+                            &mut midi,
+                            &osc,
+                            native_devices,
+                        ) {
                             *worker_error.lock().unwrap() = Some(e);
                         }
                     }
                 }
             }
-            release(&mut held, &[], &mut midi, &osc, &worker_error);
+            release(
+                &mut held,
+                &[],
+                &mut midi,
+                &osc,
+                &worker_error,
+                native_devices,
+            );
         });
         Self {
             tx,
@@ -235,6 +273,7 @@ fn release(
     midi: &mut BTreeMap<String, midir::MidiOutputConnection>,
     osc: &crate::osc::Runtime,
     error: &Mutex<Option<String>>,
+    native_devices: bool,
 ) {
     let keys: Vec<_> = held
         .keys()
@@ -254,6 +293,7 @@ fn release(
                 false,
                 midi,
                 osc,
+                native_devices,
             ) {
                 *error.lock().unwrap() = Some(e);
             }
@@ -265,12 +305,13 @@ fn send_message(
     route: &Route,
     message: pr0_core::midi::Message,
     midi: &mut BTreeMap<String, midir::MidiOutputConnection>,
+    native_devices: bool,
 ) -> Result<(), String> {
     let Route::Midi(port, _) = route else {
         return Err("Typed MIDI requires a MIDI output route".into());
     };
     if !midi.contains_key(port) {
-        if std::env::var_os("PR0_DISABLE_NATIVE_DEVICES").is_some() {
+        if !native_devices {
             return Err("Native MIDI disabled for this server".into());
         }
         let output = midir::MidiOutput::new("pr0former score").map_err(|e| e.to_string())?;
@@ -317,12 +358,13 @@ fn send(
     cc: bool,
     midi: &mut BTreeMap<String, midir::MidiOutputConnection>,
     osc: &crate::osc::Runtime,
+    native_devices: bool,
 ) -> Result<(), String> {
     match route {
         Route::OscValue(..) => Err("OSC value routes carry no notes".into()),
         Route::Midi(port, channel) => {
             if !midi.contains_key(port) {
-                if std::env::var_os("PR0_DISABLE_NATIVE_DEVICES").is_some() {
+                if !native_devices {
                     return Err("Native MIDI disabled for this server".into());
                 }
                 let output =
@@ -389,9 +431,16 @@ impl Input {
 #[derive(Default)]
 pub struct Inputs {
     inputs: Vec<Input>,
+    native_devices: bool,
     pub error: Option<String>,
 }
 impl Inputs {
+    pub fn new(native_devices: bool) -> Self {
+        Self {
+            native_devices,
+            ..Default::default()
+        }
+    }
     pub fn configure(&mut self, graph: &Graph) {
         let mut ports: Vec<_> = graph
             .nodes
@@ -409,7 +458,7 @@ impl Inputs {
             if self.inputs.iter().any(|i| i.port == port) {
                 continue;
             }
-            match open_input(&port) {
+            match open_input(self.native_devices, &port) {
                 Ok(input) => self.inputs.push(input),
                 Err(e) => self.error = Some(e),
             }
@@ -448,8 +497,8 @@ impl Inputs {
         }
     }
 }
-pub(crate) fn open_input(port: &str) -> Result<Input, String> {
-    if std::env::var_os("PR0_DISABLE_NATIVE_DEVICES").is_some() {
+pub(crate) fn open_input(native_devices: bool, port: &str) -> Result<Input, String> {
+    if !native_devices {
         return Err("Native MIDI disabled for this server".into());
     }
     let mut input = midir::MidiInput::new("pr0former graph").map_err(|e| e.to_string())?;
@@ -805,7 +854,7 @@ mod tests {
         receiver
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .unwrap();
-        let outputs = Outputs::new(Arc::new(crate::osc::Runtime::default()));
+        let outputs = Outputs::new(Arc::new(crate::osc::Runtime::default()), true);
         let route = Route::Osc(
             format!("localhost:{}", receiver.local_addr().unwrap().port()),
             "/notes".into(),

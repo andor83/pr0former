@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  iOS/iPadOS additions merged into the generated application Info.plist.
+
+  Purpose strings describe what the shipped features actually do at the moment
+  they ask: the microphone is used for live input, and the local network is used
+  only when local-network hosting or server discovery is started. This slice has
+  no hosting control, so nothing in it triggers the local-network prompt yet.
+
+  There is deliberately no UIBackgroundModes entry. Background and screen-lock
+  audio is the next explicit gate (docs/IPAD_RUNTIME_PLAN.md, Phase 5), and the
+  entitlement must not be declared before the shipped behavior genuinely needs
+  and continuously uses it.
+-->
+<plist version="1.0"><dict>
+<key>NSMicrophoneUsageDescription</key><string>pr0former uses audio input for live performance and graph development.</string>
+<key>NSLocalNetworkUsageDescription</key><string>pr0former discovers performance servers and hosts your performance for other devices on your local network.</string>
+<key>NSBonjourServices</key><array><string>_pr0former._tcp</string></array>
+<!-- The interface is served by this application's own loopback listener. -->
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+<!--
+  There is deliberately no UIDeviceFamily key. Xcode generates it from the
+  target's TARGETED_DEVICE_FAMILY build setting and warns that a user-supplied
+  one in Info.plist is ignored; the generated iOS target already builds for
+  iPhone and iPad, which is the intended device family. The editor and stage
+  views are designed for the iPad.
+-->
+<key>UISupportedInterfaceOrientations</key><array>
+  <string>UIInterfaceOrientationPortrait</string>
+  <string>UIInterfaceOrientationLandscapeLeft</string>
+  <string>UIInterfaceOrientationLandscapeRight</string>
+</array>
+<key>UISupportedInterfaceOrientations~ipad</key><array>
+  <string>UIInterfaceOrientationPortrait</string>
+  <string>UIInterfaceOrientationPortraitUpsideDown</string>
+  <string>UIInterfaceOrientationLandscapeLeft</string>
+  <string>UIInterfaceOrientationLandscapeRight</string>
+</array>
+</dict></plist>

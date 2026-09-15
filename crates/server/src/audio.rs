@@ -1,4 +1,8 @@
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
+// Enumerating a host's devices is a platform that *has* a device list. Logical
+// route platforms resolve through `crate::native_audio` and never call it.
+#[cfg(not(target_os = "ios"))]
+use cpal::traits::HostTrait;
 use pr0_core::{MAX_CHANNELS, MAX_DEVICE_CHANNELS, Project};
 use pr0_dsp::Engine;
 use serde_json::{Value, json};
@@ -31,6 +35,18 @@ pub enum Command {
         cancel: bool,
     },
     Shutdown(oneshot::Sender<Result<(), String>>),
+    /// Closes (`true`) or reopens (`false`) the native audio hardware streams
+    /// without disturbing the engine, the prepared graph, transport position,
+    /// loops or open recordings. Idempotent: requesting the state the worker is
+    /// already in replies `Ok` and touches no device.
+    ///
+    /// The reply is a plain synchronous channel so a host can complete a
+    /// transition from an operating-system callback thread — an iOS audio
+    /// interruption or background notification — without an async runtime.
+    Suspend {
+        suspended: bool,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
     Osc {
         project: String,
         message: rosc::OscMessage,
@@ -150,11 +166,12 @@ pub fn start(
     media: broadcast::Sender<crate::media::AudioBlock>,
     logs: Arc<crate::settings::Logs>,
     osc: Arc<crate::osc::Runtime>,
+    config: Arc<crate::config::RuntimeConfig>,
 ) -> SyncSender<Command> {
     let (tx, rx) = sync_channel::<Command>(256);
     std::thread::Builder::new()
         .name("pr0-orchestrator".into())
-        .spawn(move || run(events, media, logs, rx, osc))
+        .spawn(move || run(events, media, logs, rx, osc, config))
         .expect("Start audio worker");
     tx
 }
@@ -164,15 +181,17 @@ fn run(
     logs: Arc<crate::settings::Logs>,
     rx: std::sync::mpsc::Receiver<Command>,
     osc: Arc<crate::osc::Runtime>,
+    config: Arc<crate::config::RuntimeConfig>,
 ) {
     let io = crate::performance::external_worker(osc.clone());
-    let node_outputs = crate::node_io::Outputs::new(osc.clone());
-    let mut midi_inputs = crate::node_io::Inputs::default();
+    let node_outputs = crate::node_io::Outputs::new(osc.clone(), config.native_devices);
+    let mut midi_inputs = crate::node_io::Inputs::new(config.native_devices);
     let mut node_routes: Vec<(String, crate::node_io::Route, bool)> = Vec::new();
     let mut sequencer: Option<crate::performance::Sequencer> = None;
     let mut audition: Option<AuditionState> = None;
     let mut engine: Option<Engine> = None;
-    let mut persistence = crate::persistence::Persistence::new();
+    let mut persistence =
+        crate::persistence::Persistence::new(config.loops_dir(), config.recordings_dir.clone());
     let mut shutting_down = false;
     let mut project: Option<Project> = None;
     let mut epoch = String::new();
@@ -180,7 +199,7 @@ fn run(
     let mut outputs: Vec<Output> = vec![];
     let mut enabled = false;
     let mut show_active = false;
-    let mut settings = crate::settings::read();
+    let mut settings = crate::settings::read(&config);
     let mut testing = false;
     let mut test_sample = 0_u64;
     let mut media_rates: std::collections::BTreeMap<String, crate::samples::RateAdapter> =
@@ -192,6 +211,15 @@ fn run(
     let mut error_logged = String::new();
     let mut inputs: Vec<Input> = vec![];
     let mut hardware = false;
+    // Set by `Command::Suspend`: the host has closed the native hardware for a
+    // platform lifecycle event (an iOS interruption, or the application leaving
+    // the foreground). Nothing renders while it is set, so the engine sample
+    // clock, transport position, prepared graph, loop buffers and open
+    // recordings are all exactly where resume finds them.
+    let mut suspended = false;
+    // The owner's standing hardware intent, which outlives both suspension and
+    // a failed open. See [`Wanted`].
+    let mut wanted = Wanted::default();
     let underruns = Arc::new(AtomicU64::new(0));
     let mut last = Instant::now();
     let mut meter_time = Instant::now();
@@ -275,7 +303,11 @@ fn run(
                 Command::Shutdown(reply) => {
                     outputs.clear();
                     inputs.clear();
-                    midi_inputs = crate::node_io::Inputs::default();
+                    // Nothing may reopen a device after this point, including a
+                    // lifecycle resume that raced application exit into the
+                    // queue behind it.
+                    wanted = Wanted::default();
+                    midi_inputs = crate::node_io::Inputs::new(config.native_devices);
                     node_outputs.reset(vec![]);
                     if let (Some(p), Some(mut e)) = (&project, engine.take()) {
                         if let Some(seq) = &mut sequencer {
@@ -285,6 +317,76 @@ fn run(
                     }
                     persistence.barrier(reply);
                     shutting_down = true;
+                }
+
+                Command::Suspend {
+                    suspended: requested,
+                    reply,
+                } => {
+                    let context = project
+                        .as_ref()
+                        .map(|p| p.id.as_str())
+                        .unwrap_or(&log_project)
+                        .to_owned();
+                    let result = if requested {
+                        // Dropping the streams closes the hardware. Engine,
+                        // sequencer, transport, persistence, node routing and
+                        // the owner's `wanted` intent are all deliberately
+                        // untouched, so resume restores what the owner asked
+                        // for rather than a snapshot of what the system
+                        // happened to interrupt.
+                        //
+                        // Idempotent: a repeated interruption or background
+                        // event finds nothing open and closes nothing twice.
+                        outputs.clear();
+                        inputs.clear();
+                        testing = false;
+                        suspended = true;
+                        Ok(())
+                    } else {
+                        // The worker's state follows the request whether or not
+                        // the devices reopen, exactly as enabling does: a
+                        // failure is a device error on a resumed runtime, not a
+                        // runtime stuck in a suspended state no host asked for.
+                        suspended = false;
+                        // Reconciling rather than replaying: resume opens
+                        // whichever wanted direction is not open, which makes a
+                        // repeat resume both harmless when there is nothing to
+                        // do and a retry when the previous one could not open a
+                        // device. An owner who stopped hardware output, or who
+                        // never enabled the engine, is never started by a
+                        // platform lifecycle event, because neither `wanted`
+                        // nor `enabled` says so.
+                        let missing = wanted.missing(enabled, &outputs, &inputs);
+                        if missing.any() {
+                            prepare_platform_audio(&config, &settings, &logs, &context);
+                            match open_wanted(
+                                &config,
+                                &settings,
+                                &underruns,
+                                missing,
+                                &mut outputs,
+                                &mut inputs,
+                            ) {
+                                Ok(()) => {
+                                    device_error.clear();
+                                    Ok(())
+                                }
+                                Err(error) => {
+                                    device_error = error.clone();
+                                    Err(error)
+                                }
+                            }
+                        } else {
+                            Ok(())
+                        }
+                    };
+                    hardware = !outputs.is_empty();
+                    if let Err(error) = &result {
+                        logs.push(&context, "error", error);
+                    }
+                    // A host that stopped waiting still gets the transition.
+                    let _ = reply.try_send(result);
                 }
 
                 Command::Monitor {
@@ -335,7 +437,7 @@ fn run(
                 }
                 Command::Enable(id, value, new_settings, reply) => {
                     count_in = None;
-                    midi_inputs = crate::node_io::Inputs::default();
+                    midi_inputs = crate::node_io::Inputs::new(config.native_devices);
                     node_outputs.reset(vec![]);
                     log_project = id;
                     outputs.clear();
@@ -354,16 +456,34 @@ fn run(
                         }
                         sequencer = None;
                     }
-                    let result = if value {
-                        open_outputs(&settings, underruns.clone()).and_then(|devices| {
-                            let captured = open_inputs(&settings)?;
-                            outputs = devices;
-                            inputs = captured;
-                            hardware = !outputs.is_empty();
-                            enabled = true;
-                            device_error.clear();
-                            Ok(())
-                        })
+                    // Enabling the engine asks for both directions; disabling
+                    // it withdraws both. Recorded before anything is opened, so
+                    // a request that arrives while the hardware is closed for a
+                    // platform lifecycle event is still the intent resume acts
+                    // on — without this, enabling the engine in a backgrounded
+                    // application produced a runtime that returned to the
+                    // foreground enabled and permanently silent.
+                    wanted = Wanted {
+                        outputs: value,
+                        inputs: value,
+                    };
+                    let result = if value && suspended {
+                        // Hardware is closed for a platform lifecycle event.
+                        // The engine still enables; resume opens the devices
+                        // the same way this branch would have.
+                        enabled = true;
+                        Ok(())
+                    } else if value {
+                        prepare_platform_audio(&config, &settings, &logs, &log_project);
+                        open_devices(&config, &settings, underruns.clone(), true, true).map(
+                            |(devices, captured)| {
+                                outputs = devices;
+                                inputs = captured;
+                                hardware = !outputs.is_empty();
+                                enabled = true;
+                                device_error.clear();
+                            },
+                        )
                     } else {
                         Ok(())
                     };
@@ -618,13 +738,18 @@ fn run(
                     }
                     show_active = false;
                     count_in = None;
-                    midi_inputs = crate::node_io::Inputs::default();
+                    midi_inputs = crate::node_io::Inputs::new(config.native_devices);
                     node_routes.clear();
                     node_outputs.reset(vec![]);
                     for out in &mut outputs {
                         out.meter.clear();
                     }
                     inputs.clear();
+                    // Deactivating the show closes capture, so the intent goes
+                    // with it: a later platform resume must not reopen a
+                    // microphone for a runtime with no project loaded. Output
+                    // is left exactly as it is, because this does not close it.
+                    wanted.inputs = false;
                     previews.clear();
                     let _ = io.try_send(crate::performance::External::Panic);
                     sequencer = None;
@@ -896,13 +1021,21 @@ fn run(
                     }
                 }
                 Command::Devices(reply) => {
-                    let _=reply.send(json!({"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}));
+                    let _=reply.send(json!({"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"audio_suspended":suspended,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":device_error}));
                 }
                 Command::Hardware(value) => {
+                    // The owner's hardware-output intent, recorded whether or
+                    // not a device can be touched right now. While the hardware
+                    // is closed for a platform lifecycle event this is all the
+                    // command does, and resume then honours the latest request
+                    // — starting output that was asked for while suspended, and
+                    // leaving output that was stopped while suspended closed.
+                    wanted.outputs = value;
                     outputs.clear();
                     hardware = false;
-                    if value {
-                        match open_outputs(&settings, underruns.clone()) {
+                    if value && !suspended {
+                        prepare_platform_audio(&config, &settings, &logs, &log_project);
+                        match open_outputs(&config, &settings, underruns.clone()) {
                             Ok(o) => {
                                 outputs = o;
                                 hardware = !outputs.is_empty();
@@ -913,6 +1046,20 @@ fn run(
                     }
                 }
             }
+        }
+
+        // Suspended: the hardware is closed and nothing is rendered. The engine
+        // is not advanced on the software schedule either, so a backgrounded or
+        // interrupted application resumes from the engine sample it left rather
+        // than racing the wall clock forward in silence. Commands are still
+        // drained above, so shutdown and resume both arrive normally.
+        if suspended {
+            std::thread::sleep(Duration::from_millis(10));
+            // Resume renders its next block immediately instead of catching up
+            // on the whole suspended interval.
+            deadline = Instant::now();
+            previous_block = Instant::now();
+            continue;
         }
 
         if let Some(failed) = outputs
@@ -934,6 +1081,10 @@ fn run(
             outputs.clear();
             hardware = false;
             testing = false;
+            // `wanted.outputs` deliberately stays set. The owner still asked for
+            // hardware output; a route that disappeared under the stream is the
+            // case the host answers with a suspend/resume pair, and resume has
+            // to be able to reopen on the replacement route.
         }
         if outputs.first().is_some_and(|o| !o.buffer.needs_frames()) {
             std::thread::sleep(Duration::from_micros(500));
@@ -1242,7 +1393,7 @@ fn run(
                         error_logged = device_error.clone();
                     }
                     let _=events.send(json!({"scripts":scripts,
-"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"metronome":metronome,"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":persistence.error().unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"osc_messages":e.osc_messages(),"route_targets":e.route_targets(),"feedback_edges":e.feedback_edges(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
+"type":"telemetry","project_id":p.id,"revision":p.revision,"epoch":epoch,"sequence":seq,"server_time":monotonic_ms(),"sample":e.clock.sample,"beat":e.clock.beat,"graph_beat":e.graph_clock.beat,"bpm":e.clock.bpm,"running":e.clock.running,"count_in_remaining":count_in.as_ref().map(|c|c.remaining()),"metronome":metronome,"midi_input_error":midi_inputs.error,"node_io":node_outputs.status(),"worker_max_work_us":max_work_us,"worker_max_block_gap_us":max_block_gap_us,"block_size":settings.block_size,"sample_rate":settings.sample_rate,"engine_enabled":enabled,"hardware_enabled":hardware,"audio_suspended":suspended,"input_enabled":!inputs.is_empty(),"active_inputs":inputs.iter().map(|i|i.id).collect::<Vec<_>>(),"underruns":underruns.load(Ordering::Relaxed),"error":persistence.error().unwrap_or_else(|| device_error.clone()),"parts":sequencer.as_ref().map(|s|s.playback(e.clock.beat)).unwrap_or_default(),"values":e.telemetry(),"osc_messages":e.osc_messages(),"route_targets":e.route_targets(),"feedback_edges":e.feedback_edges(),"visualizations":if visualize{e.visualizations()}else{Default::default()}}
 ).into());
                 }
             }
@@ -1283,6 +1434,8 @@ fn run(
             inputs.clear();
             device_error =
                 "Native input stream failed. Refresh devices and enable capture again.".into();
+            // As with output above, the intent survives the failure so a later
+            // platform resume retries capture on whatever route replaced it.
         }
         if meter_time.elapsed() >= Duration::from_millis(50) {
             meter_time = Instant::now();
@@ -1317,11 +1470,11 @@ fn run(
 }
 
 // Potentially slow OS enumeration. Call from spawn_blocking, never the audio worker.
-pub fn device_inventory(sample_rate: u32) -> Value {
-    if native_disabled() {
+pub fn device_inventory(config: &crate::config::RuntimeConfig, sample_rate: u32) -> Value {
+    if !config.native_devices {
         return json!({"input_interfaces":[],"outputs":[],"interfaces":[],"midi_outputs":[],"midi_inputs":[],"midi_error":null});
     }
-    let devices = output_devices();
+    let devices = output_devices(config);
     let midi_out = midir::MidiOutput::new("pr0former device list");
     let midi_in = midir::MidiInput::new("pr0former device list");
     let midi_error = midi_out
@@ -1347,10 +1500,16 @@ pub fn device_inventory(sample_rate: u32) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!({"input_interfaces":device_details(sample_rate,true),"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":device_details(sample_rate,false),"midi_outputs":midi,"midi_inputs":midi_inputs,"midi_error":midi_error})
+    json!({"input_interfaces":device_details(config,sample_rate,true),"outputs":devices.iter().map(|d|&d.1).collect::<Vec<_>>(),"interfaces":device_details(config,sample_rate,false),"midi_outputs":midi,"midi_inputs":midi_inputs,"midi_error":midi_error})
 }
 
 // Discovery and stream startup use the same widest supported f32 configuration.
+//
+// Only asked of platforms that enumerate devices. Platforms that present
+// logical routes answer from [`crate::native_audio`] instead — see
+// [`stream_config`] — because `supported_input_configs` is CPAL's aborting path
+// on iOS.
+#[cfg(not(target_os = "ios"))]
 fn device_config(
     device: &cpal::Device,
     rate: u32,
@@ -1383,54 +1542,111 @@ fn device_config(
         .map(|c| c.with_sample_rate(cpal::SampleRate(rate)).config())
         .ok_or_else(|| format!("No supported 1–64-channel f32 configuration at {rate} Hz"))
 }
-fn device_details(rate: u32, input: bool) -> Vec<Value> {
-    if native_disabled() {
+/// The configuration a stream is opened with, from whichever device model this
+/// platform uses.
+///
+/// The one place the two models meet. Enumerating platforms negotiate against
+/// the endpoint's reported formats exactly as before; logical-route platforms
+/// synthesize the configuration from the host's route capability, because
+/// asking CPAL what an iOS device supports constructs and initializes an audio
+/// unit and can abort the process.
+#[cfg(target_os = "ios")]
+fn stream_config(
+    config: &crate::config::RuntimeConfig,
+    _device: &cpal::Device,
+    rate: u32,
+    input: bool,
+) -> Result<cpal::StreamConfig, String> {
+    crate::native_audio::logical_stream_config(config, rate, input)
+}
+
+#[cfg(not(target_os = "ios"))]
+fn stream_config(
+    _config: &crate::config::RuntimeConfig,
+    device: &cpal::Device,
+    rate: u32,
+    input: bool,
+) -> Result<cpal::StreamConfig, String> {
+    device_config(device, rate, input)
+}
+
+fn device_details(
+    config: &crate::config::RuntimeConfig,
+    rate: u32,
+    input: bool,
+) -> Vec<Value> {
+    if !config.native_devices {
         return vec![];
     }
     // Keep metadata, not device handles: retaining ALSA handles can reserve
     // physical PCMs. Single-flight caching prevents every browser refresh from
-    // repeatedly opening every device in both directions.
-    type Inventory = (Instant, u32, [Vec<Value>; 2]);
+    // repeatedly opening every device in both directions. Enumeration is a
+    // machine-wide fact, but the route identities below are derived from a
+    // runtime's saved settings, so the cache is keyed by settings file too and
+    // two runtimes in one process never read each other's route IDs.
+    type Inventory = (Instant, u32, std::path::PathBuf, [Vec<Value>; 2]);
     static CACHE: OnceLock<std::sync::Mutex<Option<Inventory>>> = OnceLock::new();
+    let settings_path = config.audio_settings_path();
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
-    if cache.as_ref().is_none_or(|(at, r, _)| *r != rate || at.elapsed() >= Duration::from_secs(30)) {
-        let mut rows: [Vec<Value>; 2] = Default::default();
-        if let Ok(devices) = cpal::default_host().devices() {
-            let devices:Vec<_>=devices.collect();
-            let labels:Vec<_>=devices.iter().filter_map(|d|d.name().ok()).collect();
-            let saved=crate::settings::read();
-            for device in devices {
-                let Ok(label) = device.name() else { continue };
-                let Ok(name) = device_key(&device) else { continue };
-                for (index, direction) in [false, true].into_iter().enumerate() {
-                    // Unsupported directions are not selectable routes.
-                    let supported = if direction {device.supports_input()} else {device.supports_output()};
-                    if !supported { continue; }
-                    let previous:Vec<_>=if direction {saved.input_interfaces.iter().map(|i|(i.id,i.name.as_str())).collect()}
-                        else {saved.interfaces.iter().map(|i|(i.id,i.name.as_str())).collect()};
-                    let unique=labels.iter().filter(|n|**n==label).count()==1;
-                    let id=route_id(&name,&label,unique,&previous);
-                    let display=if !unique && name!=label {format!("{label} · {name}")}else{label.clone()};
-                    let config = device_config(&device, rate, direction);
-                    rows[index].push(json!({"id":id,"name":name,"label":display,"backend":if cfg!(target_os="windows"){"WASAPI (shared)"}else if cfg!(target_os="linux"){"ALSA"}else{"CoreAudio"},
-                        "channels":config.as_ref().map(|c|c.channels).ok(),"error":config.err()}));
-                }
-            }
-        }
-        #[cfg(target_os="linux")]
-        for route in crate::linux_audio::discover_routes() {
-            let name=route["name"].as_str().unwrap();
-            let input=route["input"].as_bool().unwrap();
-            let device:cpal::Device=cpal::platform::AlsaDevice::from_pcm_name(name).into();
-            let config=device_config(&device,rate,input);
-            rows[usize::from(input)].push(json!({"id":device_id(name),"name":name,"label":route["label"],
-                "backend":route["backend"],"channels":config.as_ref().map(|c|c.channels).ok(),"error":config.err()}));
-        }
-        *cache = Some((Instant::now(), rate, rows));
+    if cache.as_ref().is_none_or(|(at, r, path, _)| {
+        *r != rate || *path != settings_path || at.elapsed() >= Duration::from_secs(30)
+    }) {
+        *cache = Some((Instant::now(), rate, settings_path, inventory(config, rate)));
     }
-    cache.as_ref().unwrap().2[usize::from(input)].clone()
+    cache.as_ref().unwrap().3[usize::from(input)].clone()
 }
 
+/// The routes this platform publishes, as `[outputs, inputs]`.
+///
+/// Logical-route platforms have their own implementation and *do not compile*
+/// the enumeration below. That is the point of splitting it here rather than
+/// branching at run time: on iOS, `cpal::Host::devices` yields one device whose
+/// `supports_input` initializes a RemoteIO audio unit, and AudioToolbox aborts
+/// the process when that RPC times out. A compile-time boundary means no later
+/// edit can reintroduce the call by relaxing a condition.
+#[cfg(target_os = "ios")]
+fn inventory(config: &crate::config::RuntimeConfig, rate: u32) -> [Vec<Value>; 2] {
+    crate::native_audio::logical_rows(config, rate)
+}
+
+#[cfg(not(target_os = "ios"))]
+fn inventory(config: &crate::config::RuntimeConfig, rate: u32) -> [Vec<Value>; 2] {
+    let mut rows: [Vec<Value>; 2] = Default::default();
+    if let Ok(devices) = cpal::default_host().devices() {
+        let devices:Vec<_>=devices.collect();
+        let labels:Vec<_>=devices.iter().filter_map(|d|d.name().ok()).collect();
+        let saved=crate::settings::read(config);
+        for device in devices {
+            let Ok(label) = device.name() else { continue };
+            let Ok(name) = device_key(&device) else { continue };
+            for (index, direction) in [false, true].into_iter().enumerate() {
+                // Unsupported directions are not selectable routes.
+                let supported = if direction {device.supports_input()} else {device.supports_output()};
+                if !supported { continue; }
+                let previous:Vec<_>=if direction {saved.input_interfaces.iter().map(|i|(i.id,i.name.as_str())).collect()}
+                    else {saved.interfaces.iter().map(|i|(i.id,i.name.as_str())).collect()};
+                let unique=labels.iter().filter(|n|**n==label).count()==1;
+                let id=route_id(&name,&label,unique,&previous);
+                let display=if !unique && name!=label {format!("{label} · {name}")}else{label.clone()};
+                let config = device_config(&device, rate, direction);
+                rows[index].push(json!({"id":id,"name":name,"label":display,"backend":if cfg!(target_os="windows"){"WASAPI (shared)"}else if cfg!(target_os="linux"){"ALSA"}else{"CoreAudio"},
+                    "channels":config.as_ref().map(|c|c.channels).ok(),"error":config.err()}));
+            }
+        }
+    }
+    #[cfg(target_os="linux")]
+    for route in crate::linux_audio::discover_routes() {
+        let name=route["name"].as_str().unwrap();
+        let input=route["input"].as_bool().unwrap();
+        let device:cpal::Device=cpal::platform::AlsaDevice::from_pcm_name(name).into();
+        let config=device_config(&device,rate,input);
+        rows[usize::from(input)].push(json!({"id":device_id(name),"name":name,"label":route["label"],
+            "backend":route["backend"],"channels":config.as_ref().map(|c|c.channels).ok(),"error":config.err()}));
+    }
+    rows
+}
+
+#[cfg(not(target_os = "ios"))]
 fn device_key(device:&cpal::Device)->Result<String,String> {
     #[cfg(target_os="windows")]
     if let cpal::platform::DeviceInner::Wasapi(device)=device.as_inner() {
@@ -1438,10 +1654,18 @@ fn device_key(device:&cpal::Device)->Result<String,String> {
     }
     device.name().map_err(|e|e.to_string())
 }
+#[cfg(not(target_os = "ios"))]
 fn route_id(key:&str,label:&str,unique:bool,previous:&[(u32,&str)])->u32 {
     previous.iter().find(|(_,name)|*name==key || (key.starts_with("wasapi:") && unique && *name==label))
         .map(|(id,_)|*id).unwrap_or_else(||device_id(key))
 }
+/// Resolves a saved route to a CPAL device on a platform that enumerates them.
+///
+/// Logical-route platforms have their own resolution in
+/// [`crate::native_audio::resolve_logical`], which is not merely a shortcut:
+/// enumerating to find a match calls `supports_input`, and therefore
+/// `AudioUnitInitialize`, on the single device CPAL's iOS backend reports.
+#[cfg(not(target_os = "ios"))]
 fn selected_device(name:&str,input:bool)->Result<cpal::Device,String> {
     #[cfg(target_os="linux")]
     if name.starts_with("pulse:DEVICE=") || name.starts_with("hw:CARD=") {
@@ -1458,7 +1682,14 @@ fn selected_device(name:&str,input:bool)->Result<cpal::Device,String> {
     Ok(device)
 }
 
+/// Resolves a saved logical route on a platform that presents them.
+#[cfg(target_os = "ios")]
+fn selected_device(name: &str, input: bool) -> Result<cpal::Device, String> {
+    crate::native_audio::resolve_logical(name, input)
+}
+
 fn open_input(
+    runtime: &crate::config::RuntimeConfig,
     device: cpal::Device,
     rate: u32,
     errors: Arc<AtomicU64>,
@@ -1470,7 +1701,7 @@ fn open_input(
     ),
     String,
 > {
-    let config = device_config(&device, rate, true)?;
+    let config = stream_config(runtime, &device, rate, true)?;
     let channels = config.channels as usize;
     let (mut producer, consumer) = rtrb::RingBuffer::new(4096);
     let stream = device
@@ -1509,32 +1740,41 @@ impl Input {
         self.meter.observe(&self.frame);
     }
 }
-fn device_id(name: &str) -> u32 {
+pub(crate) fn device_id(name: &str) -> u32 {
     name.bytes()
         .fold(2166136261_u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
         % 999999999
         + 1
 }
-fn native_disabled() -> bool {
-    std::env::var("PR0_DISABLE_NATIVE_DEVICES").as_deref() == Ok("1")
-}
-pub fn input_devices() -> Vec<(u32, String)> {
-    if native_disabled() {
+pub fn input_devices(config: &crate::config::RuntimeConfig) -> Vec<(u32, String)> {
+    if !config.native_devices {
         return vec![];
     }
-    device_details(crate::settings::read().sample_rate, true).iter()
+    device_details(config, crate::settings::read(config).sample_rate, true).iter()
         .filter_map(|d| Some((d["id"].as_u64()? as u32, d["name"].as_str()?.to_owned()))).collect()
 }
-fn open_inputs(settings: &crate::settings::Settings) -> Result<Vec<Input>, String> {
+fn open_inputs(
+    config: &crate::config::RuntimeConfig,
+    settings: &crate::settings::Settings,
+) -> Result<Vec<Input>, String> {
     let mut inputs = vec![];
+    // Authorization is checked once, before any capture device is touched, and
+    // only when the settings actually select one: a runtime with no enabled
+    // input must never make the system ask for a microphone. On the
+    // orchestration worker, never in a callback, and never blocking on a person
+    // — see [`crate::native_audio::authorize_capture`].
+    if settings.input_interfaces.iter().any(|i| i.enabled) && config.native_devices {
+        crate::native_audio::authorize_capture(config)?;
+    }
     for selected in settings.input_interfaces.iter().filter(|i| i.enabled) {
-        if native_disabled() {
-            return Err("Native devices are disabled by PR0_DISABLE_NATIVE_DEVICES".into());
+        if !config.native_devices {
+            return Err(NATIVE_DEVICES_DISABLED.into());
         }
         let device = selected_device(&selected.name,true)?;
         let errors = Arc::new(AtomicU64::new(0));
-        let (stream, queue, channels) = open_input(device, settings.sample_rate, errors.clone())
-            .map_err(|e| format!("Input {}: {e}", selected.name))?;
+        let (stream, queue, channels) =
+            open_input(config, device, settings.sample_rate, errors.clone())
+                .map_err(|e| format!("Input {}: {e}", selected.name))?;
         inputs.push(Input {
             id: selected.id,
             meter: crate::hardware_meter::Meter::new(selected.id, selected.name.clone(), channels),
@@ -1557,10 +1797,115 @@ mod input_startup_tests {
         assert_ne!(super::route_id("wasapi:endpoint-a","Speakers",false,&[]),super::route_id("wasapi:endpoint-b","Speakers",false,&[]));
         assert_eq!(super::route_id("CoreAudio name","CoreAudio name",true,&[]),super::device_id("CoreAudio name"));
     }
+    /// Enabling the engine and resuming suspended hardware share one opening
+    /// path, so both directions come back together or not at all: a failure
+    /// leaves no half-opened device set behind, and a configuration that selects
+    /// nothing opens nothing.
+    #[test]
+    fn opening_devices_covers_both_directions_and_refuses_rather_than_half_opening() {
+        let mut config = crate::config::RuntimeConfig::new(std::env::temp_dir());
+        let mut settings = crate::settings::Settings::default();
+        let underruns = || std::sync::Arc::new(super::AtomicU64::new(0));
+        let (outputs, inputs) =
+            super::open_devices(&config, &settings, underruns(), true, true).unwrap();
+        assert!(outputs.is_empty() && inputs.is_empty());
+
+        config.native_devices = false;
+        settings.input_interfaces.push(crate::settings::InputInterface {
+            id: 1,
+            name: "Selected input".into(),
+            enabled: true,
+        });
+        match super::open_devices(&config, &settings, underruns(), true, true) {
+            Err(error) => assert!(error.contains("Native devices are disabled"), "{error}"),
+            Ok(_) => panic!("a disabled device layer must refuse to open a selected interface"),
+        }
+        // A direction nobody asked for is not opened, so resuming hardware the
+        // owner had stopped cannot restart it.
+        let (outputs, inputs) =
+            super::open_devices(&config, &settings, underruns(), false, false).unwrap();
+        assert!(outputs.is_empty() && inputs.is_empty());
+    }
+
+    /// Capture authorization is enforced in the device layer, before any
+    /// capture device is touched, and it is enforced by *refusing* rather than
+    /// by whatever the platform would do to a process that opened a microphone
+    /// it may not use. On iOS that is the difference between an error a
+    /// performer can act on and `SIGABRT` inside AudioToolbox.
+    #[test]
+    fn capture_is_refused_before_a_device_is_touched_when_the_host_withholds_permission() {
+        use crate::config::{AudioRoutes, CaptureAuthorization, CaptureSupport, RouteDescription};
+
+        #[derive(Debug)]
+        struct Host(CaptureAuthorization);
+        impl AudioRoutes for Host {
+            fn describe(&self) -> RouteDescription {
+                RouteDescription {
+                    output_channels: 2,
+                    input_channels: 1,
+                    input_available: true,
+                    sample_rate: Some(48000),
+                }
+            }
+            fn capture_support(&self) -> CaptureSupport {
+                CaptureSupport::Supported
+            }
+            fn capture_authorization(&self) -> CaptureAuthorization {
+                self.0
+            }
+            fn request_capture_authorization(&self) {}
+        }
+
+        let mut settings = crate::settings::Settings::default();
+        settings
+            .input_interfaces
+            .push(crate::settings::InputInterface {
+                id: 1,
+                // Deliberately a name no machine running this test has, so a
+                // refusal cannot be mistaken for "the device was not found":
+                // the authorization check has to come first.
+                name: "a route this test never resolves".into(),
+                enabled: true,
+            });
+
+        for (authorization, expected) in [
+            (CaptureAuthorization::Denied, "denied"),
+            (CaptureAuthorization::Restricted, "restricted"),
+            (CaptureAuthorization::Undetermined, "not been granted yet"),
+        ] {
+            let mut config = crate::config::RuntimeConfig::new(std::env::temp_dir());
+            config.audio_routes = Some(std::sync::Arc::new(Host(authorization)));
+            let error = match super::open_inputs(&config, &settings) {
+                Err(error) => error.to_lowercase(),
+                Ok(_) => panic!("capture must be refused for {authorization:?}"),
+            };
+            assert!(error.contains(expected), "{authorization:?}: {error}");
+        }
+
+        // With nothing selected, no authorization is consulted and no prompt is
+        // possible: an application that can record must not ask until a
+        // performer configures an input.
+        let mut config = crate::config::RuntimeConfig::new(std::env::temp_dir());
+        config.audio_routes = Some(std::sync::Arc::new(Host(CaptureAuthorization::Denied)));
+        assert!(
+            super::open_inputs(&config, &crate::settings::Settings::default())
+                .is_ok_and(|inputs| inputs.is_empty())
+        );
+
+        // A host that withheld the whole device layer still reports that, not a
+        // permission problem it has no opinion about.
+        config.native_devices = false;
+        match super::open_inputs(&config, &settings) {
+            Err(error) => assert!(error.contains("Native devices are disabled"), "{error}"),
+            Ok(_) => panic!("a disabled device layer must refuse a selected input"),
+        }
+    }
+
     #[test]
     fn no_selected_inputs_allows_engine_startup_without_opening_devices() {
+        let config = crate::config::RuntimeConfig::new(std::env::temp_dir());
         let mut settings = crate::settings::Settings::default();
-        assert!(super::open_inputs(&settings).unwrap().is_empty());
+        assert!(super::open_inputs(&config, &settings).unwrap().is_empty());
         settings
             .input_interfaces
             .push(crate::settings::InputInterface {
@@ -1568,15 +1913,15 @@ mod input_startup_tests {
                 name: "Unavailable unchecked input".into(),
                 enabled: false,
             });
-        assert!(super::open_inputs(&settings).unwrap().is_empty());
+        assert!(super::open_inputs(&config, &settings).unwrap().is_empty());
     }
 }
 
-pub fn output_devices() -> Vec<(u32, String)> {
-    if native_disabled() {
+pub fn output_devices(config: &crate::config::RuntimeConfig) -> Vec<(u32, String)> {
+    if !config.native_devices {
         return vec![];
     }
-    device_details(crate::settings::read().sample_rate, false).iter()
+    device_details(config, crate::settings::read(config).sample_rate, false).iter()
         .filter_map(|d| Some((d["id"].as_u64()? as u32, d["name"].as_str()?.to_owned()))).collect()
 }
 struct Output {
@@ -1597,7 +1942,143 @@ impl Output {
         self.buffer.push(frame);
     }
 }
+/// Refusing to open a device on a runtime whose host withheld the capability.
+///
+/// `PR0_DISABLE_NATIVE_DEVICES=1` is still how the standalone process host
+/// clears it, but `RuntimeConfig::native_devices` is now a host decision that an
+/// embedded runtime sets directly, so the message names the capability rather
+/// than one host's environment variable.
+const NATIVE_DEVICES_DISABLED: &str =
+    "Native devices are disabled for this runtime (PR0_DISABLE_NATIVE_DEVICES for the standalone server)";
+
+/// The orchestration worker's standing native-hardware intent: what the owner
+/// has asked to have open, as opposed to what is open right now.
+///
+/// The two are different whenever a platform lifecycle event has the hardware
+/// closed — an iOS interruption, or the application in the background — and
+/// they are also different after an open fails. Keeping the intent separate is
+/// what lets a resume act on requests that arrived while the devices were shut
+/// (enabling the engine, or toggling hardware output) and retry an open that
+/// did not succeed, instead of restoring a snapshot of whatever happened to be
+/// open at the instant the system interrupted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Wanted {
+    outputs: bool,
+    inputs: bool,
+}
+
+impl Wanted {
+    /// Which wanted directions are not open. `enabled` is the engine gate: a
+    /// platform lifecycle event never starts hardware for a runtime whose
+    /// engine is off, however the intent got set.
+    fn missing(self, enabled: bool, outputs: &[Output], inputs: &[Input]) -> Self {
+        Self {
+            outputs: enabled && self.outputs && outputs.is_empty(),
+            inputs: enabled && self.inputs && inputs.is_empty(),
+        }
+    }
+
+    fn any(self) -> bool {
+        self.outputs || self.inputs
+    }
+}
+
+/// Installs the host's platform audio policy for the settings a device is about
+/// to be opened with.
+///
+/// On iOS this is the `AVAudioSession` category/mode/preference install, and it
+/// has to happen here rather than only at launch: the recording category
+/// follows an actually enabled input, and a performer may enable one while the
+/// application is running. Every other host supplies no policy and this is a
+/// pointer comparison. Never reached from a render or device callback — only
+/// from the orchestration worker's command handlers, which already open
+/// devices.
+fn prepare_platform_audio(
+    config: &crate::config::RuntimeConfig,
+    settings: &crate::settings::Settings,
+    logs: &crate::settings::Logs,
+    context: &str,
+) {
+    let Some(policy) = config.audio_policy() else {
+        return;
+    };
+    let preferences = crate::settings::AudioPreferences::from_settings(settings);
+    if let Err(error) = policy.prepare(&preferences) {
+        // Reported, not fatal: whatever the device layer says next about the
+        // open that follows is the more actionable error.
+        logs.push(context, "error", &format!("Platform audio session: {error}"));
+    }
+}
+
+/// Opens the `missing` directions into `outputs`/`inputs`, independently.
+///
+/// Independent, unlike [`open_devices`], and deliberately so: a resume is a
+/// platform event, not an owner action, and a microphone the system will not
+/// hand back — permission revoked while the application was in the background,
+/// a capture device removed — must not also keep the loudspeaker closed. Each
+/// direction is still all-or-nothing within itself, because `open_outputs` and
+/// `open_inputs` each return the whole set or drop what they had opened.
+///
+/// Whatever did open stays open; the error names every direction that did not,
+/// and the caller leaves the intent set so the next resume retries.
+fn open_wanted(
+    config: &crate::config::RuntimeConfig,
+    settings: &crate::settings::Settings,
+    underruns: &Arc<AtomicU64>,
+    missing: Wanted,
+    outputs: &mut Vec<Output>,
+    inputs: &mut Vec<Input>,
+) -> Result<(), String> {
+    let mut failures: Vec<String> = Vec::new();
+    if missing.outputs {
+        match open_outputs(config, settings, underruns.clone()) {
+            Ok(devices) => *outputs = devices,
+            Err(error) => failures.push(error),
+        }
+    }
+    if missing.inputs {
+        match open_inputs(config, settings) {
+            Ok(captured) => *inputs = captured,
+            Err(error) => failures.push(error),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+/// Opens the selected native devices for `settings` in the requested
+/// directions.
+///
+/// Outputs are opened first and the pair is returned together, so a failing
+/// input never leaves the worker holding half a device set: the already opened
+/// outputs are dropped — and therefore closed — with the error. Shared by engine
+/// enablement, which wants both directions, and by resuming suspended hardware,
+/// which wants back exactly what suspension closed.
+fn open_devices(
+    config: &crate::config::RuntimeConfig,
+    settings: &crate::settings::Settings,
+    underruns: Arc<AtomicU64>,
+    wanted_outputs: bool,
+    wanted_inputs: bool,
+) -> Result<(Vec<Output>, Vec<Input>), String> {
+    let outputs = if wanted_outputs {
+        open_outputs(config, settings, underruns)?
+    } else {
+        vec![]
+    };
+    let inputs = if wanted_inputs {
+        open_inputs(config, settings)?
+    } else {
+        vec![]
+    };
+    Ok((outputs, inputs))
+}
+
 fn open_outputs(
+    config: &crate::config::RuntimeConfig,
     settings: &crate::settings::Settings,
     underruns: Arc<AtomicU64>,
 ) -> Result<Vec<Output>, String> {
@@ -1609,13 +2090,13 @@ fn open_outputs(
         .map(|i| i.latency_ms)
         .fold(0_f64, f64::max);
     for selected in settings.interfaces.iter().filter(|i| i.enabled) {
-        if native_disabled() {
-            return Err("Native devices are disabled by PR0_DISABLE_NATIVE_DEVICES".into());
+        if !config.native_devices {
+            return Err(NATIVE_DEVICES_DISABLED.into());
         }
         let device = selected_device(&selected.name,false)?;
-        let config = device_config(&device, settings.sample_rate, false)
+        let stream_config = stream_config(config, &device, settings.sample_rate, false)
             .map_err(|e| format!("{}: {e}", selected.name))?;
-        let channels = config.channels as usize;
+        let channels = stream_config.channels as usize;
         let (buffer, mut consumer) = crate::output_buffer::OutputBuffer::new(
             settings.block_size,
             settings.sample_rate,
@@ -1625,7 +2106,7 @@ fn open_outputs(
         let err = errors.clone();
         let stream = device
             .build_output_stream(
-                &config,
+                &stream_config,
                 move |data: &mut [f32], _| {
                     consumer.write(data, channels);
                 },
@@ -1959,5 +2440,324 @@ mod audition_tests {
             e.render(&[], &mut [[0.; MAX_CHANNELS]]);
         }
         assert_eq!(e.telemetry()["preview-midi"]["gate"], 0.);
+    }
+}
+
+/// The platform audio lifecycle state machine, driven through the real
+/// orchestration worker.
+///
+/// **No native device is opened by any of this.** Every configuration here sets
+/// `RuntimeConfig::native_devices = false`, which makes opening a *selected*
+/// interface fail deterministically before CPAL is reached, and opening an
+/// unselected one succeed trivially. That is the whole test lever: whether a
+/// transition returns `Ok` or the disabled-devices error says exactly which
+/// directions the worker decided to open, with no hardware, no permissions
+/// prompt and no audio on the build machine. Nothing here is a claim about how
+/// any platform's devices behave.
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::settings::{InputInterface, Interface, Settings};
+
+    struct Worker {
+        commands: SyncSender<Command>,
+        directory: std::path::PathBuf,
+        stopped: bool,
+    }
+
+    impl Worker {
+        fn start(label: &str) -> Self {
+            let directory = std::env::temp_dir()
+                .join(format!("pr0-lifecycle-{label}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut config = crate::config::RuntimeConfig::embedded(directory.join("data"));
+            config.recordings_dir = directory.join("recordings");
+            // The lever: selected interfaces refuse to open instead of reaching
+            // any audio or MIDI API.
+            config.native_devices = false;
+            std::fs::create_dir_all(&config.data_dir).unwrap();
+            let (events, _) = broadcast::channel(64);
+            let (media, _) = broadcast::channel(64);
+            let config = Arc::new(config);
+            let osc = crate::osc::Runtime::load(&config);
+            Self {
+                commands: super::start(
+                    events,
+                    media,
+                    Arc::new(crate::settings::Logs::default()),
+                    osc,
+                    config,
+                ),
+                directory,
+                stopped: false,
+            }
+        }
+
+        fn enable(&self, value: bool, settings: &Settings) -> Result<(), String> {
+            let (reply, answer) = oneshot::channel();
+            self.commands
+                .send(Command::Enable(
+                    "project".into(),
+                    value,
+                    settings.clone(),
+                    reply,
+                ))
+                .unwrap();
+            answer.blocking_recv().unwrap()
+        }
+
+        /// Exactly the call `RuntimeHandle::suspend_audio`/`resume_audio` make.
+        fn suspend(&self, suspended: bool) -> Result<(), String> {
+            let (reply, answers) = std::sync::mpsc::sync_channel(1);
+            self.commands
+                .send(Command::Suspend { suspended, reply })
+                .unwrap();
+            answers
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the worker answers a lifecycle transition")
+        }
+
+        fn hardware(&self, value: bool) {
+            self.commands.send(Command::Hardware(value)).unwrap();
+        }
+
+        fn unload(&self) {
+            self.commands.send(Command::Unload).unwrap();
+        }
+
+        /// Reads back the state `/api/devices` and telemetry publish. Ordered
+        /// behind every command already sent, because one worker drains one
+        /// queue.
+        fn reported(&self) -> Value {
+            let (reply, answer) = oneshot::channel();
+            self.commands.send(Command::Devices(reply)).unwrap();
+            answer.blocking_recv().unwrap()
+        }
+
+        fn stop(&mut self) {
+            if std::mem::replace(&mut self.stopped, true) {
+                return;
+            }
+            let (reply, answer) = oneshot::channel();
+            let _ = self.commands.send(Command::Shutdown(reply));
+            let _ = answer.blocking_recv();
+        }
+    }
+
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            self.stop();
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    /// Settings that select nothing, so every direction opens trivially.
+    fn nothing_selected() -> Settings {
+        Settings::default()
+    }
+
+    /// Settings that select one capture interface, so opening inputs fails and
+    /// opening outputs still succeeds.
+    fn capture_selected() -> Settings {
+        let mut settings = Settings::default();
+        settings.input_interfaces.push(InputInterface {
+            id: 1,
+            name: "Selected input".into(),
+            enabled: true,
+        });
+        settings
+    }
+
+    /// Settings that select one playback interface, so opening outputs fails
+    /// and opening inputs still succeeds.
+    fn playback_selected() -> Settings {
+        let mut settings = Settings::default();
+        settings.interfaces.push(Interface {
+            id: 2,
+            name: "Selected output".into(),
+            enabled: true,
+            correct_latency: false,
+            latency_ms: 0.,
+        });
+        settings
+    }
+
+    fn refused(result: Result<(), String>) -> String {
+        let error = result.expect_err("a selected interface must refuse to open");
+        assert!(error.contains("Native devices are disabled"), "{error}");
+        error
+    }
+
+    /// The contract a host relies on: suspending is idempotent, closes the
+    /// hardware, changes nothing above it, and is visible to the API.
+    #[test]
+    fn suspension_is_idempotent_and_visible_and_resume_restores_the_engine() {
+        let mut worker = Worker::start("idempotent");
+        worker.enable(true, &nothing_selected()).unwrap();
+        assert_eq!(worker.reported()["engine_enabled"], json!(true));
+        assert_eq!(worker.reported()["audio_suspended"], json!(false));
+
+        worker.suspend(true).unwrap();
+        worker.suspend(true).expect("a repeated suspend closes nothing twice");
+        let reported = worker.reported();
+        assert_eq!(reported["audio_suspended"], json!(true));
+        assert_eq!(reported["hardware_enabled"], json!(false));
+        assert_eq!(reported["input_enabled"], json!(false));
+        // The engine is untouched by a platform event: only the hardware closed.
+        assert_eq!(reported["engine_enabled"], json!(true));
+
+        worker.suspend(false).unwrap();
+        worker.suspend(false).expect("a repeated resume opens nothing twice");
+        assert_eq!(worker.reported()["audio_suspended"], json!(false));
+        worker.stop();
+    }
+
+    /// Enabling the engine while the hardware is closed for a platform
+    /// lifecycle event must still be what resume acts on. Before the worker
+    /// kept a standing intent it remembered only what was open at the moment of
+    /// suspension, so this sequence returned to the foreground with the engine
+    /// enabled and every device permanently closed — silently.
+    #[test]
+    fn enabling_while_suspended_is_what_resume_opens() {
+        let mut worker = Worker::start("enable-while-suspended");
+        worker.enable(true, &nothing_selected()).unwrap();
+        worker.suspend(true).unwrap();
+        // Nothing was open when the hardware closed.
+        assert_eq!(worker.reported()["hardware_enabled"], json!(false));
+
+        // A settings change that selects capture, applied while suspended. The
+        // engine enables; no device is touched yet.
+        worker
+            .enable(true, &capture_selected())
+            .expect("the engine enables while the hardware is closed");
+        assert_eq!(worker.reported()["engine_enabled"], json!(true));
+
+        // Resume must try to open the input this asked for.
+        refused(worker.suspend(false));
+        worker.stop();
+    }
+
+    /// The direction intent survives an open that fails, so a later resume
+    /// retries rather than quietly giving up. The old snapshot behavior lost it
+    /// after exactly one failed cycle: the second background/foreground pair
+    /// reported success with nothing open.
+    #[test]
+    fn a_failed_open_keeps_the_intent_for_the_next_resume() {
+        let mut worker = Worker::start("failed-open");
+        worker.enable(true, &nothing_selected()).unwrap();
+        worker.suspend(true).unwrap();
+        worker.enable(true, &capture_selected()).unwrap();
+        refused(worker.suspend(false));
+
+        // Repeating the resume retries the open rather than reporting the
+        // already-resumed state as success.
+        refused(worker.suspend(false));
+
+        // And a whole further background/foreground cycle still retries it.
+        worker.suspend(true).unwrap();
+        refused(worker.suspend(false));
+
+        // The failure is reported, and the runtime is resumed rather than stuck
+        // in a suspended state no host asked for.
+        let reported = worker.reported();
+        assert_eq!(reported["audio_suspended"], json!(false));
+        assert!(
+            reported["error"]
+                .as_str()
+                .unwrap()
+                .contains("Native devices are disabled"),
+            "{reported}"
+        );
+        worker.stop();
+    }
+
+    /// Hardware output requested while suspended is opened by resume; hardware
+    /// output stopped while suspended stays closed. Both directions of the
+    /// toggle used to be dropped entirely.
+    #[test]
+    fn the_hardware_toggle_is_honoured_across_a_suspension() {
+        let mut worker = Worker::start("hardware-toggle");
+        worker.enable(true, &nothing_selected()).unwrap();
+        worker.suspend(true).unwrap();
+        // Select a playback interface, then stop output while suspended.
+        worker.enable(true, &playback_selected()).unwrap();
+        worker.hardware(false);
+        worker
+            .suspend(false)
+            .expect("output the owner stopped is not restarted by a lifecycle event");
+        assert_eq!(worker.reported()["hardware_enabled"], json!(false));
+
+        // Ask for it again while suspended: resume now opens it.
+        worker.suspend(true).unwrap();
+        worker.hardware(true);
+        refused(worker.suspend(false));
+        worker.stop();
+    }
+
+    /// A resume opens the directions independently, so a capture device the
+    /// system will not hand back cannot also keep playback closed.
+    #[test]
+    fn one_refused_direction_does_not_close_the_other() {
+        let mut worker = Worker::start("independent-directions");
+        // Playback selects nothing (opens trivially); capture selects an
+        // interface that cannot open.
+        worker.enable(true, &capture_selected()).ok();
+        worker.suspend(true).unwrap();
+        worker.enable(true, &capture_selected()).unwrap();
+        let error = refused(worker.suspend(false));
+        // Exactly one direction failed, and it named itself once.
+        assert_eq!(error.matches("Native devices are disabled").count(), 1);
+        // Playback is open (empty selection, no error), capture is not.
+        assert_eq!(worker.reported()["input_enabled"], json!(false));
+        worker.stop();
+    }
+
+    /// A disabled engine is never started by a platform lifecycle event, and
+    /// deactivating a show withdraws the capture intent with the capture it
+    /// closes: returning to the foreground must not reopen a microphone for a
+    /// runtime with no project loaded.
+    #[test]
+    fn a_lifecycle_event_never_starts_hardware_nobody_asked_for() {
+        let mut worker = Worker::start("no-unrequested-start");
+        // Never enabled: suspend and resume both do nothing at all.
+        worker.suspend(true).unwrap();
+        worker.suspend(false).unwrap();
+        assert_eq!(worker.reported()["engine_enabled"], json!(false));
+
+        worker.enable(true, &capture_selected()).ok();
+        worker.unload();
+        worker.suspend(true).unwrap();
+        worker
+            .suspend(false)
+            .expect("a deactivated show does not reopen capture");
+        assert_eq!(worker.reported()["input_enabled"], json!(false));
+        worker.stop();
+    }
+
+    /// Shutdown wins any race with a lifecycle event: the worker stops, and the
+    /// host's bounded wait ends with a disconnected channel rather than a hang.
+    #[test]
+    fn a_lifecycle_event_racing_shutdown_is_bounded_and_opens_nothing() {
+        let mut worker = Worker::start("shutdown-race");
+        worker.enable(true, &nothing_selected()).unwrap();
+        worker.suspend(true).unwrap();
+        worker.enable(true, &capture_selected()).unwrap();
+        worker.stop();
+
+        let (reply, answers) = std::sync::mpsc::sync_channel(1);
+        let _ = worker.commands.send(Command::Suspend {
+            suspended: false,
+            reply,
+        });
+        match answers.recv_timeout(Duration::from_secs(10)) {
+            // The worker had already returned: the queue is disconnected.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => (),
+            // Or it drained the command while stopping, in which case the
+            // withdrawn intent means it opened nothing.
+            Ok(outcome) => assert_eq!(outcome, Ok(())),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("a lifecycle transition must never outlive shutdown unanswered")
+            }
+        }
     }
 }

@@ -6,21 +6,85 @@ license = "MIT"
 
 [workspace]
 
+# The desktop application is its own workspace, so it repeats the repository
+# workspace's vendored CPAL patch. The embedded runtime pulls in `cpal`, and
+# both hosts must build the same audited device layer.
+[patch.crates-io]
+cpal = { path = "../../vendor/cpal" }
+
+# Tauri 2 builds mobile applications from a library target: the generated
+# iOS/Android entry point calls `run()` in this library, and `src/main.rs` is
+# only the desktop launcher. The `_lib` suffix keeps the library name distinct
+# from the binary name, which Cargo requires on Windows.
+[lib]
+name = "pr0former_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# The shared application runtime, embedded in this process. The package keeps
+# its `pr0-server` name so standalone packaging is unchanged; its library target
+# is `pr0_runtime` (see docs/IPAD_RUNTIME_PLAN.md).
+pr0_runtime = { package = "pr0-server", path = "../../crates/server" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Only the bounded wait around the runtime's ordered shutdown at app exit.
+tokio = { version = "1", features = ["rt", "time"] }
+# Runtime diagnostics for the profile log, as the child process wrote to stderr.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+# Desktop-only host features: the exclusive profile lock, LAN discovery
+# browsing, the connection chooser's reachability probe, and certificate
+# pinning for remote servers. The mobile shell has none of them, so none of it
+# is compiled into the iOS library. Tauri's `desktop`/`mobile` cfg aliases come
+# from a build script and cannot appear in a Cargo target expression, so the
+# mobile targets are named explicitly here.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 fs2 = "0.4"
 mdns-sd = "0.21"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 sha2 = "0.10"
 
-[features]
-default = ["custom-protocol"]
-custom-protocol = ["tauri/custom-protocol"]
+# iOS/iPadOS audio-session policy and lifecycle (src/audio_session.rs). These
+# are the same `objc2` 0.6 generation Tauri itself uses on this target, so they
+# add bindings rather than a second Objective-C runtime. `AVFAudio` is named in
+# `bundle.iOS.frameworks` because a Rust `staticlib` cannot carry the framework
+# link directives these crates emit.
+[target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-avf-audio = { version = "0.3", default-features = false, features = [
+  "std",
+  # `block2` is what makes `requestRecordPermission:` available: asking for the
+  # microphone is a completion-block API, because the answer arrives when the
+  # person answers rather than when the call returns.
+  "block2",
+  "AVAudioSession",
+  "AVAudioSessionTypes",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "block2",
+  "NSDictionary",
+  "NSError",
+  "NSNotification",
+  "NSObject",
+  "NSOperation",
+  "NSString",
+  "NSValue",
+] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "UIApplication",
+] }
+tracing = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

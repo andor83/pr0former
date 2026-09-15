@@ -17,9 +17,6 @@ pub struct Store {
     tx: SyncSender<Job>,
     error: Arc<Mutex<Option<String>>>,
 }
-fn root() -> PathBuf {
-    PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into())).join("loops")
-}
 fn path(root: &Path, project: &str, node: &str, track: u8) -> PathBuf {
     // Encode all user-controlled identifiers; chunking also avoids filename limits.
     let mut path = root.to_path_buf();
@@ -71,8 +68,8 @@ fn write(root: &Path, project: &str, snapshot: Snapshot) -> Result<(), String> {
     result
 }
 impl Store {
-    pub fn new() -> Self {
-        Self::at(root())
+    pub fn new(root: PathBuf) -> Self {
+        Self::at(root)
     }
     fn at(root: PathBuf) -> Self {
         let (tx, rx) = mpsc::sync_channel(1);
@@ -127,11 +124,15 @@ impl Store {
         self.error().map_or(Ok(()), Err)
     }
 }
-pub fn clear_saved(project: &str, node: &str, track: u8) -> Result<(), String> {
-    write(&root(), project, (node.into(), track, 1, 48000, vec![]))
+pub fn clear_saved(root: &Path, project: &str, node: &str, track: u8) -> Result<(), String> {
+    write(root, project, (node.into(), track, 1, 48000, vec![]))
 }
-pub fn restore(project: &pr0_core::Project, engine: &mut Engine) -> Result<(), String> {
-    restore_at(&root(), project, engine)
+pub fn restore(
+    root: &Path,
+    project: &pr0_core::Project,
+    engine: &mut Engine,
+) -> Result<(), String> {
+    restore_at(root, project, engine)
 }
 fn restore_at(root: &Path, project: &pr0_core::Project, engine: &mut Engine) -> Result<(), String> {
     for node in project.graph.nodes.iter().filter(|n| n.kind == "looper") {

@@ -4,6 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# `pr0-server` stays the package/binary name so existing build/release
+# tooling and the produced executable are unchanged. The library target is
+# named `pr0_runtime`: the extracted application runtime, callable in-process
+# by any future host (see docs/IPAD_RUNTIME_PLAN.md).
+[lib]
+name = "pr0_runtime"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pr0-server"
+path = "src/main.rs"
+
 [dependencies]
 sha2 = "0.10"
 pr0-core.workspace = true
@@ -22,6 +34,25 @@ rosc = "0.11"
 cpal = "0.16"
 midir = "0.10"
 hound = "3.5"
+# Pure-Rust audio import. Explicit, conservative feature set rather than `all`:
+# every container and codec here is one musicians actually hand a sampler, all
+# of it is pure Rust with no system library and no C cross-build, so the same
+# importer compiles for iOS. Deliberately excluded: MKV/WebM, Opus, MP1/MP2 and
+# the nightly-only SIMD features. See docs/IPAD_RUNTIME_PLAN.md.
+symphonia = { version = "0.5.4", default-features = false, features = [
+    "wav",
+    "aiff",
+    "caf",
+    "isomp4",
+    "ogg",
+    "flac",
+    "mp3",
+    "aac",
+    "alac",
+    "pcm",
+    "adpcm",
+    "vorbis",
+] }
 rtrb = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
@@ -34,8 +65,39 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 libc = "0.2"
 mdns-sd = "0.21"
 hostname = "0.4"
+# Control scripting. The QuickJS bindings this resolves to are target-dependent;
+# see the mobile section below.
 rquickjs = { version = "0.13", default-features = false, features = ["std"] }
 rcgen = { version = "0.13", features = ["x509-parser"] }
 time = "0.3"
 base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# QuickJS bindings on mobile targets.
+#
+# `rquickjs-sys` 0.13 ships *pregenerated* C bindings for a fixed list of
+# triples and stops the build on anything else, recommending its `bindgen`
+# feature. `aarch64-apple-ios` and `aarch64-apple-ios-sim` are both outside that
+# list, so this is where an iOS build currently stops. Enabling `bindgen` makes
+# the bindings during the build instead, which keeps scripting on iOS byte for
+# byte the same engine, the same `rquickjs` API and the same `scripts.rs` — no
+# stub, no reduced script surface, no second code path.
+#
+# Declared as a target-specific dependency rather than a crate feature on
+# purpose: `bindgen` needs libclang at build time, and Cargo only unions these
+# features into the resolve when the expression matches the target being built.
+# A desktop, server or CI build therefore keeps exactly the pregenerated-binding
+# dependency it has today and gains no libclang requirement. `bindgen` itself is
+# a build-time-only dependency of `rquickjs-sys`, so it adds nothing to the
+# shipped binary.
+#
+# Android is included because it has the same missing-bindings problem and the
+# same answer; nothing else about Android is implemented. Tauri's
+# `desktop`/`mobile` cfg aliases come from a build script and cannot appear in a
+# Cargo target expression, so the mobile targets are named explicitly, matching
+# `desktop/src-tauri/Cargo.toml`.
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+rquickjs = { version = "0.13", default-features = false, features = [
+    "std",
+    "bindgen",
+] }

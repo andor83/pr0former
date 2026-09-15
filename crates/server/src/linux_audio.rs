@@ -1,4 +1,9 @@
 //! Read-only desktop-audio topology. Never called by the audio worker.
+//!
+//! Compiled everywhere so the `/api/system/audio/linux` route and its types
+//! exist on every host, but only Linux reaches the discovery and route lookup
+//! below; elsewhere they answer an empty topology.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 use axum::{Json, extract::State, http::HeaderMap};
 use serde_json::{Value, json};
 use std::{
@@ -229,9 +234,7 @@ async fn inspect() -> Value {
 }
 pub async fn get(State(app): State<crate::App>, headers: HeaderMap) -> crate::Api<Json<Value>> {
     crate::accounts::admin(&app, &headers)?;
-    if !cfg!(target_os = "linux")
-        || std::env::var("PR0_DISABLE_NATIVE_DEVICES").as_deref() == Ok("1")
-    {
+    if !cfg!(target_os = "linux") || !app.config.native_devices {
         return Ok(Json(json!({"supported":false})));
     }
     static CACHE: tokio::sync::Mutex<Option<(Instant, Value)>> =

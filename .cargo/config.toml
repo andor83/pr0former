@@ -1,3 +1,5 @@
 [env]
 # audiopus_sys bundles an older Opus CMake project; permit its policies on CMake 4.
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# Keep C/CMake dependencies aligned with the Tauri iOS deployment target.
+IPHONEOS_DEPLOYMENT_TARGET = { value = "14.0", force = true }

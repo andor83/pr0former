@@ -23,11 +23,6 @@ struct Take {
     info: serde_json::Value,
     frames: u64,
 }
-fn root() -> PathBuf {
-    std::env::var("PR0_RECORDINGS_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("recordings"))
-}
 fn private_file(path: &Path) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -142,8 +137,8 @@ pub struct Store {
     error: Arc<Mutex<Option<String>>>,
 }
 impl Store {
-    pub fn new() -> Self {
-        Self::at(root())
+    pub fn new(root: PathBuf) -> Self {
+        Self::at(root)
     }
     fn at(root: PathBuf) -> Self {
         let (tx, rx) = mpsc::sync_channel(2);

@@ -741,6 +741,31 @@ Stabilization validation (2026-09-10):
   import, and physical audio/MIDI behavior on those systems remain manual and
   unverified.
 
+- Mobile-safe audio importer (2026-09-14): sample import is a host-owned
+  capability instead of a hard-coded FFmpeg invocation. `RuntimeConfig` carries
+  an `Arc<dyn AudioImporter>`; `crates/server/src/import/` defines the
+  object-safe trait, the bounded `ImportSource`/`ImportLimits` inputs and the
+  `DecodedAudio` output contract, a pure-Rust Symphonia importer, the retained
+  hardened FFmpeg process importer, and a chain that falls back only when an
+  importer reports an unknown container or codec — never after a limit or policy
+  refusal. The standalone server and the desktop application decode in process
+  first and keep their configured FFmpeg behind it; an embedded or mobile host
+  can select `import::pure_rust()` and import audio with no executable at all.
+  `samples::upload` runs the importer on a blocking worker and keeps the setup
+  lock, the 64 MB/30 s/1–8 channel limits, the canonical 32-bit float WAV, the
+  catalog registration, the rate-cache preparation and every existing response.
+  The portable in-process format list is WAV (PCM, IEEE float, ADPCM),
+  AIFF/AIFF-C, CAF, FLAC, MP3, MP4/M4A (AAC-LC, ALAC), ADTS AAC and Ogg (Vorbis,
+  FLAC); MKV/WebM, Opus and MPEG Layer I/II are deliberately not enabled.
+  **Unverified:** this change was written in an environment where neither Cargo
+  nor Python could run, so no `cargo check`, `cargo test`, desktop Cargo check,
+  Python build test or browser test was performed against it, and neither
+  `Cargo.lock` nor `desktop/src-tauri/Cargo.lock` has been regenerated for the
+  new `symphonia` dependency — both must be before any `--locked` build. The
+  generated corpus tests are written but have never executed. No iOS
+  cross-compilation, mobile build or device import was attempted, and nothing
+  here is a claim about decoder behavior on real hardware.
+
 - Native Windows release automation (2026-09-14): the GitHub Actions workflow
   builds an NSIS installer on a GitHub-hosted Windows x86-64 runner using the
   native PowerShell entry point; macOS and Linux remain local builds. It runs
@@ -763,11 +788,481 @@ Stabilization validation (2026-09-10):
   publishing path has not yet run for a new tag. Windows installation, WebView,
   FFmpeg import, and hardware behavior remain manual and unverified.
 
+- Desktop in-process runtime (2026-09-14): the Tauri application no longer spawns
+  the bundled `pr0-server` executable or speaks a stdin/stdout protocol to it. It
+  calls `pr0_runtime::start(RuntimeConfig::embedded(…))` on the Tauri async
+  runtime and keeps the returned `RuntimeHandle` plus the exclusive `desktop.lock`
+  as managed state for the application's lifetime. The hosting dialog's command
+  calls `host_on_lan`/`stop_hosting`/`hosting_status` directly; the pending-reply
+  bridge is gone. Quitting awaits the runtime's one ordered shutdown under the
+  same 30-second ceiling, which now bounds a wait rather than a process kill.
+  Application data, recordings, the bundled frontend and the bundled FFmpeg path
+  are passed as typed configuration, and `PR0_DESKTOP_DISABLE_NATIVE_DEVICES` is
+  read by the application without setting or forwarding any `PR0_*` variable.
+  `pr0-server` is removed from `externalBin` and from both build entry points'
+  staging; FFmpeg remains the one bundled external binary, and standalone server
+  packaging and `init.sh` are unchanged. **Unverified:** this change was written
+  in an environment where Cargo could not run, so no `cargo check`, `cargo test`,
+  Bash syntax check, Python build/desktop test or packaged-application run was
+  performed against it. `desktop/src-tauri/Cargo.lock` still predates the new
+  `pr0_runtime` path dependency and must be regenerated before any `--locked`
+  desktop build or `cargo metadata --locked` license collection can succeed.
+
+- Tauri iOS host slice (2026-09-14): the Tauri package now uses the Tauri 2
+  library entry pattern. `src/lib.rs` exposes `run()` behind
+  `#[cfg_attr(mobile, tauri::mobile_entry_point)]`, `src/main.rs` is only a
+  desktop launcher, and the manifest declares a `staticlib`/`cdylib`/`rlib`
+  library target. The whole desktop host moved unchanged into `src/desktop.rs`
+  behind `cfg(desktop)`, together with the application menus, connection chooser,
+  certificate pinning, saved window layouts, LAN discovery browsing, hosting
+  dialog, exclusive profile lock and bundled FFmpeg converter; `fs2`, `mdns-sd`,
+  `reqwest` and `sha2` are no longer dependencies of a mobile build. `src/mobile.rs`
+  is the new iOS/iPadOS host: it creates the one `main` webview, takes its
+  writable roots from `app_data_dir()` and its read-only web assets from
+  `resource_dir()`, builds `RuntimeConfig::embedded` with native devices enabled,
+  runtime mDNS advertisement off and `import::pure_rust()`, starts `pr0_runtime`
+  in process, validates the private loopback readiness, installs the private
+  owner session as an HttpOnly/SameSite=Strict cookie, navigates to the loopback
+  URL, and at exit runs `RuntimeHandle::shutdown` under the same 30-second
+  ceiling with no process API. No executable is referenced or bundled on iOS.
+  `tauri.ios.conf.json` sets a distinct `org.pr0former.mobile` identifier, empties
+  `externalBin` and the security capabilities, pins iOS 14.0 and points at
+  `Info.ios.plist`, which carries the microphone, local-network and Bonjour
+  purpose strings, `NSAllowsLocalNetworking`, the iPhone/iPad device family and
+  the orientation policy, and deliberately no background-audio entitlement.
+  Desktop `tauri.conf.json` still ships `binaries/ffmpeg`. **Unverified:** neither
+  Cargo nor Python could run in this environment, so no `cargo check`, `cargo
+  test`, desktop Cargo check or Python build test was performed against this
+  change, and the new build tests are written but have never executed. `tauri ios
+  init` was not run, no Xcode project exists, and the workspace has never been
+  compiled for `aarch64-apple-ios`: `midir`, `cpal`, `webrtc`, `opus`, `rquickjs`
+  and bundled `rusqlite` are unconfirmed for that target and may need gating in
+  `pr0_runtime` before the shell links. Whether iOS WKWebView accepts the
+  `set_cookie` call and the cleartext loopback navigation is likewise unverified.
+  No simulator or device run, no audio-session policy, and therefore no claim
+  about iPad behavior of any kind.
+
+- iOS cross-target dependency gating (2026-09-14): two narrow target gates in
+  `pr0_runtime`, plus an audit of the remaining ones.
+
+  `crates/server/Cargo.toml` adds a
+  `[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]`
+  section that re-declares `rquickjs` with its `bindgen` feature. `rquickjs-sys`
+  0.13 ships pregenerated QuickJS bindings only for a fixed list of triples and
+  stops the build on any other, recommending that feature; `aarch64-apple-ios`
+  and `aarch64-apple-ios-sim` are both outside the list. Because Cargo unions a
+  target section's features only when the expression matches the target being
+  built, desktop, server and CI builds resolve `rquickjs` exactly as before and
+  gain no libclang build requirement. Scripting is preserved rather than
+  stubbed: same engine, same `rquickjs` API, same `scripts.rs`, no second code
+  path.
+
+  `crates/server/src/import/ffmpeg.rs` is no longer compiled for those targets,
+  `FfmpegImporter` does not exist there, and `import::standard` returns the
+  in-process Symphonia chain whatever converter name it is given — so no host
+  configuration on a platform without process spawning can reach
+  `std::process::Command`. The signature is unchanged, so desktop and standalone
+  callers are untouched, and desktop behavior (in-process decoding first, the
+  bundled converter behind it) is identical. Pure-Rust import is unchanged on
+  every platform.
+
+  Audited and deliberately *not* gated, because none was shown to be
+  unavailable: `midir`/`coremidi`, `opus`/`audiopus_sys`, `webrtc`, `mdns-sd`,
+  `hostname`, `rcgen`, bundled `rusqlite` and the vendored `cpal` (whose
+  platform module already covers `target_os = "ios"`). Removing MIDI, the WebRTC
+  monitor or LAN hosting to make a check pass would delete shipped behavior, so
+  they stay in and are listed as blockers below instead.
+  `crates/server/src/linux_audio.rs` still compiles everywhere but cannot spawn
+  anything off Linux: `discover_routes` is `cfg(target_os = "linux")` and the
+  `/api/system/audio/linux` handler returns `{"supported":false}` before
+  reaching a process. `resources.rs` already degrades to `resident_bytes() ==
+  None` outside macOS/Linux.
+
+  **Unverified — nothing here was compiled.** Cargo could not run in this
+  environment, so none of `cargo check --target aarch64-apple-ios`, `cargo check
+  --target aarch64-apple-ios-sim`, the root `cargo check`, the desktop
+  `cargo check`, `cargo test` or the Python build tests was executed against
+  this change. Neither `Cargo.lock` was regenerated, and enabling `bindgen`
+  adds `bindgen` and its dependencies to the iOS resolve, so both lockfiles are
+  stale for a `--locked` build. That `rquickjs` 0.13 forwards a `bindgen`
+  feature to `rquickjs-core`/`rquickjs-sys` is taken from that crate's
+  documented remedy and has not been confirmed against the vendored manifest
+  here. Nor has the generation itself been exercised: `bindgen` must find
+  libclang and must be given the iOS target triple and SDK sysroot by
+  `rquickjs-sys`' build script, and if it instead reads the host macOS headers
+  the failure will surface as bad QuickJS bindings rather than as a missing
+  feature. The following are therefore the *expected next* iOS blockers, not
+  observed ones: `opus` 0.3 builds libopus from C source through
+  `audiopus_sys` 0.2.2 and `cmake`, which has no iOS toolchain configuration in
+  this repository; `midir` 0.10.4 has not been confirmed to select its CoreMIDI
+  backend for `target_os = "ios"` rather than only `macos`; and `webrtc` 0.14's
+  transitive crates are unconfirmed for the target. Each needs its own design
+  decision if it fails, and none of them is addressed by this change.
+
 - GitHub visibility (2026-09-14): `andor83/pr0former` is public. Before the
   initial public release, tracked filenames, current tracked contents, and Git
   history were checked for common private-key/token patterns with no matches.
   Ignored local data, certificates, recordings, dependencies, and build outputs
   were not uploaded.
   by either visibility change.
+
+- iOS native linkage (2026-09-14): `tauri ios init` has been run, and the whole
+  tree now compiles for `aarch64-apple-ios-sim` — `midir`/`coremidi`, the
+  vendored `cpal`, `webrtc`, `opus`/`audiopus_sys`, bundled `rusqlite` and
+  `rquickjs` with generated bindings all built, so none of the crates listed as
+  expected blockers in the entry above needed gating. The unsigned simulator
+  archive then failed at the final Xcode link with undefined CoreMIDI symbols
+  (`MIDIClientCreate`, `MIDIObjectGetStringProperty`, the `kMIDIProperty*`
+  constants) and undefined AudioToolbox symbols (`AudioComponentFindNext`,
+  `AudioUnitInitialize`, `AudioOutputUnitStart`), because Cargo produces a
+  `staticlib` and a static archive cannot carry the framework link directives
+  its crates emit.
+
+  The fix is `bundle.iOS.frameworks` in `desktop/src-tauri/tauri.ios.conf.json`,
+  which Tauri renders into the generated XcodeGen `project.yml`: CoreMIDI,
+  CoreAudio, AudioToolbox, CoreFoundation and Foundation. `gen/apple` is ignored
+  by Git and regenerated from that configuration, so nothing was edited in the
+  generated project. No MIDI, WebRTC or audio feature was disabled to make the
+  link proceed, and desktop packaging gained no iOS bundle section, so desktop
+  and standalone linking are untouched. `tests/test_build.py` asserts the
+  framework list, that `midir` and `webrtc` remain dependencies, and that the
+  desktop configuration has no iOS section.
+
+  **Unverified:** the framework list was derived by reading the symbol tables of
+  the built `libapp.a`, not from a successful link. Neither Cargo, Node nor
+  `xcodebuild` could run in the environment that made this change, so the
+  project was not regenerated, no archive was attempted, and the Python build
+  tests were not executed. Two items are open and neither is addressed here.
+  First, the C deployment target: the Opus `CMakeCache.txt` records
+  `-mios-simulator-version-min=26.5`, the installed SDK version rather than the
+  shipped 14.0 minimum, so every Opus object links with a deployment-target
+  warning. Those objects were built by a standalone `cargo build` before the
+  Xcode project existed and then reused from the Cargo cache, so whether the
+  Tauri Xcode script path supplies the variable is untested either way. The
+  lever that covers both paths is a one-line `IPHONEOS_DEPLOYMENT_TARGET` entry
+  in the existing `[env]` table of `.cargo/config.toml` — the same table that
+  already carries `CMAKE_POLICY_VERSION_MINIMUM` for this build — plus one
+  `cargo clean -p audiopus_sys`, because that crate declares no
+  `rerun-if-env-changed` for it. That file could not be written from this
+  environment; the exact snippet is in `docs/IPAD_RUNTIME_PLAN.md`, and the
+  build test skips with a pointer to it until the key exists. Second, the
+  archive also references `AudioSessionGetProperty`, a `coreaudio-rs` 0.13
+  reference to an AudioSession C API Apple deprecated in iOS 7; whether
+  AudioToolbox still exports it has not been checked against the SDK. No
+  simulator run, no audio-session policy and therefore still no claim about iPad
+  behavior of any kind.
+
+- iPad audio lifecycle (2026-09-15): the shared runtime gained one idempotent
+  suspend/resume of native audio hardware, and the Tauri iOS shell gained the
+  `AVAudioSession` policy and lifecycle bridge that drives it.
+
+  `RuntimeHandle::suspend_audio`/`resume_audio` (plus `_blocking` forms for a
+  host on an operating-system callback thread, and `audio_suspended`) close and
+  reopen the output/input streams on the orchestration worker, between DSP
+  blocks, through the same ordered command queue as engine enablement and
+  shutdown. Nothing is added to `Engine::render` or to a device callback.
+  Suspension stops rendering rather than falling back to the software schedule,
+  so the engine sample clock, transport position, prepared graph, loop buffers
+  and open recordings are exactly where resume finds them; enabling the engine
+  while suspended opens no device, and resume reopens exactly the directions
+  that were open when the hardware closed, so hardware output an owner had
+  stopped is not restarted by a lifecycle event; a device that refuses to
+  reopen leaves the runtime resumed with a device error. `/api/devices` and engine telemetry
+  publish `audio_suspended`. Standalone-server and desktop behavior is
+  unchanged — neither host calls these methods.
+
+  `desktop/src-tauri/src/audio_session.rs` sets category, mode, preferred sample
+  rate and preferred I/O buffer duration before the runtime can open a device,
+  selecting `playAndRecord` (speaker, Bluetooth A2DP, AirPlay) only when the
+  saved settings enable a native input and `playback` otherwise, so the
+  microphone prompt stays attached to a feature in use. It then observes
+  interruption begin/end, route loss, media-service resets and
+  foreground/background for the life of the process, completing each transition
+  before the handler returns within bounded deadlines (2 s to close, 3 s to
+  reopen). Nothing reopens the hardware while the application is not in the
+  foreground, so a route change or reset arriving in the background closes and
+  stays closed until the application becomes active. Route loss reopens on the replacement route rather than pausing,
+  because this is an instrument under the performer's control. Exit runs the
+  ordered shutdown and only then hands the session back. Its Objective-C is
+  behind `cfg(target_os = "ios")` and its dependencies (`objc2`,
+  `objc2-avf-audio`, `objc2-foundation`, `objc2-ui-kit`, `block2`) are declared
+  in a `cfg(target_os = "ios")` target section, so no desktop or server build
+  acquires them. `AVFAudio` joins `bundle.iOS.frameworks`. There is still no
+  background-audio entitlement and no keep-awake policy. `UIDeviceFamily` was
+  removed from `Info.ios.plist`: Xcode generates it from the target's
+  `TARGETED_DEVICE_FAMILY` and warns that a user-supplied key is ignored.
+
+  Validation: 327 workspace Rust tests passed (one opt-in benchmark ignored),
+  including new coverage for idempotent suspend/resume, the reported state
+  through `/api/devices`, transitions completed from a plain thread with no
+  async runtime, suspend/resume after shutdown, shared device opening, and the
+  audio preferences a host reads before opening anything. 15 desktop Rust tests
+  passed, including three that cover the session-policy decisions on a build
+  machine, and 21 build tests passed. Both desktop process tests passed
+  against a fresh release `pr0-server`, so the `--desktop` adapter is
+  unaffected. The workspace and the desktop package
+  both type-check for `aarch64-apple-ios-sim`, and both lockfiles now resolve
+  with `--locked`, which earlier entries recorded as stale. `tauri ios init`
+  was rerun and a
+  debug simulator bundle built and linked: `AVFoundation` is now among the
+  application's load commands where the previous build had no AVF framework at
+  all, the merged `Info.plist` still declares `UIDeviceFamily` `[1, 2]` and no
+  `UIBackgroundModes`, and the deployment-target warnings from the Opus objects
+  are gone now that `.cargo/config.toml` pins `IPHONEOS_DEPLOYMENT_TARGET`. The
+  previously open `AudioSessionGetProperty` question is answered for the
+  simulator SDK: the reference resolves from AudioToolbox and the link
+  succeeds; the device SDK has not been linked.
+
+  Simulator behavior, with an important qualification — *superseded by the
+  2026-09-15 entry below, which removed this blocker*: launching the build as it
+  stood **aborted** before the interface appeared, in
+  `wry`'s WKWebView `set_cookie` helper, which pumps the main run loop
+  re-entrantly until Tao's Core Foundation observer panics through an
+  `extern "C"` boundary (`SIGABRT`, `panic_cannot_unwind`). That is the private
+  session bootstrap this repository already listed as unverified, not anything
+  in this change, and it is the blocker for every remaining Phase 4 gate item.
+  To exercise the audio lifecycle at all, the cookie call was bypassed in a
+  **temporary local patch that was reverted and is not in the tree**; with that
+  patch the application ran, `pr0_runtime` served its private loopback listener
+  (answered from the host), the audio session was configured with no error
+  reported, and three background/foreground cycles each logged a completed
+  suspend and a completed resume with the runtime still serving afterwards.
+
+  **Unverified:** no physical iPad, no audio was heard, and no interruption,
+  route change or media-services reset was exercised in any form — the
+  simulator provides no way to raise them. The engine was never enabled during
+  the simulator run, so suspend/resume there closed and reopened nothing, and
+  the state-preservation contract is covered by design and by host-side tests
+  rather than by an observed hardware transition. Microphone permission, the
+  `playAndRecord` path, WKWebView's own use of the audio session during a
+  WebRTC uplink, Bluetooth and USB-C routes, and every latency claim remain
+  untested. Nothing here is a statement about how iPad audio behaves.
+
+- Webview session bootstrap and audio-lifecycle state machine (2026-09-15): the
+  iOS startup abort is fixed, and the platform suspend/resume path was corrected
+  where it lost the owner's hardware intent.
+
+  **Session handoff.** Host-side `WebviewWindow::set_cookie` is gone from
+  `desktop/src-tauri/src/runtime.rs`. `pr0_runtime` now publishes a one-time
+  `RuntimeHandle::bootstrap_url()` — `http://127.0.0.1:<port>/__session-bootstrap/<72-char token>`
+  — and the shell navigates its webview there once. The runtime replies with the
+  same `pr0_session` HttpOnly/SameSite=Strict/Path=/ cookie login issues, plus
+  `Cache-Control: no-store` and a `303` redirect to `/`, so the interface's own
+  address holds no credential. The token is two v4 UUIDs, compared in constant
+  time, destroyed by its first successful redemption and otherwise after eight
+  wrong tokens, 120 seconds, or `shutdown()`. It is merged into the router
+  *after* the local-network hosting router is cloned and *inside* the private
+  listener's exact-authority Host guard, so it exists only on the runtime's own
+  ephemeral loopback listener, never on the LAN listener, and never in
+  `RuntimeMode::Server`. The long-lived session no longer passes through the
+  host or the webview API at all. Authentication, CSRF, project authorization
+  and the DNS-rebinding guard are unchanged; there is no JavaScript-readable
+  token and no persistent query credential. Desktop multi-window cookie copying
+  in `windows.rs` is a separate per-origin feature and is untouched.
+
+  **Audio lifecycle.** The orchestration worker kept two "restore" flags
+  snapshotted at suspension, which produced four real defects: enabling the
+  engine while the hardware was closed left the runtime enabled and permanently
+  silent after resume; `Command::Hardware` while suspended was dropped in both
+  directions, so resume could restart output the owner had stopped and could not
+  start output the owner had asked for; a failed reopen discarded the intent, so
+  the *next* background/foreground cycle silently reported success with nothing
+  open; and a repeat resume could never retry a failed open. The flags are
+  replaced by a standing `Wanted` intent that every command maintains and that
+  suspension does not touch. Resume reconciles — it opens whichever wanted
+  direction is closed, independently, so a capture device the system will not
+  hand back no longer keeps the loudspeaker closed either. `Unload` withdraws
+  the capture intent with the capture it closes, so returning to the foreground
+  cannot reopen a microphone with no project loaded; `Shutdown` withdraws both.
+  A lifecycle transition that loses a race with shutdown is now answered
+  (a suspend is satisfied by closed hardware) instead of returning a channel
+  error.
+
+  **Audio-session category.** `RuntimeConfig` gained an optional `AudioPolicy`
+  capability, which the worker calls immediately before it opens a stream with
+  the exact settings it is about to use. iOS supplies it, so a performer who
+  enables an input in the *running* application gets `playAndRecord` installed
+  before the input is opened, instead of opening against a playback-only session
+  until the next background/foreground cycle. Launch-time `prepare` and the
+  bridge's own reapply on resume are kept: they cover activation after an
+  interruption or a media-services reset, when nothing is being opened. No other
+  host supplies a policy, and none is reached from a render or device callback.
+
+  Validation: 339 workspace Rust tests passed, including seven new
+  audio-lifecycle cases driven through the real orchestration worker with
+  `native_devices` cleared — so a *selected* interface refuses to open and an
+  unselected one opens trivially, which is what makes the state machine
+  observable with no hardware, no permission prompt and no audio. Four of those
+  seven fail against the previous logic, which was checked by reinstating it.
+  Five new runtime cases cover the handoff: it installs the session once with
+  the right cookie attributes and redirect, stops working immediately after, is
+  refused for a foreign `Host`, is absent from the local-network router and from
+  server mode, is bounded to eight attempts, expires, is revoked by shutdown,
+  and never renders its secrets through `Debug`. 16 desktop Rust tests and 32
+  build tests passed.
+
+  **Simulator run, without any bypass.** A debug `aarch64-sim` bundle was built
+  and launched on an iPad Pro 13-inch (M5) simulator running iPadOS 26.5. The
+  application reached its signed-in interface — the first time the iOS shell has
+  displayed anything — created a project through its own API, enabled the
+  engine, and opened CoreAudio output (`hardware_enabled: true`, `error: ""`,
+  one enumerated `Default Device`). Four background/foreground cycles each
+  logged a completed suspend and a completed resume; with the engine enabled,
+  `/api/devices` reported `audio_suspended` and `hardware_enabled` flipping
+  together each time and returned to open output. Stopping hardware output while
+  suspended left it closed after resume, and asking for it while suspended
+  opened it — the two cases the previous code got backwards. After a full
+  application restart the project created in the earlier launch reopened, the
+  engine re-enabled and output opened again, and the profile log recorded the
+  worker-side policy install (`category=playback, 48000 Hz, 0.0027 s buffer`)
+  before each open.
+
+  **New blocking defect found on iOS, not introduced here: enabling a native
+  input aborts the process.** *Resolved in the next entry below — the diagnosis
+  below is correct as far as it goes, but the same abort also reaches stream
+  opening, so the resolution is a safe refusal rather than a working input.* With one input interface enabled in the saved
+  settings, the `playAndRecord` category is installed as designed — the log
+  shows `category=playAndRecord` — and the process then dies with `SIGABRT` from
+  `AudioToolbox`'s `_ReportRPCTimeout` → `abort()`, under
+  `AURemoteIO::Initialize` ← `AudioUnitInitialize` ← CPAL's iOS
+  `supported_output_configs` ← `pr0_runtime::audio::device_details` ←
+  `settings::discover`, on a Tokio blocking worker. CPAL's iOS backend
+  *initializes an AudioUnit just to enumerate supported configurations*, and
+  AudioToolbox aborts the whole process when that RPC times out. It reproduces
+  at launch with the engine never enabled, so it is the pre-existing launch-time
+  `audio_session::prepare` plus the pre-existing enumeration path, not the
+  capability added here; the capability only makes the same category reachable
+  from a mid-session settings change as well. Removing the input from the saved
+  settings restores a working application immediately. **No iOS build should
+  enable a native input until this is resolved** — likely by requesting record
+  permission before activating `playAndRecord`, and by not initializing an
+  AudioUnit to enumerate on that platform. It is Phase 5 work and is not fixed
+  here.
+
+  **Unverified.** No physical iPad, and no audio was heard. The simulator cannot
+  raise an interruption, a route change or a media-services reset, so none of
+  those paths has been exercised anywhere, and the simulator has no microphone
+  at all, so the abort above may or may not reproduce on hardware. The remaining
+  Phase 4 gate items — importing fixtures, surviving process termination,
+  touch/rotation/keyboard — were not run, and no latency or reliability claim is
+  supported.
+
+  **Out of scope, found during review and not changed here:**
+  `crates/server/src/lib.rs` applies its `security_headers` middleware with
+  `Router::layer` on an empty `Router::new()`, before any route is added, so
+  `X-Frame-Options`, `X-Content-Type-Options` and `Referrer-Policy` reach no
+  response on any host. This predates the branch — it is the same on `main` —
+  and was confirmed against the running simulator build. *Fixed in the next
+  entry below.*
+
+- iOS logical audio routes, capture capability gating, and response hardening
+  (2026-09-15): the iOS device path no longer enumerates, native capture fails
+  safely instead of aborting the process, and the baseline security headers
+  reach responses for the first time.
+
+  **Platform device boundary.** `crates/server/src/native_audio.rs` holds two
+  device models. Enumerated devices — macOS, Linux, Windows, the standalone
+  server — are unchanged in behavior and in code; their implementation is now
+  behind `cfg(not(target_os = "ios"))`. Logical routes are new and iOS-only: one
+  output route `ios:default-output` and one input route `ios:default-input`,
+  with stable IDs derived from those fixed names, resolved with CPAL's
+  `default_output_device`/`default_input_device` (zero-sized values on that
+  backend — no audio unit, no AudioToolbox RPC), and a stream configuration
+  synthesized from the host's `AVAudioSession` reading instead of
+  `supported_input_configs`/`supported_output_configs`. Discovery, settings
+  merging, route validation, latency compensation and the settings API are
+  otherwise unchanged; the iOS capture route is added *disabled* by discovery,
+  under the same opt-in rule the explicit Linux PCM routes already used.
+
+  **Capture capability.** `RuntimeConfig::audio_routes` is a new typed
+  `AudioRoutes` capability: the current route description, `CaptureSupport`
+  (whether the host's backend can record at all), `CaptureAuthorization`
+  (granted / denied / restricted / undetermined / not-required) and a
+  non-blocking permission request. The device layer checks support first and
+  authorization second, once, before any capture device is touched, on the
+  orchestration worker and never in a render or device callback. Hosts that
+  enumerate devices install no capability and are unaffected — verified by a
+  test rather than asserted.
+
+  **What the investigation found, and why capture is off.** Not enumerating was
+  necessary but not sufficient. `AudioUnitInitialize` is also what *opening* a
+  stream calls, and the deadlock belongs to the session category rather than the
+  direction. On an iPad Pro 13-inch (M5) simulator running iPadOS 26.5, with
+  microphone access granted through `simctl privacy` and an input route present,
+  installing `playAndRecord` and then initializing RemoteIO logged
+  `Initialize: RPC timeout. Apparently deadlocked. Aborting now.` and `abort()`ed
+  — in `open_outputs`, in `build_output_stream_raw`, before any capture unit
+  existed. The host Mac had a default input device throughout, so this is not
+  "the simulator has no microphone". Under `Playback` the same output opened
+  normally, repeatedly. Separately, reading `AVAudioSession`'s input-availability
+  property was itself enough to put the microphone prompt on screen at launch,
+  confirmed by counting `kTCCServiceMicrophone` requests in `tccd`'s log.
+
+  So the iOS host reports `CaptureSupport::Unimplemented`. Native input is
+  refused with that sentence in `/api/devices` and in the engine error, no
+  microphone prompt is produced, the input-availability read does not happen, and
+  `playAndRecord` is never selected — which is what keeps *playback* safe, not
+  only capture honest. Turning capture on is one constant in
+  `desktop/src-tauri/src/audio_session.rs`; the permission gate, refusal
+  messages, opt-in discovery rule and category decision downstream of it are
+  implemented and tested, and a desktop test asserts the shipped value so it
+  cannot change silently. `docs/IPAD_RUNTIME_PLAN.md` Phase 5 lists the custom
+  CoreAudio work and the hardware evidence that would have to come first.
+
+  **Security headers.** `crates/server/src/lib.rs` applied its `security_headers`
+  middleware to `Router::new()` before any route was registered. `axum`'s
+  `Router::layer` wraps only the routes that exist when it is called, so
+  `X-Frame-Options`, `X-Content-Type-Options` and `Referrer-Policy` reached *no*
+  response, on any host, on any route. The layer is now applied after every route
+  and the fallback. The one-time session handoff, which is merged into the router
+  after `assemble` returns, carries the same layer explicitly and additionally
+  sets `Referrer-Policy: no-referrer` on both its redirect and its 404 — stricter
+  than the application-wide `same-origin` floor, because the single-use path is
+  itself the credential — while keeping `no-store` and single use unchanged.
+
+  Validation: 352 workspace Rust tests (164 in `pr0_runtime`), 19 desktop Rust
+  tests, 32 build tests, 117 frontend tests and the production frontend build all
+  pass. New coverage: ten `native_audio` cases (stable route identities without
+  enumeration, each refusal's wording, no prompt when the backend cannot record,
+  the no-capability case, the opt-in rule, channel clamping, and that enumerating
+  hosts are untouched); one `audio` case proving `open_inputs` refuses on
+  authorization before it resolves a device; four `audio_session` cases over the
+  category decision including the shipped capture constant; and three `runtime`
+  cases over response headers — every route class on the private listener, the
+  router local-network hosting serves, and the handoff's own responses. The
+  header test was confirmed to fail against the previous layer ordering by
+  reinstating it. `cargo check` is clean for `aarch64-apple-ios-sim` and
+  `aarch64-apple-ios`, and both lockfiles still resolve with `--locked`.
+
+  **Simulator run, without any bypass.** A debug `aarch64-sim` bundle was built
+  from this tree and launched on an *erased* iPad Pro 13-inch (M5) simulator
+  running iPadOS 26.5. `/api/system/audio` listed exactly the two logical routes
+  with the output enabled and the input disabled; `/api/devices` showed two
+  channels out, one in, and the capture refusal on the input row. A project was
+  created, the engine enabled, and CoreAudio output opened through the logical
+  route (`hardware_enabled: true`, no error, no underruns).
+  Background/foreground cycles closed and reopened that output, with
+  `audio_suspended` and `hardware_enabled` flipping together each time.
+  Selecting the capture route and re-enabling the engine returned HTTP 400 with
+  the capture sentence and the process stayed alive, where the previous build
+  aborted. `tccd` recorded zero `kTCCServiceMicrophone` requests across the whole
+  sequence, and no permission alert appeared. `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin` were
+  present on the interface, on static assets, on a 404, on the API routes checked
+  and on an unauthenticated 401.
+
+  The aborting behavior above was reproduced deliberately, on an earlier build of
+  this same change with capture enabled, to establish what it is: microphone
+  granted via `simctl privacy`, `playAndRecord` installed, and the crash report
+  showing `AudioUnitInitialize` → `AURemoteIO::Initialize` → `_ReportRPCTimeout`
+  → `abort()` on the `pr0-orchestrator` thread inside `open_outputs`.
+
+  **Unverified.** No physical iPad and no audio heard. A simulator is not audio
+  hardware and is not evidence about physical output, latency, interruptions,
+  route changes or media-services resets, none of which it can raise. Whether
+  `AudioUnitInitialize` under `playAndRecord` deadlocks on real hardware is
+  unknown, and nothing here should be read as an answer. The Phase 4 gate items
+  not run remain not run: importing fixtures, surviving process termination, and
+  touch/rotation/keyboard checks.
 
 See [VALIDATION_HISTORY.md](VALIDATION_HISTORY.md) for dated prior runs, [AUDIO_ENGINE_AUDIT.md](AUDIO_ENGINE_AUDIT.md) for the September 8 audit, and [ARCHITECTURE.md](ARCHITECTURE.md) / [SCORE_EDITOR.md](SCORE_EDITOR.md) for current contracts and usage.

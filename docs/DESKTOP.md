@@ -1,9 +1,12 @@
 # Desktop application
 
 `./build.sh` on macOS/Linux and `build.ps1` on Windows build a Tauri 2 application
-containing the existing Rust server, the production Vue interface, and a pinned
-FFmpeg executable. The standalone server remains available through `init.sh`;
-neither build entry point installs a desktop startup service.
+containing the shared pr0former runtime, the production Vue interface, and a
+pinned FFmpeg executable. The runtime is the same library the standalone server
+runs (`pr0_runtime`), compiled into the desktop binary rather than shipped as a
+separate server executable; FFmpeg remains the one bundled external binary. The
+standalone server remains available through `init.sh`, unchanged; neither build
+entry point installs a desktop startup service.
 
 ## Build
 
@@ -85,10 +88,15 @@ installer signing, and installation must be validated on Windows hardware or a V
 The first build downloads locked npm/Rust dependencies and the checksum-pinned
 FFmpeg 8.1.1 source. FFmpeg is compiled locally and cached in `desktop/.build/`.
 The application does not download FFmpeg at launch and does not invoke a system
-FFmpeg. Import support is the formats supported by this particular build,
-including FFmpeg's built-in audio decoders. Optional external codec libraries are
-not enabled. The existing importer uses the `fd` protocol, preserves channels,
-and converts to project-rate float WAV; its existing limits still apply.
+FFmpeg. Audio import now decodes in process first — WAV, AIFF/AIFF-C, CAF, FLAC,
+MP3, MP4/M4A (AAC-LC, ALAC), ADTS AAC and Ogg (Vorbis, FLAC) — and reaches the
+bundled FFmpeg only for containers or codecs the in-process decoder does not
+recognize. A file refused for its channel count, its length, or because it is not
+audio is never retried with FFmpeg. So the additional import support is the
+formats supported by this particular build, including FFmpeg's built-in audio
+decoders; optional external codec libraries are not enabled. The FFmpeg importer
+still uses the `fd` protocol, and both importers preserve channels and convert to
+project-rate float WAV with the existing limits.
 
 FFmpeg is a separate executable built without GPL/nonfree/version3 components.
 Its exact source archive, LGPL 2.1 text and build recipe are bundled under
@@ -211,6 +219,35 @@ The remote workflow follows [Tauri's signing-tool access setup](https://v2.tauri
 and [Apple's Keychain-based notarization workflow](https://developer.apple.com/documentation/technotes/tn3147-migrating-to-the-latest-notarization-tool).
 
 
+## Source layout
+
+`desktop/src-tauri` follows the Tauri 2 library entry pattern, because Tauri
+starts a mobile application from a library rather than a `main`:
+
+- `src/lib.rs` — module wiring and `run()`, the single entry point. It carries
+  `#[cfg_attr(mobile, tauri::mobile_entry_point)]`.
+- `src/main.rs` — the desktop launcher; it calls `run()` and nothing else.
+- `src/desktop.rs` — the macOS/Linux/Windows host: menus, windows, discovery
+  browsing, the connection chooser and the hosting dialog. Compiled only for
+  desktop targets, along with `connections.rs`, `discovery.rs`, `hosting.rs`,
+  `trust.rs` and `windows.rs`.
+- `src/mobile.rs` — the iOS/iPadOS host, with `src/audio_session.rs` beside it
+  carrying the `AVAudioSession` policy, the lifecycle bridge and the two typed
+  capabilities the runtime is given there: the audio policy, and the route and
+  capture-authorization capability. It runs on an iPad simulator and has never
+  run on a device; the Xcode project under `gen/apple` is generated from
+  `tauri.ios.conf.json` and is not tracked, so iOS project changes such as the
+  linked Apple frameworks belong in that configuration. Native audio *input* is
+  reported as unavailable on that host — see `docs/IPAD_RUNTIME_PLAN.md`
+  Phase 5 for the measured reason and the work that would change it — and output
+  is unaffected. See that document for what the rest does and does not mean.
+- `src/runtime.rs` — shared by both hosts: the embedded `pr0_runtime`, its
+  readiness contract, the one-time handoff that installs the private owner
+  cookie, and the ordered shutdown. The exclusive profile lock and the bundled
+  FFmpeg converter are desktop-only.
+
+The desktop build, bundle contents and behavior are unchanged by this layout.
+
 ## Launch and local authentication
 
 Opening the app starts a private server on an OS-selected `127.0.0.1` port, then
@@ -223,9 +260,20 @@ Quit the app to end it. User creation and invitations remain available for remot
 clients, whose ordinary sessions can still sign out.
 Sessions follow the server's existing 24-hour expiry and are revoked on clean exit.
 
-The server sends its fresh session over the parent's private stdout pipe. Rust
-sets an HttpOnly/SameSite=Strict cookie in the desktop webview before navigating.
-The credential is never placed in a URL or the desktop log. The bundled connection
+The runtime creates its fresh session in process, never over a pipe, a network
+response or a log line, and the application shell never receives it. Instead the
+runtime publishes a one-time `/__session-bootstrap/<token>` URL on its own
+private loopback listener; the shell navigates the webview there exactly once,
+and the runtime answers with an HttpOnly/SameSite=Strict `pr0_session` cookie —
+the same one login issues — and a `303` redirect to `/`, so the interface's own
+address carries nothing. The token is 72 characters of operating-system
+randomness, compared in constant time, destroyed by the first successful
+redemption, and in any case after eight wrong tokens, two minutes, or shutdown.
+It exists only on the private Host-guarded listener: local-network hosting
+serves the router without it, and the standalone server never has one. This
+replaced `WebviewWindow::set_cookie`, which aborts the process on iOS; no
+credential is placed in a URL that survives its use, in the desktop log, or
+anywhere JavaScript can read it. The bundled connection
 dialog alone has permission to open a remote session; project windows have no
 frontend Tauri permissions. HTTP requests must use the actual localhost Host;
 normal API authentication, CSRF headers, project authorization and WebSocket
@@ -295,9 +343,10 @@ Create a project invitation on the laptop and use its `/?invite=...` path with t
 **HTTPS hosting address**, replacing the private localhost address in a copied
 invitation link. The certificate itself grants no project access.
 
-A future Tauri iPad app is intended to be **client-only**: discovery, connection,
-and performance controls, with no bundled server or host menu. The existing
-macOS/Linux desktop packaging is separate; this change does not build an iPad app.
+A future Tauri iPad app would embed the same shared runtime this application now
+uses; `docs/IPAD_RUNTIME_PLAN.md` holds its scope, phases and gates. No iPad
+build, mobile device path or App Store submission exists yet, and the existing
+macOS/Linux/Windows desktop packaging is separate.
 Actual iPad certificate installation, microphone/WebRTC behavior, and performance
 over Wi-Fi still require physical-device testing.
 
@@ -320,12 +369,15 @@ after relaunch. Layout state stays outside project revisions and undo history.
 Closing the last project window/tab also stops its show and disables its engine
 after the server’s five-second reconnect grace, even while the server stays open.
 
-Closing the application closes its control pipe. The server stops device I/O,
-finalizes active loops/recordings and waits for their writer barriers before exit.
-The same EOF path handles a launcher crash. The launcher waits up to 30 seconds
-before forcing an unresponsive server down; forced termination/power loss cannot
-guarantee a completed recording. A file lock prevents concurrent desktop servers
-using the same application data directory. A second launch shows an explanation.
+Closing the application runs the runtime's single ordered shutdown in process: it
+stops listening, drops local-network hosting and mDNS, stops device I/O,
+finalizes active loops/recordings and waits for their writer barriers, then
+revokes the private session. The application waits up to 30 seconds for that
+sequence; there is no child process to terminate, so an overrun is reported
+rather than forced, and a crash or power loss still cannot guarantee a completed
+recording. A file lock held for the whole application lifetime prevents concurrent
+desktop runtimes using the same application data directory. A second launch shows
+an explanation.
 
 ## Files and troubleshooting
 
@@ -337,22 +389,32 @@ Default writable application directories:
 - Windows: `%APPDATA%\org.pr0former.desktop\`
 
 Inside are `data/` (SQLite, settings, samples and loops), `recordings/`,
-`desktop-server.log`, `desktop.lock`, `trusted-servers.json` and `window-layouts.json`. The lock is held by the OS, so a leftover
+`desktop-server.log` (runtime diagnostics, replaced at each launch),
+`desktop.lock`, `trusted-servers.json` and `window-layouts.json`. The lock is held by the OS, so a leftover
 file after a crash does not prevent another launch. Application updates do not
 replace these files. The desktop does not adopt the repository's `data/` folder
 or an existing server database automatically.
 
 For an isolated profile or testing, set `PR0_DESKTOP_DATA` to an absolute directory.
 `PR0_DESKTOP_DISABLE_NATIVE_DEVICES=1` disables physical device access in that
-profile. Other inherited `PR0_*` server settings are deliberately removed by the
-launcher; desktop-owned resource/data paths are passed explicitly. A server
-startup failure is shown in the window; detailed errors are in the profile log.
+profile. Both are read by the desktop application itself and are never forwarded
+as `PR0_*` runtime settings. Inherited `PR0_*` server settings cannot affect the
+desktop application at all: the embedded runtime reads no environment variables,
+so every filesystem root and capability — application data, recordings, the
+bundled frontend, and the audio import capability built from the bundled FFmpeg
+path — is passed to it explicitly. An
+engine startup failure is shown in the window; detailed diagnostics are in the
+profile log.
 
 Standalone server additions: `PR0_WEB_ROOT` selects the frontend directory and
-`PR0_FFMPEG` selects the converter executable. Both retain their prior defaults.
-`pr0-server --desktop` is the launcher's private protocol: stdout carries a session
-credential, private JSON stdin commands control opt-in hosting, stdin closure requests shutdown, and bind/TLS environment overrides are ignored.
-Do not use that mode as a public service command.
+`PR0_FFMPEG` selects the fallback converter executable behind the in-process
+decoder. Both retain their prior defaults.
+`pr0-server --desktop` remains a private stdin/stdout adapter over the same
+runtime API for tests and tooling: stdout carries a session credential, private
+JSON stdin commands control opt-in hosting, stdin closure requests shutdown, and
+bind/TLS environment overrides are ignored. The desktop application no longer
+uses it — it embeds the runtime directly. Do not use that mode as a public
+service command.
 
 ## App artwork
 
@@ -369,8 +431,23 @@ profiles and disabled native devices. It checks private authentication, Host
 validation, persistent owner identity, frontend serving, session revocation and
 finalizing a two-channel recording on pipe closure. It also checks hosted TLS validation, CA/profile consistency, invited account access, Secure cookies, rejection of the private desktop token over LAN, setup HTTP isolation, and hosting stop/restart. Rust tests cover refusing to
 adopt existing server accounts and generating fresh sessions for one stable owner.
+That suite exercises the `pr0-server --desktop` stdin/stdout adapter, which shares
+its lifecycle, identity and hosting implementation with the embedded desktop
+runtime but is no longer what the application runs.
+`cargo test --manifest-path desktop/src-tauri/Cargo.toml` covers the host side
+directly: the roots and capabilities every host hands the embedded runtime, the
+loopback readiness contract — including that the session handoff is a
+full-length single-use path on the engine's own origin — checked before the host
+navigates anywhere, the
+desktop profile roots and bundled converter, and the exclusive profile lock. The
+readiness and shared-configuration cases compile on every target, so they also
+cover the mobile host; the mobile-only configuration case compiles only for a
+mobile target and has never been run. `crates/server` lifecycle tests start and stop
+isolated embedded runtimes in one process without any child process.
 `web/e2e/desktop.spec.ts` exercises the desktop session/interface flow in Chromium;
 it does not test native webview cookie storage or microphone permissions.
+In-process engine startup, LAN hosting and quit-time recording finalization
+inside the packaged application remain manual acceptance checks.
 
 macOS/Linux/Windows hardware audio, physical MIDI, WebRTC capture/monitoring,
 sleep/wake, long performances, signing/notarization, Windows installation, and

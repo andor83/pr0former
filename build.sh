@@ -299,7 +299,8 @@ unset CARGO_BUILD_TARGET
 export CARGO_TARGET_DIR="$project_root/target"
 npm ci --prefix web
 npm run build --prefix web
-cargo build --release --locked -p pr0-server -j "$jobs"
+# The application runtime is compiled into the desktop binary by the Tauri build
+# below; the standalone pr0-server executable is no longer bundled.
 echo 'Preparing bundled FFmpeg (the first compilation can take several minutes)…'
 bash "$project_root/scripts/build-ffmpeg.sh" "$cache" "$jobs"
 mkdir -p "$stage/binaries" "$stage/resources/web" "$stage/resources/licenses/ffmpeg"
@@ -308,9 +309,11 @@ python3 - "$project_root/web/dist" "$stage/resources/web" <<'PY'
 import shutil,sys
 shutil.rmtree(sys.argv[2]); shutil.copytree(sys.argv[1],sys.argv[2])
 PY
-cp "$project_root/target/release/pr0-server" "$stage/binaries/pr0-server-$build_target"
+# FFmpeg is the only external binary. Remove a server sidecar staged by an
+# older build so it is not relocated, signed or shipped.
+rm -f "$stage/binaries/pr0-server-"*
 cp "$cache/ffmpeg-8.1.1/ffmpeg" "$stage/binaries/ffmpeg-$build_target"
-chmod +x "$stage/binaries/pr0-server-$build_target" "$stage/binaries/ffmpeg-$build_target"
+chmod +x "$stage/binaries/ffmpeg-$build_target"
 cp "$cache/ffmpeg-8.1.1.tar.xz" "$stage/resources/licenses/ffmpeg/"
 cp "$cache/ffmpeg-8.1.1/COPYING.LGPLv2.1" "$stage/resources/licenses/ffmpeg/"
 cp "$project_root/scripts/build-ffmpeg.sh" "$stage/resources/licenses/ffmpeg/build.sh"

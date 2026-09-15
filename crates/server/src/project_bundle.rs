@@ -1,5 +1,5 @@
 //! Portable .pr0 ZIPs. Archive names are never used as filesystem paths.
-use crate::{Api, App, bad, can_edit, csrf, load, role, samples, user};
+use crate::{Api, App, bad, can_edit, config::RuntimeConfig, csrf, load, role, samples, user};
 use axum::{
     Json,
     extract::{Multipart, Path, State},
@@ -37,9 +37,9 @@ fn assets(p: &Project) -> BTreeSet<u32> {
     }
     ids
 }
-pub(crate) fn validate_assets(p: &Project) -> Result<(), String> {
+pub(crate) fn validate_assets(config: &RuntimeConfig, p: &Project) -> Result<(), String> {
     for id in assets(p) {
-        if !samples::directory(&p.id)
+        if !samples::directory(config, &p.id)
             .join(format!("{id}.wav"))
             .is_file()
         {
@@ -58,9 +58,9 @@ fn portable(p: &mut Project) {
         part.performer = None;
     }
 }
-fn encode(mut p: Project) -> Result<Vec<u8>, String> {
-    validate_assets(&p)?;
-    let dir = samples::directory(&p.id);
+fn encode(config: &RuntimeConfig, mut p: Project) -> Result<Vec<u8>, String> {
+    validate_assets(config, &p)?;
+    let dir = samples::directory(config, &p.id);
     let mut ids = assets(&p);
     // Include unused imported samples too, but never generated resampling caches.
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -251,7 +251,8 @@ pub async fn export(
     role(&app, &id, &u)?;
     let _guard = app.setup.lock().await;
     let p = load(&app, &id)?;
-    let data = tokio::task::spawn_blocking(move || encode(p))
+    let config = app.config.clone();
+    let data = tokio::task::spawn_blocking(move || encode(&config, p))
         .await
         .map_err(bad)?
         .map_err(bad)?;
@@ -325,7 +326,7 @@ pub async fn import(
         0
     };
     p.validate().map_err(bad)?;
-    let dir = samples::directory(&p.id);
+    let dir = samples::directory(&app.config, &p.id);
     tokio::fs::create_dir_all(&dir).await.map_err(bad)?;
     let mut staged = Staged {
         paths: vec![],
@@ -411,7 +412,7 @@ mod tests {
     #[test]
     fn exports_versioned_manifest_and_reads_it() {
         let p = pr0_core::demo_project(crate::uid(), "Bundle".into(), pr0_core::Mode::Structured);
-        let encoded = encode(p).unwrap();
+        let encoded = encode(&RuntimeConfig::new(std::env::temp_dir()), p).unwrap();
         let mut zip = ZipArchive::new(Cursor::new(&encoded)).unwrap();
         let manifest: serde_json::Value =
             serde_json::from_reader(zip.by_name("project.json").unwrap()).unwrap();

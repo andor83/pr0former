@@ -239,9 +239,8 @@ try {
   Assert-Success 'Frontend dependency installation'
   & npm run build --prefix web
   Assert-Success 'Frontend build'
-  & cargo build --release --locked -p pr0-server -j $Jobs
-  Assert-Success 'Server build'
-
+  # The application runtime is compiled into the desktop binary by the Tauri
+  # build below; the standalone pr0-server executable is no longer bundled.
   Write-Host 'Preparing bundled FFmpeg (the first compilation can take several minutes)...'
   $Msys = Get-MsysRoot
   $Bash = Join-Path $Msys 'usr\bin\bash.exe'
@@ -255,7 +254,9 @@ try {
   New-Item -ItemType Directory -Force $BinaryDirectory, $FfmpegLicenses | Out-Null
   if (Test-Path $WebResources) { Remove-Item -Recurse -Force $WebResources }
   Copy-Item -Recurse (Join-Path $ProjectRoot 'web\dist') $WebResources
-  Copy-Item (Join-Path $ProjectRoot 'target\release\pr0-server.exe') (Join-Path $BinaryDirectory "pr0-server-$Target.exe") -Force
+  # FFmpeg is the only external binary. Remove a server sidecar staged by an
+  # older build so it is not shipped.
+  Get-ChildItem -Path $BinaryDirectory -Filter 'pr0-server-*' -ErrorAction SilentlyContinue | Remove-Item -Force
   Copy-Item (Join-Path $Cache 'ffmpeg-8.1.1\ffmpeg.exe') (Join-Path $BinaryDirectory "ffmpeg-$Target.exe") -Force
   Copy-Item (Join-Path $Cache 'ffmpeg-8.1.1.tar.xz') $FfmpegLicenses -Force
   Copy-Item (Join-Path $Cache 'ffmpeg-8.1.1\COPYING.LGPLv2.1') $FfmpegLicenses -Force

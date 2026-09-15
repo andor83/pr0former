@@ -56,7 +56,7 @@ For moving to another server or continuing development in a new session, see [th
 
 ## Manual development
 
-Install stable Rust, Node.js 22.12+, a C/C++ toolchain, CMake, pkg-config, and FFmpeg (including the `fd` input protocol). A system Opus library is preferred; Cargo can build its bundled copy. Linux additionally requires ALSA development headers.
+Install stable Rust, Node.js 22.12+, a C/C++ toolchain, CMake, pkg-config, and FFmpeg (including the `fd` input protocol). FFmpeg is now only the fallback for audio formats the built-in decoder does not cover, so a server without it still imports the portable format list below. A system Opus library is preferred; Cargo can build its bundled copy. Linux additionally requires ALSA development headers.
 
 ```sh
 cd web
@@ -171,7 +171,11 @@ For spectral editing, use **FFT → Spectral math / Spectral curve → Inverse F
 
 ### Sample library
 
-Open **Samples** in the left accordion to see only audio already in the project. **Import audio** accepts formats supported by the installed FFmpeg build and converts the first audio stream to 32-bit float WAV at the current engine sample rate, preserving its channel count. Existing limits remain 64 MB per upload, 30 seconds and 1–8 channels. FFmpeg conversion runs outside audio rendering; uploaded playlists cannot open network URLs or other local files.
+Open **Samples** in the left accordion to see only audio already in the project. **Import audio** converts the first audio stream to 32-bit float WAV at the current engine sample rate, preserving its channel count. Existing limits remain 64 MB per upload, 30 seconds and 1–8 channels.
+
+Every host decodes this portable list in process, with no external converter: WAV (PCM, IEEE float, ADPCM), AIFF/AIFF-C, CAF, FLAC, MP3, MP4/M4A (AAC-LC and ALAC), ADTS AAC, and Ogg (Vorbis and FLAC). Hosts that have an FFmpeg build configured — the standalone server and the desktop application — additionally accept whatever else that build decodes. The fallback applies only to formats the built-in decoder does not recognize: a file rejected for its channel count, its length, or because it is not audio is never retried with FFmpeg.
+
+Conversion runs outside audio rendering. The container is identified from the file's bytes rather than its name, and neither decoder resolves playlists, other local files, or network URLs.
 
 **Browse all** searches samples you own plus samples marked **Global**. Add a result to the project before using it; the sidebar’s plus button creates a polyphonic sampler. Existing sampler modals also offer a project-sample selector. Preview buttons play up to three seconds in the browser. Click a sample name for editable name, category, tags, description, BPM and key, plus a full multichannel waveform, full playback and scrubbing.
 
@@ -234,9 +238,11 @@ All settings are in node modals and nonstructural controls accept graph connecti
 ## Desktop app
 
 Run `./build.sh` on macOS/Linux or `.\build.ps1` on Windows to build the native
-Tauri desktop version for the current machine. It bundles the server, Vue interface
-and FFmpeg, opens a private local server, and signs in as the local `admin` project
-owner. Both entry points report missing prerequisites and support `--install-deps`.
+Tauri desktop version for the current machine. It compiles the shared application
+runtime into the app, bundles the Vue interface and the fallback FFmpeg
+converter, runs a private local engine in its own process, and signs in as the
+local `admin` project owner. Both entry points report missing prerequisites and
+support `--install-deps`.
 The standalone `init.sh` workflow remains available. Build requirements, output
 paths, the GitHub Actions Windows release build, signing setup, data storage and verification
 limits are in [docs/DESKTOP.md](docs/DESKTOP.md).

@@ -1,4 +1,4 @@
-use crate::{Api, App, bad, can_edit, csrf, internal, load, role, user};
+use crate::{Api, App, bad, can_edit, config::RuntimeConfig, csrf, internal, load, role, user};
 use axum::{
     Json,
     extract::{Path, State},
@@ -51,11 +51,8 @@ pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
     )?;
     Ok(())
 }
-fn library_dir() -> PathBuf {
-    PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into())).join("sample-library")
-}
-pub fn path(id: &str) -> PathBuf {
-    library_dir().join(format!("{id}.wav"))
+pub fn path(config: &RuntimeConfig, id: &str) -> PathBuf {
+    config.sample_library_dir().join(format!("{id}.wav"))
 }
 /// Owner recorded for samples that ship with the server. It is not a user
 /// account: library rows join users loosely so the kit needs no login.
@@ -115,8 +112,8 @@ pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
 /// Seed the bundled kit as global library samples visible to every account.
 /// Idempotent: rows that already exist, including ones an administrator has
 /// deleted, are left alone, so the kit never comes back uninvited.
-pub fn seed_bundled(db: &Connection) -> Result<(), String> {
-    seed_bundled_into(db, &library_dir())
+pub fn seed_bundled(config: &RuntimeConfig, db: &Connection) -> Result<(), String> {
+    seed_bundled_into(db, &config.sample_library_dir())
 }
 const BUNDLED_TAGS: &str = "drum, kit, cc0";
 fn seed_bundled_into(db: &Connection, dir: &std::path::Path) -> Result<(), String> {
@@ -162,7 +159,12 @@ fn seed_bundled_into(db: &Connection, dir: &std::path::Path) -> Result<(), Strin
 }
 /// Link a library sample into a project, reusing an existing link, and return
 /// the project asset id. The caller writes the project revision afterwards.
-pub fn attach(db: &Connection, project: &str, sample: &str) -> Result<u32, String> {
+pub fn attach(
+    config: &RuntimeConfig,
+    db: &Connection,
+    project: &str,
+    sample: &str,
+) -> Result<u32, String> {
     if let Ok(existing) = db.query_row(
         "SELECT asset FROM project_samples WHERE project=?1 AND sample=?2",
         params![project, sample],
@@ -180,10 +182,11 @@ pub fn attach(db: &Connection, project: &str, sample: &str) -> Result<u32, Strin
     if !available {
         return Err("Sample unavailable".into());
     }
-    let local = asset(project);
-    let dir = crate::samples::directory(project);
+    let local = asset(config, project);
+    let dir = crate::samples::directory(config, project);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::copy(path(sample), dir.join(format!("{local}.wav"))).map_err(|e| e.to_string())?;
+    std::fs::copy(path(config, sample), dir.join(format!("{local}.wav")))
+        .map_err(|e| e.to_string())?;
     db.execute(
         "INSERT INTO project_samples(project,sample,asset) VALUES(?1,?2,?3)",
         params![project, sample, local],
@@ -264,10 +267,10 @@ mod bundled_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
-fn asset(project: &str) -> u32 {
+fn asset(config: &RuntimeConfig, project: &str) -> u32 {
     loop {
         let id = (uuid::Uuid::new_v4().as_u128() % 999999999 + 1) as u32;
-        if !crate::samples::directory(project)
+        if !crate::samples::directory(config, project)
             .join(format!("{id}.wav"))
             .exists()
         {
@@ -304,17 +307,17 @@ pub async fn register(
     existing: Option<u32>,
 ) -> Api<Value> {
     let id = crate::uid();
-    let local = existing.unwrap_or_else(|| asset(project));
+    let local = existing.unwrap_or_else(|| asset(&app.config, project));
     let reader = hound::WavReader::open(source).map_err(bad)?;
     let spec = reader.spec();
     let frames = reader.duration();
     drop(reader);
-    let target = path(&id);
+    let target = path(&app.config, &id);
     tokio::fs::create_dir_all(target.parent().unwrap())
         .await
         .map_err(bad)?;
     tokio::fs::copy(source, &target).await.map_err(bad)?;
-    let dir = crate::samples::directory(project);
+    let dir = crate::samples::directory(&app.config, project);
     tokio::fs::create_dir_all(&dir).await.map_err(bad)?;
     let localpath = dir.join(format!("{local}.wav"));
     if existing.is_none() {
@@ -343,7 +346,8 @@ async fn legacy(app: &App, project: &str, u: &str) -> Api<()> {
             |r| r.get(0),
         )
         .map_err(internal)?;
-    let Ok(mut files) = tokio::fs::read_dir(crate::samples::directory(project)).await else {
+    let Ok(mut files) = tokio::fs::read_dir(crate::samples::directory(&app.config, project)).await
+    else {
         return Ok(());
     };
     while let Some(file) = files.next_entry().await.map_err(bad)? {
@@ -499,15 +503,16 @@ pub async fn add(
     if !old["asset"].is_null() {
         return Ok(Json(old));
     }
-    let local = asset(&project);
-    let dir = crate::samples::directory(&project);
+    let local = asset(&app.config, &project);
+    let dir = crate::samples::directory(&app.config, &project);
     tokio::fs::create_dir_all(&dir).await.map_err(bad)?;
-    tokio::fs::copy(path(&id), dir.join(format!("{local}.wav")))
+    tokio::fs::copy(path(&app.config, &id), dir.join(format!("{local}.wav")))
         .await
         .map_err(bad)?;
     let p = project.clone();
-    let rate = crate::settings::read().sample_rate;
-    tokio::task::spawn_blocking(move || crate::samples::cache_asset(&p, local, rate))
+    let rate = crate::settings::read(&app.config).sample_rate;
+    let config = app.config.clone();
+    tokio::task::spawn_blocking(move || crate::samples::cache_asset(&config, &p, local, rate))
         .await
         .map_err(internal)?
         .map_err(bad)?;
@@ -535,7 +540,7 @@ pub async fn audio(
     if !accessible(&v, &u) {
         return Err(bad("Sample unavailable"));
     }
-    let bytes = tokio::fs::read(path(&id)).await.map_err(bad)?;
+    let bytes = tokio::fs::read(path(&app.config, &id)).await.map_err(bad)?;
     Ok((
         [
             (header::CONTENT_TYPE, "audio/wav"),
@@ -784,9 +789,11 @@ pub async fn delete(
         tx.commit().map_err(internal)?;
         links
     };
-    let mut files = vec![path(&id)];
+    let mut files = vec![path(&app.config, &id)];
     for (project, asset) in &links {
-        if let Ok(mut entries) = tokio::fs::read_dir(crate::samples::directory(project)).await {
+        if let Ok(mut entries) =
+            tokio::fs::read_dir(crate::samples::directory(&app.config, project)).await
+        {
             while let Some(file) = entries.next_entry().await.map_err(bad)? {
                 let name = file.file_name().to_string_lossy().into_owned();
                 if name == format!("{asset}.wav")

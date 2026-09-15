@@ -23,14 +23,16 @@ pub struct Persistence {
     error: Option<String>,
 }
 impl Persistence {
-    pub fn new() -> Self {
+    /// Storage roots come from the host's [`crate::config::RuntimeConfig`], so
+    /// two runtimes in one process never share loop or recording files.
+    pub fn new(loops_root: std::path::PathBuf, recordings_root: std::path::PathBuf) -> Self {
         let (tx, rx) = mpsc::sync_channel(8);
         let (errors_tx, errors) = mpsc::channel();
         std::thread::Builder::new()
             .name("pr0-persistence".into())
             .spawn(move || {
-                let loops = crate::loops::Store::new();
-                let mut recordings = crate::recordings::Store::new();
+                let loops = crate::loops::Store::new(loops_root);
+                let mut recordings = crate::recordings::Store::new(recordings_root);
                 let mut partial: BTreeMap<(String, String, u8), Vec<f32>> = BTreeMap::new();
                 let mut last_error = None;
                 while let Ok(job) = rx.recv() {
@@ -189,7 +191,8 @@ mod tests {
     use super::*;
     #[test]
     fn slow_storage_backpressures_edits_without_waiting_on_the_render_worker() {
-        let mut store = Persistence::new();
+        let directory = std::env::temp_dir().join(format!("pr0-persistence-{}", uuid::Uuid::new_v4()));
+        let mut store = Persistence::new(directory.join("loops"), directory.join("recordings"));
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         store.tx.send(Job::Hold(release_rx, entered_tx)).unwrap();

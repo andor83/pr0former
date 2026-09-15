@@ -56,10 +56,6 @@ impl Settings {
         Ok(())
     }
 }
-fn path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("PR0_DATA").unwrap_or("data".into()))
-        .join("osc-settings.json")
-}
 struct Sockets {
     receive: Vec<UdpSocket>,
     send: Option<UdpSocket>,
@@ -75,6 +71,9 @@ struct StateData {
 pub struct Runtime {
     state: Mutex<StateData>,
     destinations: Mutex<std::collections::BTreeMap<String, (Instant, Result<SocketAddr, String>)>>,
+    /// Where configuration changes are persisted. `None` for the unconfigured
+    /// runtime used by tests, which binds sockets but owns no host paths.
+    settings_path: Option<std::path::PathBuf>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -84,6 +83,7 @@ impl Default for Runtime {
             let _ = socket.set_nonblocking(true);
         }
         Self {
+            settings_path: None,
             destinations: Mutex::new(std::collections::BTreeMap::new()),
             state: Mutex::new(StateData {
                 settings,
@@ -100,9 +100,13 @@ impl Default for Runtime {
     }
 }
 impl Runtime {
-    pub fn load() -> Arc<Self> {
-        let runtime = Arc::new(Self::default());
-        if let Ok(bytes) = std::fs::read(path()) {
+    pub fn load(config: &crate::config::RuntimeConfig) -> Arc<Self> {
+        let path = config.osc_settings_path();
+        let runtime = Arc::new(Self {
+            settings_path: Some(path.clone()),
+            ..Self::default()
+        });
+        if let Ok(bytes) = std::fs::read(&path) {
             match serde_json::from_slice::<Settings>(&bytes)
                 .map_err(|e| e.to_string())
                 .and_then(|s| runtime.prepare(&s).map(|sockets| (s, sockets)))
@@ -151,13 +155,15 @@ impl Runtime {
             send: None,
         };
         let result = Self::bind(&s).and_then(|sockets| {
-            let temp = path().with_extension("tmp");
-            std::fs::write(
-                &temp,
-                serde_json::to_vec_pretty(&s).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            std::fs::rename(temp, path()).map_err(|e| e.to_string())?;
+            if let Some(path) = &self.settings_path {
+                let temp = path.with_extension("tmp");
+                std::fs::write(
+                    &temp,
+                    serde_json::to_vec_pretty(&s).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+                std::fs::rename(temp, path).map_err(|e| e.to_string())?;
+            }
             Ok(sockets)
         });
         match result {

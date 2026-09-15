@@ -37,7 +37,6 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/pr0-server",
       "binaries/ffmpeg"
     ],
     "resources": {
