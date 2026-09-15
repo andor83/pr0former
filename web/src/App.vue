@@ -103,8 +103,18 @@ watch(() => project.value?.id, id => {
 }, { flush: 'sync' })
 const descriptors = ref<Descriptor[]>([]), members = ref<Member[]>([])
 const defaultHeroTitles = [
-  { first: 'Insert pithy title here', second: 'Put something funny here too' },
-  ...['Stop, Collaborate and Listen', 'F*ck it, we\'ll do it live!', 'A very musical hampster wheel', 'Science b!tches', 'ERROR....nah JK', 'This is AI slop', 'Injecting the Raccoons Now', 'Now with 80% more cheese', 'Have you considered how Carl feels?', 'Illegal in many states', 'She turned me into a newt!', 'Welcome back Mr. Wick', 'Turning the frogs gay', 'Your bit drift is showing', 'you forgot to return your Amazon purchase', 'Saints be praised!', 'TETSUOOOOOOO', 'It\'s over 9000!'].map(first => ({ first, second: 'Live Electroacoustic Performance Platform' })),
+  { first: 'ERROR, ERROR', second: 'JK, everything is fine' },
+  { first: 'Everywhere you go', second: 'That is where you are' },
+  { first: 'Where did I put my phone?', second: 'Can you try calling it?' },
+  { first: 'Pop quiz hotshot', second: 'Theres a bomb on a bus....' },
+  { first: 'Here comes a lion, father.', second: 'Oh yes, it’s a lion.' },
+  { first: 'May the force be with you!', second: 'And also with you...' },
+  { first: 'Have you tried', second: 'turning it off and on again?' },
+  { first: 'A M00se once bit my sister', second: 'Mynd you, m00se bites Kan be pretty nasti …' },
+  { first: 'Directed by', second: '40 SPECIALLY TRAINED ECUADORAN MOUNTAIN LLAMAS' },
+  { first: 'Are you suggesting coconuts migrate?', second: 'Not at all. They could be carried.' },
+  { first: 'I know Kung Fu', second: 'Show me....' },
+  { first: 'Let me tell you something!', second: 'LET ME TELL YOU SOMETHING!' },
 ]
 const loginTitles = ref(defaultHeroTitles.map(title => ({ ...title })))
 const heroSlogan = ref('')

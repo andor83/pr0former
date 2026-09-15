@@ -219,39 +219,29 @@ struct LoginTitle {
     first: String,
     second: String,
 }
+/// Shipped title pairs; a fresh installation serves these until an admin saves
+/// their own set in System settings.
 fn default_login_titles() -> Vec<LoginTitle> {
-    let mut titles = vec![LoginTitle {
-        first: "Insert pithy title here".into(),
-        second: "Put something funny here too".into(),
-    }];
-    titles.extend(
-        [
-            "Stop, Collaborate and Listen",
-            "F*ck it, we'll do it live!",
-            "A very musical hampster wheel",
-            "Science b!tches",
-            "ERROR....nah JK",
-            "This is AI slop",
-            "Injecting the Raccoons Now",
-            "Now with 80% more cheese",
-            "Have you considered how Carl feels?",
-            "Illegal in many states",
-            "She turned me into a newt!",
-            "Welcome back Mr. Wick",
-            "Turning the frogs gay",
-            "Your bit drift is showing",
-            "you forgot to return your Amazon purchase",
-            "Saints be praised!",
-            "TETSUOOOOOOO",
-            "It's over 9000!",
-        ]
-        .into_iter()
-        .map(|first| LoginTitle {
-            first: first.into(),
-            second: "Live Electroacoustic Performance Platform".into(),
-        }),
-    );
-    titles
+    [
+        ("ERROR, ERROR", "JK, everything is fine"),
+        ("Everywhere you go", "That is where you are"),
+        ("Where did I put my phone?", "Can you try calling it?"),
+        ("Pop quiz hotshot", "Theres a bomb on a bus...."),
+        ("Here comes a lion, father.", "Oh yes, it’s a lion."),
+        ("May the force be with you!", "And also with you..."),
+        ("Have you tried", "turning it off and on again?"),
+        ("A M00se once bit my sister", "Mynd you, m00se bites Kan be pretty nasti …"),
+        ("Directed by", "40 SPECIALLY TRAINED ECUADORAN MOUNTAIN LLAMAS"),
+        ("Are you suggesting coconuts migrate?", "Not at all. They could be carried."),
+        ("I know Kung Fu", "Show me...."),
+        ("Let me tell you something!", "LET ME TELL YOU SOMETHING!"),
+    ]
+    .into_iter()
+    .map(|(first, second)| LoginTitle {
+        first: first.into(),
+        second: second.into(),
+    })
+    .collect()
 }
 async fn login_titles(State(app): State<App>) -> Api<Json<Vec<LoginTitle>>> {
     let db = app.db.lock().unwrap();
