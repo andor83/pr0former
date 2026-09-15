@@ -2522,7 +2522,6 @@ pub(crate) fn assemble(config: Arc<RuntimeConfig>) -> Result<Assembled, String> 
         CREATE TABLE IF NOT EXISTS revisions(project_id TEXT REFERENCES projects(id),revision INTEGER,body TEXT NOT NULL,PRIMARY KEY(project_id,revision));
         CREATE TABLE IF NOT EXISTS invites(token TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),role TEXT,expires INTEGER,used INTEGER);
         CREATE TABLE IF NOT EXISTS login_titles(first TEXT NOT NULL,second TEXT NOT NULL);").map_err(|e| format!("Database migration: {e}"))?;
-    db.execute("UPDATE login_titles SET first='Insert pithy title here',second='Put something funny here too' WHERE first='Compose the System' OR (first='Insert pithy title here' AND second='Also something funny here')", []).map_err(|e| format!("Login title migration: {e}"))?;
     accounts::migrate(&db).map_err(|e| format!("Account migration: {e}"))?;
     sample_library::migrate(&db).map_err(|e| format!("Sample library migration: {e}"))?;
     sample_library::seed_bundled(&config, &db).map_err(|e| format!("Bundled sample library: {e}"))?;
