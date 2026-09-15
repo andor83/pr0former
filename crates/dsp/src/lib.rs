@@ -3038,7 +3038,8 @@ impl Engine {
                 if self.nodes[idx].script.is_some() {
                     let node = &mut self.nodes[idx];
                     let connected = std::array::from_fn(|port| node.bindings.iter().any(|b| !b.parameter && b.signal == pr0_core::Signal::Control && b.destination == port));
-                    node.script.as_mut().unwrap().tick(self.graph_clock, self.clock.running, self.part_metronome, &node.input, connected, node.input_events, &mut node.midi_frame);
+                    let passthrough = node.p("midi_passthru") != 0.;
+                    node.script.as_mut().unwrap().tick(self.graph_clock, self.clock.running, self.part_metronome, &node.input, connected, node.input_events, &mut node.midi_frame, passthrough);
                 }
                 self.nodes[idx].process(&self.graph_clock, &hardware, self.part_metronome);
                 let node=&mut self.nodes[idx];

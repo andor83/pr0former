@@ -135,12 +135,18 @@ of a click sound, and count-in clicks are not a separate scripting event.
 Connect a MIDI Input, Local MIDI Input, Piano, Part MIDI or another MIDI source to
 the script's **MIDI** input. Connect its **MIDI** output to an instrument or MIDI
 Output node. Device selection and external delivery remain in those nodes.
-Incoming MIDI is consumed by the script; forward it explicitly if wanted.
+
+**MIDI passthrough** (on by default, in the node's Options) relays every incoming
+message to the MIDI output unchanged, so a script can simply read its input.
+Anything the script sends is merged into the same outgoing stream after the
+relayed messages. Turn passthrough off when the script should consume incoming
+MIDI and forward only what it sends explicitly; scripts written that way should
+keep the flag off to avoid duplicate messages.
 
 ```javascript
 midi.on("message", event => {
   console.log(event.bytes, event.channel, event.type);
-  midi.send(event.bytes); // explicit passthrough
+  midi.send(event.bytes); // explicit passthrough when the flag is off
 });
 ```
 

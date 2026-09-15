@@ -1,7 +1,7 @@
 {
   "js_control": {
     "title": "Write event-driven JavaScript controls",
-    "explanation": "Open Options for the JavaScript editor. Define named numeric inputs and outputs, bind MIDI, OSC, metronome or named controls, then Check and Apply while the engine runs. The Scripting guide in Options and Help contains the full API, examples, timing semantics and resource limits. JavaScript runs outside audio rendering with asynchronous response latency.",
+    "explanation": "Open Options for the JavaScript editor. Define named numeric inputs and outputs, bind MIDI, OSC, metronome or named controls, then Check and Apply while the engine runs. MIDI passthrough (on by default) relays incoming MIDI to the MIDI output unchanged while the script reads it, and merges anything the script sends into that stream; turn it off when the script should consume incoming MIDI. The Scripting guide in Options and Help contains the full API, examples, timing semantics and resource limits. JavaScript runs outside audio rendering with asynchronous response latency.",
     "steps": ["Add JavaScript control and open Options.", "Choose an example or write define_input and define_output declarations, then Apply script.", "Connect its named numeric ports or MIDI port and enable the engine. Open Console to view console.log messages.", "Read Help → JavaScript scripting for the complete event and helper reference."],
     "graph": {"nodes": [{"id":"script","kind":"js_control","label":"JavaScript control","x":100,"y":100,"channels":1,"parameters":{}}],"edges":[]}
   },
@@ -3406,7 +3406,7 @@
   },
   "control_input": {
     "title": "Enter a filter frequency",
-    "explanation": "Enter 1000 in the graphical numeric control to set filter cutoff in Hz. Connected graphical controls display their engine source instead of accepting manual edits.",
+    "explanation": "Enter 1000 in the graphical numeric control to set filter cutoff in Hz. Connected graphical controls display their engine source instead of accepting manual edits. A Step in Options snaps slider dragging and the arrow keys/buttons of Integer, Float and Slider controls to that increment; 0 keeps the defaults.",
     "steps": [],
     "graph": {
       "nodes": [

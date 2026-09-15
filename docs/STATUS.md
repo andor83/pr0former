@@ -337,6 +337,55 @@ observed Part MIDI pitch previews and release, verified no save before dropping,
 one-step undo, cancellation, playback locking and engine-disabled movement.
 Physical MIDI/audio devices and touch hardware were not tested.
 
+## Graphical control step, inline checkboxes and engine hotkey (2026-09-15)
+
+`control_input` gained a structural `step` parameter ("Step (0 automatic)", shown
+for Integer, Float and Slider controls as a plain number field). A non-zero step
+snaps slider dragging to that grid and moves the arrow keys, the value field's
+up/down keys and the ▴▾ buttons by one step; 0 keeps the previous defaults (1 for
+Integer and Float, free dragging and 0.01 nudges for Slider). Core rejects
+negative or non-finite steps and fractional steps in Integer mode. The compact
+fader now takes keyboard focus on pointer down, so a click followed by arrow keys
+works, and exposes its step as an attribute. On/off parameters (MIDI passthrough,
+hide chrome, changes only) render as a checkbox beside their label instead of a
+separate row. The ` (backtick) key toggles the audio engine when the workspace has
+focus, mirroring the transport button's enabled state; the button title and Help
+list it. Verified by the core/server suites, the frontend build and unit tests,
+and Chromium: the new control-step case (three repeats, cold start included) plus
+the graph-controls, live-controls, control-routing, toggle, route-targets,
+script-modal and scripts cases. `slider-precision.spec.ts` was already failing on
+the base tree at its fader step assertion; that assertion now passes and the case
+stops later at a driven-value `output` element the compact control has not
+rendered since the control-mode rework. Hardware controllers remain manual.
+
+## JavaScript control: MIDI passthrough and Options layout (2026-09-15)
+
+`js_control` gained a structural `midi_passthru` parameter (default on) shown as a
+"MIDI passthrough" checkbox in Options. With it on, the engine leaves the block's
+incoming MIDI in the node's frame, still forwards every message to the script
+worker, and appends whatever the script sends after the relayed messages; with it
+off the script consumes incoming MIDI as before. Relaying continues while a worker
+has faulted. Toggling the flag saves the project without restarting the script.
+Existing scripts that forwarded input explicitly will double-send until the flag is
+turned off. The script Options dialog is now a flex column whose parameter list
+scrolls, so the runtime log no longer spills over the footer. Verified by a DSP
+engine test, the core/server suites, and Chromium runs of the new script-modal
+case (layout bounds, default checked, persistence when unchecked) plus the three
+existing scripting cases. Hardware MIDI remains manual.
+
+## Header link-quality badge (2026-09-15)
+
+The header's server indicator now rates the event socket from the existing
+once-a-second ping/pong. When the median of the last five round trips reaches
+250 ms, or a pong has been outstanding for 750 ms, the indicator becomes an amber
+"Slow connection" badge showing the worst recent round trip, with a hover note
+that the link is only suitable for editing the graph and parts. It clears once
+every recent round trip is under 200 ms. This is a presentation-only browser↔server
+round-trip measurement; it does not measure audio or MIDI latency and makes no
+timing guarantee. Verified by unit tests and a Playwright run that proxies the
+socket with a 400 ms hold; the badge is not shown in performance mode or on
+narrow layouts, where the indicator was already hidden.
+
 ## Contextual help and documentation (2026-09-13)
 
 Explanatory prose in nodes, settings, score dialogs, libraries and menus now uses

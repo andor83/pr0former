@@ -244,9 +244,16 @@ impl Bridge {
         connected: [bool; 8],
         input_events: [bool; 8],
         midi: &mut midi_events::Buffer,
+        passthrough: bool,
     ) {
+        // `midi` arrives holding this block's incoming messages and leaves holding
+        // the node's output. With passthrough the incoming messages stay in place
+        // and the script's own output is appended after them; otherwise the script
+        // consumes them and only what it sends goes out.
         if self.shared.fault.load(Ordering::Acquire) {
-            midi.clear();
+            if !passthrough {
+                midi.clear();
+            }
             if !self.fault_released {
                 self.release(midi);
                 self.fault_released = true;
@@ -262,7 +269,9 @@ impl Bridge {
         for i in 0..midi.len {
             self.push(clock, Kind::Midi(midi.events[i]));
         }
-        midi.clear();
+        if !passthrough {
+            midi.clear();
+        }
         let reset = self.generation != Some(clock.reset_generation);
         if reset {
             self.pending.fill(None);
@@ -564,6 +573,52 @@ mod tests {
         );
         e.render(&[], &mut [[0.; 8]]);
         assert_eq!(e.nodes[0].midi_frame.len, 0);
+    }
+    fn saw_midi(w: &mut Worker, expected: Message) -> bool {
+        let mut seen = false;
+        while let Ok(event) = w.events.pop() {
+            if matches!(event.kind, Kind::Midi(m) if m == expected) {
+                seen = true;
+            }
+        }
+        seen
+    }
+    #[test]
+    fn midi_passthrough_relays_input_and_appends_script_output() {
+        let incoming = Message { status: 0x91, data1: 64, data2: 90 };
+        let scripted = Message { status: 0x90, data1: 60, data2: 100 };
+        // Default: the incoming message is relayed and the script's own output follows it.
+        let (mut e, mut w) = engine(&config());
+        w.commands
+            .push(command(Action::Midi(scripted), 0))
+            .unwrap_or_else(|_| panic!("queue"));
+        e.node_midi_message("s", incoming);
+        e.render(&[], &mut [[0.; 8]]);
+        let frame = &e.nodes[0].midi_frame;
+        assert_eq!(&frame.events[..frame.len], &[incoming, scripted]);
+        // The script still observed the incoming message.
+        assert!(saw_midi(&mut w, incoming));
+        // Relaying continues while the worker has faulted.
+        w.shared.fault.store(true, Ordering::Release);
+        e.render(&[], &mut [[0.; 8]]);
+        e.node_midi_message("s", incoming);
+        e.render(&[], &mut [[0.; 8]]);
+        let frame = &e.nodes[0].midi_frame;
+        assert_eq!(&frame.events[..frame.len], &[incoming]);
+        // Passthrough off: the script consumes incoming MIDI and only its output goes out.
+        let mut graph = graph(&config());
+        graph.nodes[0].parameters.insert("midi_passthru".into(), 0.);
+        let mut e = crate::Engine::prepare(graph, 48000.).unwrap();
+        let (b, mut w) = Bridge::new(config());
+        e.attach_script("s", b);
+        w.commands
+            .push(command(Action::Midi(scripted), 0))
+            .unwrap_or_else(|_| panic!("queue"));
+        e.node_midi_message("s", incoming);
+        e.render(&[], &mut [[0.; 8]]);
+        let frame = &e.nodes[0].midi_frame;
+        assert_eq!(&frame.events[..frame.len], &[scripted]);
+        assert!(saw_midi(&mut w, incoming));
     }
     #[test]
     fn named_publication_reloads_without_stale_serials() {

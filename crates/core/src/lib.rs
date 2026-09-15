@@ -1187,6 +1187,7 @@ pub fn catalog() -> Vec<Descriptor> {
                 structural: true,
                 ..param("max", "Maximum", "", -100000., 100000., 100000.)
             },
+            Parameter { structural: true, ..param("step", "Step (0 automatic)", "", 0., 100000., 0.) },
         ],
         &[],
     );
@@ -2138,7 +2139,7 @@ pub fn catalog() -> Vec<Descriptor> {
             });
         }
     }
-    result.push(Descriptor { default_channels: 1, kind: "js_control".into(), label: "JavaScript control".into(), symbol: "JS".into(), category: "Control".into(), description: "Event-driven JavaScript with named numeric ports, MIDI, OSC, metronome and named control bindings. Open Options for the editor and complete scripting guide. Scripts run on a separate worker; reactive output has asynchronous latency.".into(), documentation: documentation::for_kind("js_control"), aliases: vec!["script".into(), "javascript".into(), "code".into()], inputs: vec![midi_port()], outputs: vec![midi_port()], parameters: vec![] });
+    result.push(Descriptor { default_channels: 1, kind: "js_control".into(), label: "JavaScript control".into(), symbol: "JS".into(), category: "Control".into(), description: "Event-driven JavaScript with named numeric ports, MIDI, OSC, metronome and named control bindings. Open Options for the editor and complete scripting guide. Scripts run on a separate worker; reactive output has asynchronous latency.".into(), documentation: documentation::for_kind("js_control"), aliases: vec!["script".into(), "javascript".into(), "code".into()], inputs: vec![midi_port()], outputs: vec![midi_port()], parameters: vec![Parameter { structural: true, ..param("midi_passthru", "MIDI passthrough", "", 0., 1., 1.) }] });
     result
 }
 
@@ -2268,6 +2269,9 @@ impl Graph {
             if let Some(script) = &n.script {
                 if n.kind != "js_control" { return Err("Script configuration belongs only to JavaScript control nodes".into()); }
                 script.validate()?;
+            }
+            if n.kind == "js_control" && n.parameters.get("midi_passthru").is_some_and(|v| *v != 0. && *v != 1.) {
+                return Err("MIDI passthrough must be on (1) or off (0)".into());
             }
             if ids.insert(n.id.clone(), i).is_some() {
                 return Err("Duplicate node ID".into());
@@ -2435,12 +2439,16 @@ impl Graph {
                 let mode = n.parameters.get("mode").copied().unwrap_or(2.);
                 let min = n.parameters.get("min").copied().unwrap_or(-100000.);
                 let max = n.parameters.get("max").copied().unwrap_or(100000.);
+                let step = n.parameters.get("step").copied().unwrap_or(0.);
                 if mode.fract() != 0.
                     || ["changes_only", "hide_chrome"].iter().any(|key| n.parameters.get(*key).is_some_and(|v| *v != 0. && *v != 1.))
                     || min > max
                     || (mode == 1. && (min.fract() != 0. || max.fract() != 0.))
+                    || !step.is_finite()
+                    || step < 0.
+                    || (mode == 1. && step.fract() != 0.)
                 {
-                    return Err("Choose a control type and valid minimum/maximum (whole numbers for Integer)".into());
+                    return Err("Choose a control type and valid minimum/maximum/step (whole numbers for Integer)".into());
                 }
                 match &n.control_value {
                     Some(ControlValue::Text(_)) if mode != 4. => {
