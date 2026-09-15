@@ -262,14 +262,17 @@ pub async fn start(
         .route("/pr0former-ca.cer", get(ca_route))
         .layer(axum::middleware::from_fn(
             move |req: axum::extract::Request, next: axum::middleware::Next| {
+                // Every `cookie` field is checked: an HTTP/2 client may carry
+                // the private token in a second field, which must not slip
+                // past this guard any more than a first-field copy would.
                 let private_session = req
                     .headers()
-                    .get(header::COOKIE)
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|cookie| {
-                        cookie.split(';').any(|part| {
-                            part.trim().strip_prefix("pr0_session=") == Some(private_token.as_str())
-                        })
+                    .get_all(header::COOKIE)
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+                    .flat_map(|cookie| cookie.split(';'))
+                    .any(|part| {
+                        part.trim().strip_prefix("pr0_session=") == Some(private_token.as_str())
                     });
                 async move {
                     if private_session {

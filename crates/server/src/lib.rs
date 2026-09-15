@@ -176,13 +176,19 @@ fn csrf(headers: &HeaderMap) -> Api<()> {
     }
     Ok(())
 }
+/// The session token from the request's cookies, or `""`.
+///
+/// Every `cookie` header field is scanned, not just the first: HTTP/2 clients
+/// (Chromium among them) may send each cookie in its own field (RFC 9113
+/// §8.2.3), and hyper does not rejoin them. Reading only the first field made
+/// sign-in fail on any hostname where the browser also held an unrelated
+/// cookie that happened to sort ahead of `pr0_session`.
 fn session_token(headers: &HeaderMap) -> &str {
-    let cookie = headers
-        .get(header::COOKIE)
-        .and_then(|x| x.to_str().ok())
-        .unwrap_or("");
-    cookie
-        .split(';')
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|x| x.to_str().ok())
+        .flat_map(|cookie| cookie.split(';'))
         .filter_map(|x| x.trim().split_once('='))
         .find(|(k, _)| *k == "pr0_session")
         .map(|(_, v)| v)
@@ -2752,6 +2758,19 @@ pub async fn run() -> std::process::ExitCode {
 #[cfg(test)]
 mod live_edit_tests {
     use super::*;
+    #[test]
+    fn session_token_is_found_in_any_cookie_header_field() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, "other=1; pr0_session=abc".parse().unwrap());
+        assert_eq!(session_token(&headers), "abc");
+        // HTTP/2 clients may split cookies into separate fields; the session
+        // must be found even when another cookie's field comes first.
+        let mut split = HeaderMap::new();
+        split.append(header::COOKIE, "other_admin_session=eyJ.x.y".parse().unwrap());
+        split.append(header::COOKIE, "pr0_session=def".parse().unwrap());
+        assert_eq!(session_token(&split), "def");
+        assert_eq!(session_token(&HeaderMap::new()), "");
+    }
     #[test]
     fn member_removal_unassigns_only_that_members_parts() {
         let mut project = demo_project("x".into(), "x".into(), Mode::Freeform);
