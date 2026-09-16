@@ -120,14 +120,14 @@ function controlSelect(event: MouseEvent) {
 
 .patch-node.trigger-node{width:80px;min-width:80px;min-height:64px;height:64px;padding:8px;display:flex;align-items:center;justify-content:center}
 .patch-node.compact-control{width:190px;min-width:150px;min-height:0;padding:10px}
-.compact-control header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:12px;color:var(--amber)}
+.compact-control header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:12px;color:var(--control-ink)}
 .compact-control header span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .patch-node.compact-control.contents-only{width:150px;padding:6px}
 .compact-control>.vue-flow__handle-left{left:0}.compact-control>.vue-flow__handle-right{right:0}
-.patch-node.value-node{width:148px;min-width:148px;min-height:72px;height:72px;padding:10px;display:flex;align-items:center;justify-content:center}.value-input-label{position:absolute;left:10px;font-size:9px;color:var(--muted)}.value-node output{margin-left:50px;font-size:18px;font-variant-numeric:tabular-nums;color:var(--amber)}
+.patch-node.value-node{width:148px;min-width:148px;min-height:72px;height:72px;padding:10px;display:flex;align-items:center;justify-content:center}.value-input-label{position:absolute;left:10px;font-size:9px;color:var(--ink-muted)}.value-node output{margin-left:50px;font-size:18px;font-variant-numeric:tabular-nums;color:var(--control-ink)}
 .patch-node .node-envelope{position:absolute;left:74px;top:66px;width:180px;height:90px;max-width:none}
 .patch-node .node-envelope.sampler-envelope{left:150px;top:100px;width:210px;height:105px}
-.envelope-unavailable{color:var(--muted);font-size:11px;padding:12px}
+.envelope-unavailable{color:var(--ink-muted);font-size:11px;padding:12px}
 .node-name{display:flex;flex-direction:column;min-width:0;line-height:1.15;overflow-wrap:anywhere}.node-title .node-kind{margin-top:2px}.math-label .node-kind{display:block;margin-top:1px}
 .trigger-node>.vue-flow__handle-left,.value-node>.vue-flow__handle-left{left:0}.trigger-node>.vue-flow__handle-right,.value-node>.vue-flow__handle-right{right:0}
 </style>

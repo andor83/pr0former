@@ -13,7 +13,7 @@ function draw(){
   value.channels.forEach((channel,index)=>{
     const canvas=canvases.value[index],ctx=canvas?.getContext('2d');if(!canvas||!ctx)return
     const width=props.compact?280:640,height=spectral.value?(props.compact?156:260):(props.compact?94:180)
-    canvas.width=width;canvas.height=height;ctx.fillStyle='#111b20';ctx.fillRect(0,0,width,height)
+    canvas.width=width;canvas.height=height;ctx.clearRect(0,0,width,height);ctx.fillStyle=getComputedStyle(canvas).getPropertyValue('--shade-deep').trim()||'rgba(0,0,0,.6)';ctx.fillRect(0,0,width,height)
     const waterfallHeight=spectral.value?height*0.42:height-18,columns=value.columns||0,history=value.history?.[index]||''
     if(columns){const tile=historyCanvases[index]||(historyCanvases[index]=document.createElement('canvas'));tile.width=columns;tile.height=32;const tileCtx=tile.getContext('2d')!;const image=tileCtx.createImageData(columns,32);
       for(let col=0;col<columns;col++)for(let band=0;band<32;band++){const intensity=parseInt(history.slice((col*32+band)*2,(col*32+band)*2+2),16)||0,t=intensity/255,offset=((31-band)*columns+col)*4;image.data[offset]=Math.round(15+210*t*t);image.data[offset+1]=Math.round(25+195*t);image.data[offset+2]=Math.round(37+150*t);image.data[offset+3]=255;}

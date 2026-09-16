@@ -17,8 +17,8 @@ function change(event:Event){const next=(event.target as HTMLInputElement).check
 </template>
 <style scoped>
 .toggle-button{width:44px;height:44px;display:grid;place-items:center;cursor:pointer;touch-action:manipulation}
-.toggle-button input{appearance:none;width:24px;height:24px;padding:0;margin:0;border:2px solid var(--cyan);border-radius:4px;background:#192426;cursor:pointer;display:grid;place-items:center}
-.toggle-button input:checked{background:var(--cyan);color:#192426}
+.toggle-button input{appearance:none;width:24px;height:24px;padding:0;margin:0;border:2px solid var(--cyan);border-radius:4px;background:var(--shade);cursor:pointer;display:grid;place-items:center}
+.toggle-button input:checked{background:var(--cyan);color:var(--bg)}
 .toggle-button input:checked::after{content:'✓';font-size:20px;font-weight:700;line-height:1}
 .toggle-button input:focus-visible{outline:2px solid var(--amber);outline-offset:4px}
 .toggle-button.disabled{opacity:.45;cursor:default}.toggle-button input:disabled{cursor:default}

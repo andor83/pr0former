@@ -22,8 +22,8 @@ onBeforeUnmount(() => { clear(); window.removeEventListener('blur',clear); docum
 </template>
 <style scoped>
 .drum-pads{position:absolute;left:100px;right:136px;top:94px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px 8px;touch-action:none;user-select:none}
-.drum-pad{aspect-ratio:1;border-radius:50%;background:radial-gradient(circle at 40% 35%,#3a4547,#232b2c 70%);border:1px solid #4a5a5c;color:#c8d4d2;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0;touch-action:none;opacity:1;min-width:44px}
-.drum-pad span{font-size:8px;letter-spacing:.2px;line-height:1.1;text-align:center}.drum-pad small{font-size:8px;color:#7f9294;font-family:monospace}
+.drum-pad{aspect-ratio:1;border-radius:50%;background:radial-gradient(circle at 40% 35%,var(--shade),var(--shade-deep) 70%);border:1px solid var(--shade-line);color:var(--ink);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0;touch-action:none;opacity:1;min-width:44px}
+.drum-pad span{font-size:8px;letter-spacing:.2px;line-height:1.1;text-align:center}.drum-pad small{font-size:8px;color:var(--ink-muted);font-family:monospace}
 .drum-pad.lit{background:radial-gradient(circle at 40% 35%,#8fe3dc,#3f8f89 75%);color:#0f2624;border-color:var(--cyan);box-shadow:0 0 12px #79d5ce55}.drum-pad.lit small{color:#173b38}
 .drum-pad:disabled{cursor:default}.drum-pad:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
 </style>

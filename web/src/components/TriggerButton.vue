@@ -16,8 +16,8 @@ function click(){if(props.disabled)return;pulse();emit('trigger')}
 </template>
 <style scoped>
 .trigger-button{width:44px;height:44px;padding:10px;display:grid;place-items:center;border:0;border-radius:50%;background:transparent;color:var(--cyan);cursor:pointer;touch-action:manipulation}
-.trigger-button span{display:block;width:24px;height:24px;border:2px solid currentColor;border-radius:50%;background:var(--bg,#192426)}
-.trigger-button.lit span{background:var(--cyan);box-shadow:inset 0 0 0 5px #213638}
+.trigger-button span{display:block;width:24px;height:24px;border:2px solid currentColor;border-radius:50%;background:var(--shade)}
+.trigger-button.lit span{background:var(--cyan);box-shadow:inset 0 0 0 5px var(--shade-deep)}
 .trigger-button:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
 .trigger-button:disabled{opacity:.45;cursor:default}
 </style>

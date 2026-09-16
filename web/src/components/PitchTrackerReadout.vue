@@ -11,5 +11,5 @@ function note(value:number){return ['C','C♯','D','D♯','E','F','F♯','G','G�
   </div>
 </template>
 <style scoped>
-.tracker-pitches{position:absolute;bottom:0;left:12px;right:12px;display:flex;height:76px;gap:8px}.tracker-slot{position:relative;flex:1;text-align:center;border-top:1px solid var(--line);padding-top:7px}.tracker-slot small{font-size:9px;color:var(--muted);display:block}.tracker-slot output{display:block;font-size:21px;color:var(--amber);font-variant-numeric:tabular-nums}.tracker-slot span{font-size:9px;color:var(--muted)}
+.tracker-pitches{position:absolute;bottom:0;left:12px;right:12px;display:flex;height:76px;gap:8px}.tracker-slot{position:relative;flex:1;text-align:center;border-top:1px solid var(--shade-line);padding-top:7px}.tracker-slot small{font-size:9px;color:var(--ink-muted);display:block}.tracker-slot output{display:block;font-size:21px;color:var(--control-ink);font-variant-numeric:tabular-nums}.tracker-slot span{font-size:9px;color:var(--ink-muted)}
 </style>

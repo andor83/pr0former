@@ -12,8 +12,8 @@ const status=computed(()=>!props.partName?'Unassigned':props.stale?'Engine inact
   </component>
 </template>
 <style scoped>
-.part-player-readout{display:flex;flex-direction:column;gap:5px;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel);font-size:11px;color:var(--muted)}
+.part-player-readout{display:flex;flex-direction:column;gap:5px;padding:10px 12px;border:1px solid var(--shade-line);border-radius:9px;background:var(--shade);font-size:11px;color:var(--ink-muted)}
 button.part-player-readout{cursor:pointer;text-align:left;font-family:inherit}button.part-player-readout:hover{border-color:var(--amber)}button.part-player-readout:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 .part-player-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-output{font-variant-numeric:tabular-nums;font-size:15px;color:var(--amber)}
+output{font-variant-numeric:tabular-nums;font-size:15px;color:var(--control-ink)}
 </style>
