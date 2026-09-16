@@ -7,11 +7,13 @@ import type { Descriptor, GraphNode, NodeDocumentation } from '../types'
 import { autoSpace } from '../autoLayout'
 import { nodeDescriptor } from '../subgraphs'
 import PatchNode from './PatchNode.vue'
+import ContainerNode from './ContainerNode.vue'
+import { containerFor, isContainer } from '../containers'
 import SignalEdge from './SignalEdge.vue'
 const props = defineProps<{ documentation: NodeDocumentation; descriptors: Descriptor[]; focusKind?: string }>()
 const id = `documentation-${useId()}`
 const { getNodes, setNodes, fitView, onNodesInitialized } = useVueFlow({ id })
-const types = { instrument: markRaw(PatchNode) }, edgeTypes = { signal: markRaw(SignalEdge) }
+const types = { instrument: markRaw(PatchNode), container: markRaw(ContainerNode) }, edgeTypes = { signal: markRaw(SignalEdge) }
 const selected = ref<GraphNode>()
 const root = ref<HTMLElement>()
 const previewNodes = computed(() => props.documentation.graph.nodes.filter(n => n.kind !== 'subgraph'))
@@ -23,8 +25,8 @@ provide('telemetry', shallowRef(null))
 provide('telemetryStale', computed(() => true))
 provide('graphActive', ref(false))
 provide('localAudioAccess', undefined)
-const nodes = computed(() => previewNodes.value.map(node => ({
-  id: node.id, type: 'instrument', position: { x: node.x, y: node.y },
+const nodes = computed(() => [...previewNodes.value].sort((a, b) => Number(isContainer(b)) - Number(isContainer(a))).map(node => ({
+  id: node.id, ...(isContainer(node) ? { type: 'container', position: { x: node.x, y: node.y }, zIndex: -1 } : (frame => frame ? { type: 'instrument', position: { x: node.x - frame.x, y: node.y - frame.y }, parentNode: frame.id } : { type: 'instrument', position: { x: node.x, y: node.y } })(containerFor(node, previewNodes.value))),
   class: node.kind === props.focusKind ? 'documented-node' : undefined,
   data: { node, descriptor: nodeDescriptor(node, props.documentation.graph.nodes, props.descriptors), projectId: '', active: false, editable: false, canMute: false,
     connected: props.documentation.graph.edges.filter(e => e.target === node.id).map(e => e.target_port), driven: false,

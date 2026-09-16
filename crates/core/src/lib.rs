@@ -436,6 +436,21 @@ pub fn catalog() -> Vec<Descriptor> {
         });
     };
     add(
+        "container",
+        "Container",
+        "▭",
+        "Layout",
+        "Organizational frame with no audio or control role. Pick a colour, write an explanation for its info hover, and drag nodes in: they snap to the frame's grid and the frame grows to fit. Resize from the bottom-right corner; moving the frame carries its nodes along.",
+        vec![],
+        vec![],
+        vec![
+            Parameter { structural: true, ..param("color", "Color", "", 0., 15., 0.) },
+            Parameter { structural: true, ..param("width", "Width", "px", 280., 4000., 520.) },
+            Parameter { structural: true, ..param("height", "Height", "px", 160., 4000., 320.) },
+        ],
+        &["group", "frame", "box", "comment", "note"],
+    );
+    add(
         "subgraph",
         "Subgraph",
         "▣",
@@ -2400,11 +2415,20 @@ impl Graph {
             if n.kind == "osc_input" && n.parameters.get("text").is_some_and(|v| v.fract() != 0.) {
                 return Err("Choose numeric or text OSC input".into());
             }
+            if n.kind == "container"
+                && !match &n.control_value {
+                    None => true,
+                    Some(ControlValue::Text(text)) => text.len() <= 2000,
+                    Some(_) => false,
+                }
+            {
+                return Err("Container explanations are text up to 2000 bytes".into());
+            }
             if let Some(value) = &n.control_value {
                 if !named_route(&n.kind)
                     && !matches!(
                         n.kind.as_str(),
-                        "control_visualizer" | "control_input" | "toggle"
+                        "control_visualizer" | "control_input" | "toggle" | "container"
                     )
                 {
                     return Err(
@@ -2415,7 +2439,8 @@ impl Graph {
                     ControlValue::Number(v) if !v.is_finite() => {
                         return Err("Control numbers must be finite".into());
                     }
-                    ControlValue::Text(v) if v.len() > MAX_CONTROL_TEXT_BYTES => {
+                    // Container explanations are documentation, not a control signal; they have their own 2,000-byte bound above.
+                    ControlValue::Text(v) if n.kind != "container" && v.len() > MAX_CONTROL_TEXT_BYTES => {
                         return Err("Control strings must be at most 256 UTF-8 bytes".into());
                     }
                     _ => {}
@@ -3277,6 +3302,25 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn container_explanations_may_exceed_the_control_text_bound() {
+        let mut graph = demo_project("t".into(), "t".into(), Mode::Freeform).graph;
+        let mut frame = graph.nodes[0].clone();
+        frame.id = "frame".into();
+        frame.kind = "container".into();
+        frame.parameters.clear();
+        frame.channels = 1;
+        frame.control_value = Some(ControlValue::Text("x".repeat(1500)));
+        graph.nodes = vec![frame.clone()];
+        graph.edges.clear();
+        assert!(graph.validate().is_ok(), "1,500-byte explanation should validate");
+        frame.control_value = Some(ControlValue::Text("x".repeat(2001)));
+        graph.nodes = vec![frame.clone()];
+        assert!(graph.validate().is_err(), "2,001 bytes exceeds the container bound");
+        frame.control_value = Some(ControlValue::Number(1.));
+        graph.nodes = vec![frame];
+        assert!(graph.validate().is_err(), "numbers are not explanations");
+    }
     use super::*;
     #[test]
     fn osc_node_destinations_accept_dns_and_reject_malformed_endpoints() {

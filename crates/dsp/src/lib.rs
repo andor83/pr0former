@@ -1663,7 +1663,10 @@ impl Engine {
                 toggle_text: None,
                 control_input_seen: None,
                 manual_override: false,
-                fallback: if n.kind == "control_input"
+                fallback: if n.kind == "container" {
+                    // Container explanations are documentation (up to 2,000 bytes); the engine never reads them.
+                    visualizer::Datum::prepare(None)
+                } else if n.kind == "control_input"
                     && n.parameters.get("mode") == Some(&4.)
                     && n.control_value.is_none()
                 {
@@ -3419,6 +3422,19 @@ impl Fourier {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn container_explanations_never_reach_the_control_text_buffer() {
+        let mut graph = pr0_core::demo_project("t".into(), "t".into(), pr0_core::Mode::Freeform).graph;
+        let mut frame = graph.nodes[0].clone();
+        frame.id = "frame".into();
+        frame.kind = "container".into();
+        frame.parameters.clear();
+        frame.channels = 1;
+        frame.control_value = Some(pr0_core::ControlValue::Text("x".repeat(1500)));
+        graph.nodes.push(frame);
+        let mut engine = Engine::prepare(graph, 48000.).expect("a documented frame prepares");
+        engine.render(&[], &mut [[0.; MAX_CHANNELS]]);
+    }
     use super::*;
     use pr0_core::{Mode, demo_project};
     #[test]

@@ -337,6 +337,70 @@ observed Part MIDI pitch previews and release, verified no save before dropping,
 one-step undo, cancellation, playback locking and engine-disabled movement.
 Physical MIDI/audio devices and touch hardware were not tested.
 
+## Container frames and sample credits page (2026-09-15)
+
+`container` is a UI-only Layout node: no ports, no engine role, structural
+`color` (0–15 palette index), `width` and `height` parameters, and an optional
+text `control_value` (≤ 2,000 bytes) shown as the info hover beside its title.
+That text is documentation, not a control signal: core exempts containers from
+the 256-byte control-string bound and the engine skips the fixed control-text
+buffer for them (a long explanation used to fail the save in debug builds and
+truncate in release), covered by core and engine tests.
+Membership is geometric and nothing extra is persisted: a node whose anchor lies
+inside a frame is rendered as a Vue Flow child with frame-relative position, so
+dragging the frame carries it (the drop handler moves members by the frame's
+delta). Dropping a node into a frame snaps it to the frame grid (228 px columns,
+24 px rows below a 44 px header, 16 px padding) and grows the frame around the
+node's measured size; frames never shrink automatically and never nest. The
+bottom-right corner resizes with live feedback and persists on release. Frames
+render behind other nodes (`z-index: -1`, enforced in CSS so selection does not
+lift them over members). Options offers sixteen colour swatches and an
+explanation textarea; the documentation example graph renders the frame too.
+Verified by container geometry unit tests, the core/server suites, the build,
+and a Chromium case covering stacking, engine tolerance, carrying members,
+snapping and growth on drop, corner resizing, palette and explanation hover.
+
+The Help center gained a "Sample credits" page rendering `docs/SAMPLE_CREDITS.md`
+(also at `?help=1&topic=credits`). That document already attributed the bundled
+menegass CC0 drum kit; it now adds the recommended orchestral source, VSCO 2
+Community Edition (CC0, GitHub), with fallbacks and their attribution
+obligations. No orchestral samples are bundled.
+
+## Console header and Shift+` (2026-09-15)
+
+The engine console (modal and standalone `?console=` page) now has a single
+compact header line: the title on the left with Autoscroll, Clear, Open in new
+tab and Close on the right. The "PROJECT ENGINE" eyebrow and the "Recent server
+activity · up to 2,000 entries" caption are gone; the server's 2,000-entry bound
+is unchanged. Shift+` opens and closes the console modal whenever a project is
+open and the focus is not in a text field (checkboxes and buttons do not block
+it, so it also closes the console from its own controls); the gear menu item and
+Help list it. Verified by the new console Chromium case (header height, control
+alignment, toggle open/close, standalone page) plus the scripting GUI-console and
+control-step cases.
+
+## Presence badge, canvas descriptions and sample browser (2026-09-15)
+
+Presence now records the user behind each project event socket and broadcasts a
+`presence` message (`users`: distinct connected users) on every join and leave,
+plus once to each new socket after its snapshot. The header shows that count as a
+badge beside the server indicator only when it exceeds one, with a "Connected
+users: N" hover; a second tab of the same user does not raise it. Node descriptions
+no longer render on graph nodes in either help state; they remain in the Options
+modal header and the documentation example settings. The full sample browser is a
+pinned-header/pinned-pager flex dialog: the search spans the modal, the tag row
+shows the eight most-used tags with counts, `tag:a,b` query terms match either tag
+case-insensitively and rank samples carrying more of the listed tags first, cloud
+and row chips edit that term, the list is paginated (10/25/50/100 per page) under
+a sticky column header, and rows are one line (name · details · tags) above 740 px
+and stacked below. Verified by presence unit tests, the server suite, 125 frontend
+unit tests, the build, and Chromium: presence-badge, sample-browser (18-sample
+catalog including the bundled kit), documentation, link-quality, sample-library
+(two of three), sample-organizer and graph-controls. Two failures predate this
+work and reproduce on the base tree: documentation:70 stops at the guide's
+"Architecture: server and clients" heading, and sample-library:11 fails to import
+a six-channel FLAC ("The audio stream declares no channel layout").
+
 ## Graphical control step, inline checkboxes and engine hotkey (2026-09-15)
 
 `control_input` gained a structural `step` parameter ("Step (0 automatic)", shown

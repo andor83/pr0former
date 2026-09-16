@@ -2331,11 +2331,16 @@ mod browser_midi_tests {
 }
 
 async fn stream(mut socket: WebSocket, app: App, id: String, u: String, headers: HeaderMap) {
-    let _presence = presence::Lease::join(&app, &id).await;
+    let _presence = presence::Lease::join(&app, &id, &u).await;
     // Subscribe before reading SQLite so concurrent commits are either in this
     // snapshot or queued below. Clients discard older/equal revisions.
     let mut events = app.events.subscribe();
     if !send_project_snapshot(&mut socket, &app, &id, &u).await {
+        return;
+    }
+    // This socket subscribed after its own join broadcast; tell it who is here.
+    let users = app.presence.lock().unwrap().users(&id);
+    if socket_text(&mut socket, presence::event(&id, users).to_string()).await.is_err() {
         return;
     }
     let mut check = tokio::time::interval(Duration::from_secs(10));

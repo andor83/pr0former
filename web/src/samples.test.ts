@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatTags, hasTag, matchesSample, parseTags, tagCloud, toggleTag, type SampleEntry } from './samples'
+import { formatTags, hasTag, matchesSample, parseSampleQuery, parseTags, searchSamples, tagCloud, toggleQueryTag, toggleTag, type SampleEntry } from './samples'
 
 const sample = (name: string, tags: string): SampleEntry => ({ id: name, asset: null, name, description: '', tags, category: '', musical_key: '', bpm: null, global: false, channels: 2, sample_rate: 48000, frames: 1, duration: 0, revision: 0, author: 'a', can_edit: true, can_publish: true })
 
@@ -24,5 +24,23 @@ describe('sample tags', () => {
     expect(cloud).toEqual([{ tag: 'drums', count: 3 }, { tag: 'kick', count: 1 }, { tag: 'snare', count: 1 }])
     expect(toggleTag(['drums'], 'Kick')).toEqual(['drums', 'Kick'])
     expect(toggleTag(['drums', 'Kick'], 'kick')).toEqual(['drums'])
+  })
+  it('parses tag: terms out of a query, case-insensitively and de-duplicated', () => {
+    expect(parseSampleQuery('warm tag:Acoustic,electric piano TAG:loop tag:ACOUSTIC')).toEqual({ text: 'warm piano', tags: ['Acoustic', 'electric', 'loop'] })
+    expect(parseSampleQuery('  tag:  ')).toEqual({ text: '', tags: [] })
+  })
+  it('matches any listed tag and ranks samples that carry more of them first', () => {
+    const list = [sample('a', 'acoustic'), sample('b', 'electric'), sample('c', 'Acoustic, Electric'), sample('d', 'loop'), sample('zed', 'acoustic, electric')]
+    expect(searchSamples(list, 'tag:ACOUSTIC').map(s => s.id)).toEqual(['a', 'c', 'zed'])
+    expect(searchSamples(list, 'tag:acoustic,electric').map(s => s.id)).toEqual(['c', 'zed', 'a', 'b'])
+    expect(searchSamples(list, 'zed tag:acoustic,electric').map(s => s.id)).toEqual(['zed'])
+    expect(searchSamples(list, 'tag:missing')).toEqual([])
+    expect(searchSamples(list, '', ['loop']).map(s => s.id)).toEqual(['d'])
+  })
+  it('toggles tags inside the query text', () => {
+    expect(toggleQueryTag('warm tag:acoustic', 'Electric')).toBe('warm tag:acoustic,Electric')
+    expect(toggleQueryTag('warm tag:acoustic,Electric', 'electric')).toBe('warm tag:acoustic')
+    expect(toggleQueryTag('tag:acoustic', 'ACOUSTIC')).toBe('')
+    expect(toggleQueryTag('', 'kick')).toBe('tag:kick')
   })
 })

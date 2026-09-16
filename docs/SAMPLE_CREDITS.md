@@ -47,3 +47,36 @@ one megabyte.
   share-alike terms do not fit this MIT-licensed repository.
 - Sites such as freewavesamples.com, Cymatics and MusicRadar are free to
   download but forbid redistribution, so they cannot be bundled.
+
+## Orchestral instrument samples (recommended source, not bundled)
+
+pr0former does not ship orchestral samples; a usable set is several gigabytes.
+For samplers that need sustained orchestral notes, the recommended source is
+**VSCO 2 Community Edition** by Versilian Studios LLC (Sam Gossner, Simon
+Dalzell), dedicated to the public domain under
+[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/):
+https://github.com/sgossner/VSCO-2-CE (WAV, 44.1 kHz, pitch in each file name,
+no account needed). It covers violin, viola, cello and bass sections, solo
+violin and contrabass, harp, flute, piccolo, oboe, clarinet, bassoon, horn,
+trumpet, trombone, tuba, timpani and mallet percussion, and is mirrored on
+Freesound by user **Samulis** (packs named "VSCO 2 CE - …"). Attribution is not
+required by CC0; a courtesy line is: "Orchestral samples from VSCO 2 Community
+Edition by Versilian Studios LLC, CC0 1.0, https://github.com/sgossner/VSCO-2-CE".
+The larger **VCSL** (https://github.com/sgossner/VCSL) is the same authors'
+CC0 superset.
+
+Fallbacks and their obligations:
+
+| Source | License | Notes |
+| --- | --- | --- |
+| MTG "good-sounds" packs, https://freesound.org/people/MTG/packs/ | CC BY 3.0 | Dense chromatic single notes for violin, cello, double bass, flute, piccolo, oboe, clarinet, trumpet, saxes; no viola, bassoon, brass low end or percussion. Each file used must be credited: title, author "MTG (Music Technology Group, Universitat Pompeu Fabra)", its Freesound URL, the license link https://creativecommons.org/licenses/by/3.0/ and a note of any conversion. |
+| pjcohen orchestral percussion, https://freesound.org/people/pjcohen/packs/ | CC0 or CC BY 4.0 per sound | Concert bass drum, hand cymbals, tam-tam, celesta, double bass. Check each sound; CC BY 4.0 files need the same credit shape with https://creativecommons.org/licenses/by/4.0/. |
+| University of Iowa Musical Instrument Samples, https://theremin.music.uiowa.edu/MIS.html | Informal "no restrictions" statement | Complete instrument coverage, but many files hold several notes that must be split; not an SPDX license. |
+
+Not redistributable here: the Philharmonia Orchestra samples (free to use but
+may not be re-shipped as samples or a sampler instrument) and Freesound packs
+under CC BY-NC or the legacy Sampling+ terms, such as Carlos_Vaquero's string
+and wind packs.
+
+Add every sample actually shipped or seeded to the table above with its source
+URL and license before it lands in `crates/server/assets` or the seeded library.

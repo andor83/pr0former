@@ -8350,6 +8350,12 @@
       ]
     }
   },
+  "container": {
+    "title": "Group and explain a set of nodes",
+    "explanation": "A Container is a coloured frame with no audio or control role. Name it, pick one of sixteen colours and write an explanation that appears in the info hover beside its title. Drag nodes into the frame: they snap to its grid and the frame grows to fit. Drag the bottom-right corner to resize it; moving the frame carries its nodes along.",
+    "steps": ["Add a Container and open Options to choose a colour and describe what the group does.", "Drag nodes into the frame and arrange them on its grid.", "Resize from the bottom-right corner, or let the frame grow as nodes are dropped in."],
+    "graph": {"nodes": [{"id":"frame","kind":"container","label":"Pitch source","x":0,"y":0,"channels":1,"parameters":{"color":5,"width":520,"height":320},"control_value":"The control sets the oscillator pitch."},{"id":"pitch","kind":"control_input","label":"Pitch","x":16,"y":60,"channels":1,"parameters":{"mode":2,"min":20,"max":2000},"control_value":220},{"id":"osc","kind":"oscillator","label":"Oscillator","x":244,"y":60,"channels":2,"parameters":{}}],"edges":[{"id":"w","source":"pitch","source_port":"out","target":"osc","target_port":"frequency"}]}
+  },
   "subgraph": {
     "title": "Package a reusable audio processor",
     "explanation": "This is the inside of a subgraph. Named input and output boundary nodes become ports on the parent. Rename them to name the public contract; internal cables process the signal between those boundaries. Save the parent to the subgraph library to reuse a version.",

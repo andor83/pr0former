@@ -76,7 +76,7 @@ function controlSelect(event: MouseEvent) {
   </div>
   <div v-else class="patch-node" :class="[signal, { selected, 'math-node': isMath, 'visualizer-node':visualizer }]" :style="{ minHeight: `${height}px`, width: ['midi_input','local_midi_input','midi_to_osc','osc_to_midi','osc_input','osc_output'].includes(data.node.kind) ? '420px' : ['knobs','sliders'].includes(data.node.kind) ? `${data.node.kind==='sliders'&&data.node.parameters.orientation===1?350:160+88*(data.node.parameters.count??4)}px` : data.node.kind==='pitch_tracker' ? `${Math.max(240,24+92*(data.node.parameters.slots??1))}px` : data.node.kind==='piano' ? `${160+256*Math.min(data.node.parameters.octaves??1,10-(data.node.parameters.octave??4))}px` : data.node.kind==='drum_pads' ? '470px' : data.node.kind==='poly_sampler' ? '380px' : data.node.kind==='adsr' ? '300px' : data.node.kind==='meter' ? `${Math.max(204,150+16*Math.min(8,data.node.channels))}px` : undefined }" tabindex="0" @mousedown="controlSelect" @click="event => { if(event.ctrlKey) event.stopPropagation() }" @contextmenu.prevent.stop="!$event.ctrlKey && data.contextMenu(id, $event)" @keydown.enter.stop.prevent="data.open(id)" @dblclick.stop="data.open(id)">
     <div class="node-body" :style="{ minHeight: `${height - 2}px`, paddingBottom: data.node.kind==='sample_selector' ? '36px' : data.node.kind==='sliders' ? '40px' : undefined }">
-    <div class="node-cap"><span>{{ data.descriptor.category }}<HelpNote :label="data.descriptor.label">{{data.descriptor.description}}</HelpNote></span><button class="node-settings nodrag nopan" :aria-label="`Edit ${data.node.label}`" @click.stop="data.edit(id)"><Settings2 :size="14" /></button></div>
+    <div class="node-cap"><span>{{ data.descriptor.category }}</span><button class="node-settings nodrag nopan" :aria-label="`Edit ${data.node.label}`" @click.stop="data.edit(id)"><Settings2 :size="14" /></button></div>
     <div v-if="isMath" class="math-symbol">{{ data.descriptor.symbol }}</div>
     <div v-else class="node-title"><span class="node-glyph">{{ data.descriptor.symbol }}</span><span class="node-name">{{ audioName || data.node.label }}<small v-if="renamed" class="node-kind">{{ data.descriptor.label }}</small></span></div>
     <div v-if="isMath" class="math-label">{{ data.node.label }}<small v-if="renamed" class="node-kind">{{ data.descriptor.label }}</small></div>
@@ -116,7 +116,7 @@ function controlSelect(event: MouseEvent) {
 <style scoped>
 .node-body{position:relative}
 .node-part-player{position:absolute;top:250px;left:12px;right:12px}
-.patch-node :deep(.help-inline){padding:12px;border-top:1px solid var(--line)}
+
 
 .patch-node.trigger-node{width:80px;min-width:80px;min-height:64px;height:64px;padding:8px;display:flex;align-items:center;justify-content:center}
 .patch-node.compact-control{width:190px;min-width:150px;min-height:0;padding:10px}

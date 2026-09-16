@@ -10,22 +10,13 @@ test('the header warns when the server round trip is too slow to perform', async
     ws.onMessage(message => server.send(message))
     server.onMessage(message => { if (delay) setTimeout(() => ws.send(message), delay); else ws.send(message) })
   })
-  await page.goto('/')
+  const headers = { 'X-Pr0former': '1' }
   const status = await (await page.request.get('/api/status')).json()
-  await page.getByLabel('Username', { exact: true }).fill('link-quality')
-  await page.getByLabel('Password', { exact: true }).fill('test1234')
-  await page.getByRole('button', { name: status.bootstrap ? 'Create account' : 'Sign in', exact: true }).click()
-  if (!status.bootstrap && await page.getByText(/invalid|unknown|incorrect/i).count()) {
-    await page.getByRole('button', { name: 'New here? Create an account', exact: true }).click()
-    await page.getByRole('button', { name: 'Create account', exact: true }).click()
-  }
-  const nameField = page.getByLabel('Project name', { exact: true })
+  await page.request.post(`/api/${status.bootstrap ? 'register' : 'login'}`, { headers, data: { username: 'browser-test', password: 'test1234' } })
+  const created = await page.request.post('/api/projects', { headers, data: { name: 'Link quality', mode: 'freeform' } })
+  expect(created.ok(), await created.text()).toBeTruthy()
+  await page.goto('/')
   const indicator = page.locator('.server-indicator')
-  await expect(indicator).toHaveText(/Server connected|Connecting/)
-  if (await nameField.waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)) {
-    await nameField.fill('Link quality')
-    await page.getByRole('button', { name: 'Create performance', exact: true }).click()
-  }
   await expect(indicator).toHaveText('Server connected')
   await expect(indicator).not.toHaveClass(/lagging/)
   delay = 400

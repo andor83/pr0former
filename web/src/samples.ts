@@ -27,3 +27,29 @@ export function tagCloud(samples:{tags:string}[]):TagCount[] {
 }
 
 export function midiNoteLabel(note:number){return `${['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'][note%12]}${Math.floor(note/12)-1} (MIDI ${note})`}
+
+export interface SampleQuery { text:string; tags:string[] }
+/** `tag:a,b` tokens (case-insensitive) select samples carrying any listed tag; everything else is free text. */
+export function parseSampleQuery(search:string):SampleQuery {
+  const tags:string[]=[],text:string[]=[]
+  for(const token of search.trim().split(/\s+/).filter(Boolean)){
+    const match=/^tags?:(.*)$/i.exec(token)
+    if(!match){text.push(token);continue}
+    for(const tag of parseTags(match[1]))if(!tags.some(t=>t.toLowerCase()===tag.toLowerCase()))tags.push(tag)
+  }
+  return {text:text.join(' '),tags}
+}
+/** Free text and required chips must all match; with `tag:` terms a sample needs at least one of them and samples carrying more of them rank first (ties keep list order). */
+export function searchSamples<T extends SampleEntry>(samples:T[],search:string,required:string[]=[]):T[] {
+  const query=parseSampleQuery(search)
+  return samples
+    .map((sample,index)=>({sample,index,hits:query.tags.filter(tag=>hasTag(sample,tag)).length}))
+    .filter(({sample,hits})=>matchesSample(sample,query.text,required)&&(!query.tags.length||hits>0))
+    .sort((a,b)=>b.hits-a.hits||a.index-b.index)
+    .map(({sample})=>sample)
+}
+/** Add or remove one tag in a query's `tag:` list, keeping the free text. */
+export function toggleQueryTag(search:string,tag:string):string {
+  const query=parseSampleQuery(search),tags=toggleTag(query.tags,tag)
+  return [query.text,tags.length?`tag:${tags.join(',')}`:''].filter(Boolean).join(' ')
+}

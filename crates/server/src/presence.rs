@@ -1,6 +1,6 @@
 //! Project event sockets define live presence; ordinary HTTP requests are not leases.
 use crate::*;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const RECONNECT_GRACE: Duration = Duration::from_secs(5);
 #[derive(Default)]
@@ -8,28 +8,35 @@ pub struct Presence {
     projects: BTreeMap<String, Entry>,
 }
 struct Entry {
-    sockets: HashSet<String>,
+    /// socket id → user id; several tabs of one user are several sockets.
+    sockets: HashMap<String, String>,
     generation: String,
 }
 impl Presence {
-    fn join(&mut self, project: &str, socket: &str) {
+    fn join(&mut self, project: &str, socket: &str, user: &str) {
         let entry = self
             .projects
             .entry(project.into())
             .or_insert_with(|| Entry {
-                sockets: HashSet::new(),
+                sockets: HashMap::new(),
                 generation: uid(),
             });
-        entry.sockets.insert(socket.into());
+        entry.sockets.insert(socket.into(), user.into());
         entry.generation = uid();
     }
     fn leave(&mut self, project: &str, socket: &str) -> Option<String> {
         let entry = self.projects.get_mut(project)?;
-        if !entry.sockets.remove(socket) || !entry.sockets.is_empty() {
+        if entry.sockets.remove(socket).is_none() || !entry.sockets.is_empty() {
             return None;
         }
         entry.generation = uid();
         Some(entry.generation.clone())
+    }
+    /// Distinct users holding an event socket on the project.
+    pub fn users(&self, project: &str) -> usize {
+        self.projects.get(project).map_or(0, |e| {
+            e.sockets.values().collect::<HashSet<_>>().len()
+        })
     }
     fn vacant(&self, project: &str, generation: &str) -> bool {
         self.projects
@@ -43,12 +50,20 @@ pub struct Lease {
     project: String,
     socket: String,
 }
+pub fn event(project: &str, users: usize) -> Value {
+    json!({"type":"presence","project_id":project,"users":users})
+}
 impl Lease {
-    pub async fn join(app: &App, project: &str) -> Self {
+    pub async fn join(app: &App, project: &str, user: &str) -> Self {
         // Serialized with the final vacancy check and graph ownership changes.
         let _setup = app.setup.lock().await;
         let socket = uid();
-        app.presence.lock().unwrap().join(project, &socket);
+        let users = {
+            let mut presence = app.presence.lock().unwrap();
+            presence.join(project, &socket, user);
+            presence.users(project)
+        };
+        let _ = app.events.send(event(project, users).into());
         Self {
             app: app.clone(),
             project: project.into(),
@@ -60,10 +75,13 @@ impl Drop for Lease {
     fn drop(&mut self) {
         let (app, project, socket) = (self.app.clone(), self.project.clone(), self.socket.clone());
         tokio::spawn(async move {
-            let generation = {
+            let (generation, users) = {
                 let _setup = app.setup.lock().await;
-                app.presence.lock().unwrap().leave(&project, &socket)
+                let mut presence = app.presence.lock().unwrap();
+                let generation = presence.leave(&project, &socket);
+                (generation, presence.users(&project))
             };
+            let _ = app.events.send(event(&project, users).into());
             let Some(generation) = generation else { return };
             tokio::time::sleep(RECONNECT_GRACE).await;
             let _setup = app.setup.lock().await;
@@ -121,12 +139,13 @@ mod tests {
     #[test]
     fn every_tab_counts_and_reconnect_invalidates_old_cleanup() {
         let mut p = Presence::default();
-        p.join("a", "tab1");
-        p.join("a", "tab2");
+        p.join("a", "tab1", "alice");
+        p.join("a", "tab2", "alice");
+        assert_eq!(p.users("a"), 1);
         assert!(p.leave("a", "tab1").is_none());
         let old = p.leave("a", "tab2").unwrap();
         assert!(p.vacant("a", &old));
-        p.join("a", "tab3");
+        p.join("a", "tab3", "bob");
         assert!(!p.vacant("a", &old));
         let current = p.leave("a", "tab3").unwrap();
         assert!(!p.vacant("a", &old));
@@ -135,12 +154,26 @@ mod tests {
     #[test]
     fn duplicate_disconnects_and_other_projects_do_not_change_presence() {
         let mut p = Presence::default();
-        p.join("a", "one");
-        p.join("b", "two");
+        p.join("a", "one", "alice");
+        p.join("b", "two", "bob");
+        assert_eq!((p.users("a"), p.users("b"), p.users("c")), (1, 1, 0));
         assert!(p.leave("a", "missing").is_none());
         let generation = p.leave("a", "one").unwrap();
         assert!(p.leave("a", "one").is_none());
         assert!(p.vacant("a", &generation));
         assert!(!p.vacant("b", &generation));
+    }
+    #[test]
+    fn users_counts_people_not_tabs() {
+        let mut p = Presence::default();
+        p.join("a", "s1", "alice");
+        p.join("a", "s2", "alice");
+        p.join("a", "s3", "bob");
+        assert_eq!(p.users("a"), 2);
+        assert!(p.leave("a", "s3").is_none());
+        assert_eq!(p.users("a"), 1);
+        assert!(p.leave("a", "s1").is_none());
+        assert!(p.leave("a", "s2").is_some());
+        assert_eq!(p.users("a"), 0);
     }
 }

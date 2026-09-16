@@ -6,11 +6,14 @@ import DocumentationGraph from './DocumentationGraph.vue'
 import SetupGuide from './SetupGuide.vue'
 import ScoreEntryGuide from './ScoreEntryGuide.vue'
 import ScriptGuide from './ScriptGuide.vue'
+import SampleCreditsGuide from './SampleCreditsGuide.vue'
 
 const props = defineProps<{ descriptors: Descriptor[]; standalone?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 const dialog = ref<HTMLDialogElement>()
-const topic = ref<'quick-start' | 'architecture' | 'init' | 'build' | 'first-project' | 'performance' | 'interface' | 'score-entry' | 'nodes' | 'scripting'>(new URLSearchParams(location.search).get('topic')==='scripting'?'scripting':'quick-start')
+type Topic = 'quick-start' | 'architecture' | 'init' | 'build' | 'first-project' | 'performance' | 'interface' | 'score-entry' | 'nodes' | 'scripting' | 'credits'
+const requestedTopic = new URLSearchParams(location.search).get('topic')
+const topic = ref<Topic>(requestedTopic === 'scripting' || requestedTopic === 'credits' ? requestedTopic : 'quick-start')
 const nodeCategory = ref('All nodes')
 const nodeSearch = ref('')
 const example = ref<Descriptor | null>(null)
@@ -77,6 +80,7 @@ onBeforeUnmount(() => { if (props.standalone) document.title = previousTitle })
         <button :class="{ active: topic === 'interface' }" @click="selectTopic('interface')">Interface guide</button>
         <button :class="{ active: topic === 'score-entry' }" @click="selectTopic('score-entry')">Score entry</button>
         <button :class="{ active: topic === 'scripting' }" @click="selectTopic('scripting')">JavaScript scripting</button>
+        <button :class="{ active: topic === 'credits' }" @click="selectTopic('credits')">Sample credits</button>
         <p>Reference</p>
         <button :class="{ active: topic === 'nodes' && nodeCategory === 'All nodes' }" @click="selectCategory('All nodes')">All nodes <span>{{ descriptors.length }}</span></button>
         <button v-for="category in categories" :key="category" :class="{ active: topic === 'nodes' && nodeCategory === category }" @click="selectCategory(category)">{{ category }} <span>{{ descriptors.filter(node => node.category === category).length }}</span></button>
@@ -86,6 +90,7 @@ onBeforeUnmount(() => { if (props.standalone) document.title = previousTitle })
         <SetupGuide v-if="topic === 'quick-start' || topic === 'architecture' || topic === 'init' || topic === 'build'" :topic="topic" />
 
         <ScriptGuide v-else-if="topic === 'scripting'" />
+        <SampleCreditsGuide v-else-if="topic === 'credits'" />
         <ScoreEntryGuide v-else-if="topic === 'score-entry'" />
 
         <article v-else-if="topic === 'first-project'" class="help-article">
@@ -121,7 +126,7 @@ onBeforeUnmount(() => { if (props.standalone) document.title = previousTitle })
           <section><h2>Score</h2><p>Write and edit shared notation, parts, staves, dynamics, automation, repeats, tempo, and structural events. The score is horizontally continuous rather than paginated.</p></section>
           <section><h2>Conductor, Ensemble, and Monitor</h2><p>Conductor manages cues and performance sets. Ensemble manages members and assignments. Monitor selects the browser feed, local inputs, and diagnostics; it does not replace hardware output routing.</p></section>
           <section><h2>Top bar and transport</h2><p>The top bar holds project navigation, save/revision state, explanations, and the gear menu. The footer controls show transport, count-in, tempo, engine preparation, stage view, and browser monitoring. Browser timers display status only; musical scheduling follows engine sample time.</p></section>
-          <section><h2>Keyboard and accessibility</h2><p>Space toggles play/pause and ` (backtick) toggles the audio engine when the workspace has focus. In the graph, N opens quick insert, A selects all, L auto-spaces a selection, and Delete removes selected items. Press I or use the header info button to expand or collapse descriptions in place. Info icons always remain available: hover, focus or tap one to read its explanation. Reduced-motion and coarse-pointer layouts are supported.</p></section>
+          <section><h2>Keyboard and accessibility</h2><p>Space toggles play/pause, ` (backtick) toggles the audio engine and Shift+` opens or closes the Console when the workspace has focus. In the graph, N opens quick insert, A selects all, L auto-spaces a selection, and Delete removes selected items. Press I or use the header info button to expand or collapse descriptions in place. Info icons always remain available: hover, focus or tap one to read its explanation. Reduced-motion and coarse-pointer layouts are supported.</p></section>
         </article>
 
         <article v-else class="help-article node-reference">
