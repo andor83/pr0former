@@ -8,6 +8,7 @@ PLATFORM="$(uname -s)"
 STARTUP_ONLY=false
 START_ONLY=false
 STOP_ONLY=false
+RESTART_ONLY=false
 UPDATE_ONLY=false
 SIGN_ONLY=false
 UPDATE_AND_START=false
@@ -25,7 +26,9 @@ pr0former initial setup
 
   ./init.sh             Check/install dependencies, build, and offer startup setup
   ./init.sh --start     Start the built server in the foreground (Ctrl-C to stop)
-  ./init.sh --stop      Stop servers launched by --start from this project
+  ./init.sh --stop      Stop servers launched by --start and the startup service, if installed
+  ./init.sh --restart   Restart the startup service (starting it if stopped); without one,
+                        stop --start servers and start in the foreground
   ./init.sh --update    Rebuild frontend and release server using locked dependencies
   ./init.sh --sign      macOS: re-sign the built server with a stable code-signing identity
   ./init.sh --uas       Pull latest Git changes, rebuild, and start in the foreground
@@ -35,9 +38,9 @@ pr0former initial setup
   ./init.sh --allow-low-ports
                         On Linux, allow the built server to bind ports 80/443
   ./init.sh --help      Show this help
-  --no-ssl             Force HTTP for this --start/--uas launch
-  --host HOST          Override the bind host for --start/--uas (IPv4, IPv6, or hostname)
-  --port PORT          Override the bind port for --start/--uas (1–65535)
+  --no-ssl             Force HTTP for this --start/--uas/--restart foreground launch
+  --host HOST          Override the bind host for --start/--uas/--restart (IPv4, IPv6, or hostname)
+  --port PORT          Override the bind port for --start/--uas/--restart (1–65535)
 
 macOS: startup uses a LaunchAgent for the current user, at login.
 macOS: builds are code-signed with PR0_CODESIGN_IDENTITY, APPLE_SIGNING_IDENTITY, or the
@@ -50,6 +53,9 @@ No administrator account or password is created; bootstrap in the web interface.
 --start prints the compiled Git revision and checks the tracked remote branch (up to 8 seconds).
 Red warnings identify stale/dirty builds or an unverifiable version; startup still continues.
 --start alone does not pull source or rebuild.
+--stop leaves the startup service enabled at login; it starts again at the next login or --restart.
+--restart rejects --no-ssl/--host/--port when a startup service is installed: the service always runs
+.local/start-pr0former.sh, so regenerate that script with --startup to change its settings.
 --start reuses .local/start-pr0former.sh when present, otherwise uses PR0_ environment settings.
 --host and --port override only the specified part of that address for this launch.
 --update requires installed build tools; it does not pull source or restart servers.
@@ -68,6 +74,7 @@ while [ "$#" -gt 0 ]; do
     --startup) STARTUP_ONLY=true ;;
     --start) START_ONLY=true ;;
     --stop) STOP_ONLY=true ;;
+    --restart) RESTART_ONLY=true ;;
     --update) UPDATE_ONLY=true ;;
     --sign) SIGN_ONLY=true ;;
     --uas) UPDATE_AND_START=true ;;
@@ -88,16 +95,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 mode_count=0
-for selected in "$START_ONLY" "$STOP_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$SIGN_ONLY" "$UPDATE_AND_START" "$SETUP_SSL" "$REMOVE_SSL" "$ALLOW_LOW_PORTS"; do
+for selected in "$START_ONLY" "$STOP_ONLY" "$RESTART_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$SIGN_ONLY" "$UPDATE_AND_START" "$SETUP_SSL" "$REMOVE_SSL" "$ALLOW_LOW_PORTS"; do
   if [ "$selected" = true ]; then mode_count=$((mode_count + 1)); fi
 done
 if [ "$mode_count" -gt 1 ]; then printf 'Select only one launcher action.\n' >&2; exit 2; fi
-if [ "$NO_SSL" = true ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ]; then
-  printf '%s\n' '--no-ssl requires --start or --uas.' >&2; exit 2
+if [ "$NO_SSL" = true ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ] && [ "$RESTART_ONLY" != true ]; then
+  printf '%s\n' '--no-ssl requires --start, --uas, or --restart.' >&2; exit 2
 fi
 
-if [ -n "$START_HOST$START_PORT" ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ]; then
-  printf '%s\n' '--host and --port require --start or --uas.' >&2; exit 2
+if [ -n "$START_HOST$START_PORT" ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ] && [ "$RESTART_ONLY" != true ]; then
+  printf '%s\n' '--host and --port require --start, --uas, or --restart.' >&2; exit 2
 fi
 if [ -n "$START_HOST" ]; then
   case "$START_HOST" in
@@ -116,7 +123,7 @@ if { [ "$START_ONLY" = true ] && [ "$STARTUP_ONLY" = true ]; } ||
    { [ "$STOP_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; } ||
    { [ "$UPDATE_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STOP_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; } ||
    { [ "$UPDATE_AND_START" = true ] && { [ "$START_ONLY" = true ] || [ "$STOP_ONLY" = true ] || [ "$UPDATE_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; }; then
-  printf 'Use only one of --start, --stop, --update, --uas, or --startup.\n' >&2
+  printf 'Use only one of --start, --stop, --restart, --update, --uas, or --startup.\n' >&2
   exit 2
 fi
 if [ "$(id -u)" -eq 0 ]; then
@@ -205,10 +212,13 @@ process_identity() {
   LC_ALL=C ps -p "$1" -o uid= -o lstart= 2>/dev/null
 }
 
-if [ "$STOP_ONLY" = true ]; then
+# Stops servers recorded by --start. Sets MANUAL_STOPPED/MANUAL_FAILED rather than exiting so
+# --restart can continue after the sweep.
+MANUAL_STOPPED=false
+MANUAL_FAILED=false
+stop_manual_runs() {
   process_identity "$$" >/dev/null || { printf 'Cannot inspect running processes.\n' >&2; exit 1; }
-  stopped=false
-  failed=false
+  local record pid identity attempts
   for record in "$RUN_DIR"/*.pid; do
     [ -f "$record" ] || continue
     pid="${record##*/}"
@@ -217,17 +227,17 @@ if [ "$STOP_ONLY" = true ]; then
     identity="$(cat "$record")"
     if [ -n "$identity" ] && [ "$(process_identity "$pid" || true)" = "$identity" ]; then
       if ! kill -TERM "$pid"; then
-        failed=true
+        MANUAL_FAILED=true
         continue
       fi
-      stopped=true
+      MANUAL_STOPPED=true
       attempts=0
       while [ "$(process_identity "$pid" || true)" = "$identity" ]; do
         # An exited process awaiting its parent's wait is already stopped.
         case "$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null || true)" in *Z*) break ;; esac
         if [ "$attempts" -ge 10 ]; then
           printf 'Process %s has not stopped after 10 seconds.\n' "$pid" >&2
-          failed=true
+          MANUAL_FAILED=true
           break
         fi
         sleep 1
@@ -237,13 +247,104 @@ if [ "$STOP_ONLY" = true ]; then
     fi
     rm -f -- "$record"
   done
-  if [ "$failed" = true ]; then exit 1; fi
-  if [ "$stopped" = true ]; then
+}
+
+# The startup service installed by --startup: a per-user LaunchAgent on macOS, a systemd
+# user unit on Linux. These helpers are defined before `required`/`ask`, so they check tools
+# themselves and never prompt.
+service_plist() { printf '%s\n' "$HOME/Library/LaunchAgents/$SERVICE_ID.plist"; }
+service_installed() {
+  case "$PLATFORM" in
+    Darwin) [ -f "$(service_plist)" ] ;;
+    Linux) command -v systemctl >/dev/null 2>&1 && [ -f "$HOME/.config/systemd/user/pr0former.service" ] ;;
+    *) return 1 ;;
+  esac
+}
+service_running() {
+  case "$PLATFORM" in
+    Darwin) launchctl print "gui/$(id -u)/$SERVICE_ID" 2>/dev/null | grep -q 'state = running' ;;
+    Linux) systemctl --user is-active --quiet pr0former.service ;;
+    *) return 1 ;;
+  esac
+}
+# Stops the service without disabling it: it still starts at the next login.
+service_stop() {
+  case "$PLATFORM" in
+    Darwin) launchctl bootout "gui/$(id -u)/$SERVICE_ID" >/dev/null 2>&1 || true ;;
+    Linux) systemctl --user stop pr0former.service ;;
+  esac
+}
+# Restarts a running service, or starts a stopped one.
+service_restart() {
+  case "$PLATFORM" in
+    Darwin)
+      if launchctl print "gui/$(id -u)/$SERVICE_ID" >/dev/null 2>&1; then
+        launchctl kickstart -k "gui/$(id -u)/$SERVICE_ID"
+      else
+        launchctl enable "gui/$(id -u)/$SERVICE_ID"
+        launchctl bootstrap "gui/$(id -u)" "$(service_plist)"
+      fi ;;
+    Linux) systemctl --user restart pr0former.service ;;
+  esac
+}
+
+if [ "$STOP_ONLY" = true ]; then
+  stop_manual_runs
+  service_stopped=false
+  if service_installed; then
+    if service_running; then service_stopped=true; fi
+    service_stop
+  fi
+  if [ "$MANUAL_FAILED" = true ]; then exit 1; fi
+  if [ "$MANUAL_STOPPED" = true ]; then
     printf 'Stopped pr0former servers launched by --start.\n'
-  else
-    printf 'No servers launched by --start are running for this project.\n'
+  fi
+  if [ "$service_stopped" = true ]; then
+    printf 'Stopped the pr0former startup service. It stays enabled at login; use --restart to start it now.\n'
+  elif service_installed; then
+    printf 'The pr0former startup service was not running.\n'
+  fi
+  if [ "$MANUAL_STOPPED" != true ] && [ "$service_stopped" != true ] && ! service_installed; then
+    printf 'No servers launched by --start are running for this project, and no startup service is installed.\n'
   fi
   exit 0
+fi
+
+if [ "$RESTART_ONLY" = true ]; then
+  if service_installed; then
+    if [ "$NO_SSL" = true ] || [ -n "$START_HOST$START_PORT" ]; then
+      printf '%s\n' '--no-ssl, --host and --port do not apply to the startup service; it runs .local/start-pr0former.sh. Regenerate it with ./init.sh --startup.' >&2
+      exit 2
+    fi
+    # A foreground server would hold the port the service needs.
+    stop_manual_runs
+    if [ "$MANUAL_FAILED" = true ]; then exit 1; fi
+    if [ "$MANUAL_STOPPED" = true ]; then printf 'Stopped pr0former servers launched by --start.\n'; fi
+    if service_running; then
+      service_restart
+      printf 'Restarted the pr0former startup service.\n'
+    else
+      service_restart
+      printf 'Started the pr0former startup service.\n'
+    fi
+    case "$PLATFORM" in
+      Darwin) printf 'Logs: %s/data/logs\n' "$PROJECT_DIR" ;;
+      Linux) printf 'Logs: journalctl --user -u pr0former -f\n' ;;
+    esac
+    exit 0
+  fi
+  stop_manual_runs
+  if [ "$MANUAL_FAILED" = true ]; then exit 1; fi
+  if [ "$MANUAL_STOPPED" = true ]; then
+    printf 'Stopped pr0former servers launched by --start.\n'
+  else
+    printf 'No startup service is installed and no --start server is running; starting in the foreground.\n'
+  fi
+  start_args=(--start)
+  if [ "$NO_SSL" = true ]; then start_args+=(--no-ssl); fi
+  if [ -n "$START_HOST" ]; then start_args+=(--host "$START_HOST"); fi
+  if [ -n "$START_PORT" ]; then start_args+=(--port "$START_PORT"); fi
+  exec /bin/bash "$PROJECT_DIR/init.sh" "${start_args[@]}"
 fi
 
 if [ "$UPDATE_AND_START" = true ]; then
@@ -595,6 +696,15 @@ generate_startup() {
   default_port=80
   if [ -n "$tls_cert" ] || [ -f "$PROJECT_DIR/certs/server.pem" ]; then default_port=443; fi
   bind_address="${bind_address:-0.0.0.0:$default_port}"
+  # The server requires host:port; a bare port answer means "all IPv4 interfaces".
+  case "$bind_address" in
+    *[!0-9]*) ;;
+    *) bind_address="0.0.0.0:$bind_address" ;;
+  esac
+  case "$bind_address" in
+    *:*) ;;
+    *) printf 'Bind address must be host:port (for example 0.0.0.0:443) or a port number.\n' >&2; return 1 ;;
+  esac
   mkdir -p "$PROJECT_DIR/.local" "$PROJECT_DIR/data/logs"
   chmod 700 "$PROJECT_DIR/.local"
   local startup_script="$PROJECT_DIR/.local/start-pr0former.sh"

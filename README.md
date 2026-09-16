@@ -42,7 +42,13 @@ Use either flag or both. Each overrides only that component of the saved/environ
 ./init.sh --stop
 ```
 
-Stops servers launched with `--start` from this project, including from another terminal. Sends SIGTERM and waits up to 10 seconds per server, reporting a failure if it remains running. Repeated stops are harmless. Tracking applies to launches made with this version of the script; older launches can still be stopped with Ctrl-C. Startup services are managed separately through the menu below.
+Stops servers launched with `--start` from this project, including from another terminal. Sends SIGTERM and waits up to 10 seconds per server, reporting a failure if it remains running. Repeated stops are harmless. Tracking applies to launches made with this version of the script; older launches can still be stopped with Ctrl-C. If a startup service is installed (see below), `--stop` also stops it without disabling it, so it still starts at the next login.
+
+```sh
+./init.sh --restart
+```
+
+With a startup service installed, restarts it, or starts it if it was stopped; any `--start` servers are stopped first so the port is free. `--no-ssl`, `--host` and `--port` are rejected in that case because the service always runs `.local/start-pr0former.sh` (regenerate it with `--startup`). Without a startup service, `--restart` stops any `--start` servers and then starts the server in the foreground, accepting the same options as `--start`.
 
 ```sh
 ./init.sh --startup
