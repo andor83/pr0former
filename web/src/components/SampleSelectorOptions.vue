@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import type { SampleChoice } from '../types'
 import type { SampleEntry } from '../samples'
+import SuggestInput from './SuggestInput.vue'
 const props = defineProps<{ choices: SampleChoice[]; samples: SampleEntry[]; disabled: boolean }>()
 const emit = defineEmits<{ change: [choices: SampleChoice[]] }>()
 const search = ref('')
@@ -26,7 +27,7 @@ function move(i: number, delta: number) {
 <template>
   <section class="parameter-row sample-selector-options">
     <h3>Sample shortlist<HelpNote label="Sample shortlist">Add project samples in the order you want, numbered from 0. Optional nicknames appear on the node. Click an entry on the node or connect a number to Index; connect Sample ID to a sampler's Sample ID input. Add samples to the project through the Samples library first. Selecting a sample does not play a note.</HelpNote></h3>
-    <div class="sample-add"><label>Find a sample<input v-model="search" aria-label="Find shortlist sample" list="shortlist-suggestions" autocomplete="off" placeholder="Search project samples…" :disabled="disabled||choices.length>=64" @keydown.enter.prevent="add"><datalist id="shortlist-suggestions"><option v-for="sample in samples" :key="sample.id" :value="label(sample)">{{sample.channels}} ch</option></datalist></label><button class="button small" :disabled="disabled||!match||choices.length>=64" @click="add">Add sample</button></div>
+    <div class="sample-add"><label>Find a sample<SuggestInput label="Find shortlist sample" :value="search" :suggestions="samples.filter(s=>s.asset).map(s=>({value:label(s),detail:`${s.channels} ch`}))" placeholder="Search project samples…" :disabled="disabled||choices.length>=64" @input="text=>search=text" @enter="add" /></label><button class="button small" :disabled="disabled||!match||choices.length>=64" @click="add">Add sample</button></div>
     <ol start="0">
       <li v-for="(sample,i) in choices" :key="i"><div class="choice-name"><span>{{i}} · {{sample.name}}</span><small>Sample ID {{sample.asset}}</small></div><label>Nickname<input :aria-label="`Nickname for sample ${i}`" :value="sample.nickname" maxlength="80" :disabled="disabled" placeholder="Optional nickname" @change="rename(i,($event.target as HTMLInputElement).value)"></label><div class="choice-actions"><button class="button small" :aria-label="`Move sample ${i} up`" :disabled="disabled||i===0" @click="move(i,-1)">↑</button><button class="button small" :aria-label="`Move sample ${i} down`" :disabled="disabled||i===choices.length-1" @click="move(i,1)">↓</button><button class="button small" :aria-label="`Remove sample ${i}`" :disabled="disabled" @click="emit('change',choices.filter((_,j)=>j!==i))">Remove</button></div></li>
     </ol>

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId } from 'vue'
 import type { GraphEdge, GraphNode, SampleChoice } from '../types'
-import { midiNoteLabel, type SampleEntry } from '../samples'
+import type { SampleEntry } from '../samples'
+import SuggestInput from './SuggestInput.vue'
 import { FIELD_MAX_LIVE, FIELD_MAX_SAMPLES, fieldDefault, fieldValue, removeSlotParameters, slotKeys, swapSlotParameters } from '../granularField'
 // Second dialog of a Granular Field node: the ordered sample slots and the two live
 // inputs. It stacks above the node modal in the browser's top layer.
@@ -57,7 +58,7 @@ onBeforeUnmount(() => { dialog.value?.close(); if (previousFocus?.isConnected) p
     <div class="parameter-list">
       <section class="parameter-row">
         <h3>Sample slots<HelpNote label="Sample slots">Up to eight project samples, numbered from 1. Each slot has a position on the field, a tune offset in semitones and a gain; drag the circles on the field to place them. Slot N also exposes a Sample N ID input on the node, so a Sample selector or number can swap that slot's sample while playing. Moving a slot carries its settings with it.</HelpNote></h3>
-        <div class="sample-add"><label>Find a sample<input v-model="search" aria-label="Find field sample" :list="`field-samples-${uid}`" autocomplete="off" placeholder="Search project samples…" :disabled="busy || choices.length >= FIELD_MAX_SAMPLES" @keydown.enter.prevent="add"><datalist :id="`field-samples-${uid}`"><option v-for="sample in samples" :key="sample.id" :value="label(sample)">{{ sample.channels }} ch</option></datalist></label><button class="button small" :disabled="busy || !match || choices.length >= FIELD_MAX_SAMPLES" @click="add">Add sample</button></div>
+        <div class="sample-add"><label>Find a sample<SuggestInput label="Find field sample" :value="search" :suggestions="samples.filter(s => s.asset).map(s => ({ value: label(s), detail: `${s.channels} ch` }))" placeholder="Search project samples…" :disabled="busy || choices.length >= FIELD_MAX_SAMPLES" @input="text => search = text" @enter="add" /></label><button class="button small" :disabled="busy || !match || choices.length >= FIELD_MAX_SAMPLES" @click="add">Add sample</button></div>
         <ol>
           <li v-for="(sample, i) in choices" :key="i" class="slot-row">
             <div class="slot-name"><strong>{{ i + 1 }} · {{ sample.name }}</strong><small>Sample ID {{ sample.asset }}<template v-if="live && values?.[`_sample_${i + 1}_missing`]"> · <span class="missing">audio missing</span></template><template v-if="driver(`sample_${i + 1}`)"> · setter cabled from {{ sourceName(driver(`sample_${i + 1}`)!) }}</template></small></div>

@@ -19,6 +19,7 @@ mod pitch_tracker;
 pub mod recorder;
 mod sampler;
 mod sequence;
+mod smoothing;
 pub mod part_player;
 pub mod score_automation;
 mod spectral;
@@ -221,6 +222,14 @@ struct RuntimeNode {
     sampler: Option<Box<sampler::Sampler>>,
     granular: Option<Box<granular::Granular>>,
     granular_field: Option<Box<granular_field::GranularField>>,
+    /// LFO: clock sample at the last Sync edge; phase is measured from here.
+    lfo_origin: u64,
+    lfo_sync_high: bool,
+    /// Phasor: the glided frequency in Hz. NaN until the first sample, which
+    /// adopts the set frequency instead of sliding up to it from zero.
+    phasor_frequency: f64,
+    /// Smooth change: the eased value, its progress and its spring velocity.
+    smoothing: smoothing::Smoothing,
     pitch_shift: Option<Box<granular::PitchShift>>,
     convolution: Option<Box<convolution::Convolution>>,
     pitch_tracker: Option<Box<pitch_tracker::PitchTracker>>,
@@ -941,9 +950,53 @@ impl RuntimeNode {
                 scalar = self.count;
             }
             "lfo" => {
-                self.phase = (self.phase + self.p("rate") / sr).fract();
+                // With Clock lock on, phase is a function of the shared graph clock, not of
+                // when this node was created, so LFOs at one rate stay identical everywhere. A
+                // rising Sync edge restarts the cycle. Unlocked, or with a cabled (modulated)
+                // Rate, the LFO accumulates from its current phase so rate changes glide.
+                let sync = self.input[0][0] > 0.;
+                if sync && !self.lfo_sync_high {
+                    self.lfo_origin = clock.sample;
+                    self.phase = 0.;
+                }
+                self.lfo_sync_high = sync;
+                let rate = self.p("rate");
+                let rate_driven = self
+                    .names
+                    .iter()
+                    .position(|n| n == "rate")
+                    .is_some_and(|i| self.bindings.iter().any(|b| b.parameter && b.destination == i));
+                // Both modes output this sample's phase and store the next one, so unlocking
+                // (or a Rate cable appearing) continues from the phase that is already sounding.
+                let current = if rate_driven || self.p("clock_lock") <= 0. {
+                    self.phase
+                } else {
+                    (clock.sample.wrapping_sub(self.lfo_origin) as f64 / sr * rate).fract()
+                };
+                self.phase = (current + rate / sr).fract();
+                let phase = (current + self.p("phase") / 360.).fract();
                 scalar = self.p("min")
-                    + (0.5 + 0.5 * (TAU * self.phase).sin()) * (self.p("max") - self.p("min"));
+                    + (0.5 + 0.5 * (TAU * phase).sin()) * (self.p("max") - self.p("min"));
+            }
+            "phasor" => {
+                // A phasor: the output is the running phase itself, so it always ramps 0→1
+                // and a frequency change bends the slope without moving the current value.
+                // Glide is a one-pole on the frequency, so a stepped Frequency input eases in
+                // rather than switching slope in one sample.
+                let sync = self.input[0][0];
+                if sync > 0. && self.previous <= 0. {
+                    self.phase = 0.;
+                }
+                self.previous = sync;
+                let frequency = self.p("frequency");
+                let glide = self.p("glide") * 0.001 * sr;
+                self.phasor_frequency = if !self.phasor_frequency.is_finite() || glide < 1. {
+                    frequency
+                } else {
+                    frequency + (self.phasor_frequency - frequency) * (-1. / glide).exp()
+                };
+                scalar = self.phase;
+                self.phase = (self.phase + self.phasor_frequency / sr).fract();
             }
             "channel_split" => {
                 self.output[..self.channels].copy_from_slice(&input[..self.channels]);
@@ -1335,6 +1388,15 @@ impl RuntimeNode {
                     * (1. - (-1. / (self.p("time") * 0.001 * sr)).exp());
                 scalar = self.smooth;
             }
+            "smooth_change" => {
+                scalar = self.smoothing.tick(
+                    input[0],
+                    smoothing::Curve::from_index(self.p("curve")),
+                    self.p("time"),
+                    self.p("snap"),
+                    sr,
+                );
+            }
             "pan" => {
                 // Balance law: the centre is unity on both sides and each
                 // extreme silences the opposite channel; the image is kept.
@@ -1575,6 +1637,10 @@ impl Engine {
             };
             nodes.push(RuntimeNode {
                 granular_field,
+                lfo_origin: 0,
+                lfo_sync_high: false,
+                phasor_frequency: f64::NAN,
+                smoothing: smoothing::Smoothing::default(),
                 script: None,
                 script_config: n.script.clone(),
                 clock_ratio: clock_ratio::ClockRatio::default(),
@@ -6873,3 +6939,9 @@ mod part_player_tests;
 mod granular_cloud_tests;
 #[cfg(test)]
 mod granular_field_tests;
+#[cfg(test)]
+mod lfo_tests;
+#[cfg(test)]
+mod phasor_tests;
+#[cfg(test)]
+mod smooth_change_tests;

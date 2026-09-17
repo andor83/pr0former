@@ -12,6 +12,7 @@ RESTART_ONLY=false
 UPDATE_ONLY=false
 SIGN_ONLY=false
 UPDATE_AND_START=false
+UPDATE_AND_RESTART=false
 SETUP_SSL=false
 REMOVE_SSL=false
 ALLOW_LOW_PORTS=false
@@ -32,15 +33,16 @@ pr0former initial setup
   ./init.sh --update    Rebuild frontend and release server using locked dependencies
   ./init.sh --sign      macOS: re-sign the built server with a stable code-signing identity
   ./init.sh --uas       Pull latest Git changes, rebuild, and start in the foreground
+  ./init.sh --uar       Pull latest Git changes, rebuild, and restart (the startup service, or the foreground server)
   ./init.sh --startup   Interactively enable or disable startup only
   ./init.sh --setup-ssl Create a local certificate for HTTPS (restart to apply)
   ./init.sh --remove-ssl Remove managed certificates and use HTTP (restart to apply)
   ./init.sh --allow-low-ports
                         On Linux, allow the built server to bind ports 80/443
   ./init.sh --help      Show this help
-  --no-ssl             Force HTTP for this --start/--uas/--restart foreground launch
-  --host HOST          Override the bind host for --start/--uas/--restart (IPv4, IPv6, or hostname)
-  --port PORT          Override the bind port for --start/--uas/--restart (1–65535)
+  --no-ssl             Force HTTP for this --start/--uas/--restart/--uar foreground launch
+  --host HOST          Override the bind host for --start/--uas/--restart/--uar (IPv4, IPv6, or hostname)
+  --port PORT          Override the bind port for --start/--uas/--restart/--uar (1–65535)
 
 macOS: startup uses a LaunchAgent for the current user, at login.
 macOS: builds are code-signed with PR0_CODESIGN_IDENTITY, APPLE_SIGNING_IDENTITY, or the
@@ -62,6 +64,9 @@ Red warnings identify stale/dirty builds or an unverifiable version; startup sti
 --uas pulls the current branch from its configured upstream (fast-forward only),
 then runs --update and --start. Pull/build failures prevent startup.
 It requires installed build tools and does not change startup services.
+--uar does the same but finishes with --restart, so an installed startup service picks up the build.
+macOS: when signing fails because the login Keychain is locked or codesign is not yet authorized for
+the key, an interactive build offers to unlock the Keychain and to run scripts/setup-macos-signing.sh.
 HTTPS defaults to 443 with redirects on 80; without SSL the default is HTTP on 80.
 --setup-ssl/--remove-ssl take effect after restart and do not change startup services.
 Trust certs/ca.pem on each client. On Linux, run --allow-low-ports once after
@@ -78,6 +83,7 @@ while [ "$#" -gt 0 ]; do
     --update) UPDATE_ONLY=true ;;
     --sign) SIGN_ONLY=true ;;
     --uas) UPDATE_AND_START=true ;;
+    --uar) UPDATE_AND_RESTART=true ;;
     --setup-ssl) SETUP_SSL=true ;;
     --remove-ssl) REMOVE_SSL=true ;;
     --allow-low-ports) ALLOW_LOW_PORTS=true ;;
@@ -95,16 +101,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 mode_count=0
-for selected in "$START_ONLY" "$STOP_ONLY" "$RESTART_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$SIGN_ONLY" "$UPDATE_AND_START" "$SETUP_SSL" "$REMOVE_SSL" "$ALLOW_LOW_PORTS"; do
+for selected in "$START_ONLY" "$STOP_ONLY" "$RESTART_ONLY" "$STARTUP_ONLY" "$UPDATE_ONLY" "$SIGN_ONLY" "$UPDATE_AND_START" "$UPDATE_AND_RESTART" "$SETUP_SSL" "$REMOVE_SSL" "$ALLOW_LOW_PORTS"; do
   if [ "$selected" = true ]; then mode_count=$((mode_count + 1)); fi
 done
 if [ "$mode_count" -gt 1 ]; then printf 'Select only one launcher action.\n' >&2; exit 2; fi
-if [ "$NO_SSL" = true ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ] && [ "$RESTART_ONLY" != true ]; then
-  printf '%s\n' '--no-ssl requires --start, --uas, or --restart.' >&2; exit 2
+if [ "$NO_SSL" = true ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ] && [ "$RESTART_ONLY" != true ] && [ "$UPDATE_AND_RESTART" != true ]; then
+  printf '%s\n' '--no-ssl requires --start, --uas, --restart, or --uar.' >&2; exit 2
 fi
 
-if [ -n "$START_HOST$START_PORT" ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ] && [ "$RESTART_ONLY" != true ]; then
-  printf '%s\n' '--host and --port require --start, --uas, or --restart.' >&2; exit 2
+if [ -n "$START_HOST$START_PORT" ] && [ "$START_ONLY" != true ] && [ "$UPDATE_AND_START" != true ] && [ "$RESTART_ONLY" != true ] && [ "$UPDATE_AND_RESTART" != true ]; then
+  printf '%s\n' '--host and --port require --start, --uas, --restart, or --uar.' >&2; exit 2
 fi
 if [ -n "$START_HOST" ]; then
   case "$START_HOST" in
@@ -123,7 +129,7 @@ if { [ "$START_ONLY" = true ] && [ "$STARTUP_ONLY" = true ]; } ||
    { [ "$STOP_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; } ||
    { [ "$UPDATE_ONLY" = true ] && { [ "$START_ONLY" = true ] || [ "$STOP_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; } ||
    { [ "$UPDATE_AND_START" = true ] && { [ "$START_ONLY" = true ] || [ "$STOP_ONLY" = true ] || [ "$UPDATE_ONLY" = true ] || [ "$STARTUP_ONLY" = true ]; }; }; then
-  printf 'Use only one of --start, --stop, --restart, --update, --uas, or --startup.\n' >&2
+  printf 'Use only one of --start, --stop, --restart, --update, --uas, --uar, or --startup.\n' >&2
   exit 2
 fi
 if [ "$(id -u)" -eq 0 ]; then
@@ -253,12 +259,16 @@ stop_manual_runs() {
 # user unit on Linux. These helpers are defined before `required`/`ask`, so they check tools
 # themselves and never prompt.
 service_plist() { printf '%s\n' "$HOME/Library/LaunchAgents/$SERVICE_ID.plist"; }
+# The service counts as this project's only when it launches this directory's start
+# script: another checkout (or a test copy of the launcher) must never stop or restart it.
 service_installed() {
+  local unit
   case "$PLATFORM" in
-    Darwin) [ -f "$(service_plist)" ] ;;
-    Linux) command -v systemctl >/dev/null 2>&1 && [ -f "$HOME/.config/systemd/user/pr0former.service" ] ;;
+    Darwin) unit="$(service_plist)" ;;
+    Linux) command -v systemctl >/dev/null 2>&1 && unit="$HOME/.config/systemd/user/pr0former.service" ;;
     *) return 1 ;;
   esac
+  [ -n "${unit:-}" ] && [ -f "$unit" ] && grep -Fq -- "$PROJECT_DIR/.local/start-pr0former.sh" "$unit"
 }
 service_running() {
   case "$PLATFORM" in
@@ -359,6 +369,20 @@ if [ "$UPDATE_AND_START" = true ]; then
   if [ -n "$START_HOST" ]; then start_args+=(--host "$START_HOST"); fi
   if [ -n "$START_PORT" ]; then start_args+=(--port "$START_PORT"); fi
   exec /bin/bash "$PROJECT_DIR/init.sh" "${start_args[@]}"
+fi
+
+if [ "$UPDATE_AND_RESTART" = true ]; then
+  command -v git >/dev/null 2>&1 || { printf 'Git is required for --uar.\n' >&2; exit 1; }
+  printf '\nPulling the latest tracked Git branch…\n'
+  git -C "$PROJECT_DIR" -c pull.rebase=false -c merge.autoStash=false pull --ff-only
+  # Re-read the pulled launcher, then hand the rebuilt server to --restart: the startup
+  # service when one is installed, otherwise a foreground start with the given options.
+  /bin/bash "$PROJECT_DIR/init.sh" --update
+  restart_args=(--restart)
+  if [ "$NO_SSL" = true ]; then restart_args+=(--no-ssl); fi
+  if [ -n "$START_HOST" ]; then restart_args+=(--host "$START_HOST"); fi
+  if [ -n "$START_PORT" ]; then restart_args+=(--port "$START_PORT"); fi
+  exec /bin/bash "$PROJECT_DIR/init.sh" "${restart_args[@]}"
 fi
 
 version_warning() {
@@ -828,6 +852,18 @@ UNIT
 # PR0_CODESIGN_IDENTITY, then APPLE_SIGNING_IDENTITY, then the single installed
 # "Developer ID Application" or "Apple Development" identity. Pass `required` to
 # fail instead of warning when signing is not possible.
+# Sign and verify in one step; prints codesign's output on failure.
+codesign_server() {
+  codesign --force --sign "$1" --identifier "$SERVICE_ID" --timestamp=none "$2" 2>&1 \
+    && codesign --verify --strict "$2" 2>/dev/null
+}
+# codesign reports a locked login Keychain, or a key it may not use yet, as an
+# internal error. In a terminal, offer the two fixes in order: unlock the Keychain
+# (the usual cause after a reboot or over ssh -t), then authorize codesign for the
+# key with the signing setup script. Non-interactive builds keep the warning.
+keychain_signing_blocked() {
+  printf '%s' "$1" | grep -q 'errSecInternalComponent\|User interaction is not allowed\|The specified item could not be found in the keychain'
+}
 sign_server_binary() {
   local required="${1:-}" binary="$PROJECT_DIR/target/release/pr0-server"
   local identity="${PR0_CODESIGN_IDENTITY:-${APPLE_SIGNING_IDENTITY:-}}" prefix candidates output
@@ -844,9 +880,27 @@ sign_server_binary() {
     if [ "$required" = required ]; then return 1; fi
     return 0
   fi
-  if output="$(codesign --force --sign "$identity" --identifier "$SERVICE_ID" --timestamp=none "$binary" 2>&1)" && codesign --verify --strict "$binary" 2>/dev/null; then
+  if output="$(codesign_server "$identity" "$binary")"; then
     printf 'Signed target/release/pr0-server as %s (identifier %s).\n' "$identity" "$SERVICE_ID"
     return 0
+  fi
+  if [ -t 0 ] && [ -t 1 ] && keychain_signing_blocked "$output"; then
+    printf '\nSigning as %s needs the login Keychain: %s\n' "$identity" "$output" >&2
+    if ask 'Unlock the login Keychain and retry signing? (asks for your Mac login password)'; then
+      security unlock-keychain "$HOME/Library/Keychains/login.keychain-db" || true
+      if output="$(codesign_server "$identity" "$binary")"; then
+        printf 'Signed target/release/pr0-server as %s (identifier %s).\n' "$identity" "$SERVICE_ID"
+        return 0
+      fi
+    fi
+    if [ -x "$PROJECT_DIR/scripts/setup-macos-signing.sh" ] \
+      && ask 'codesign is not yet authorized for this key. Run scripts/setup-macos-signing.sh to unlock the Keychain and authorize it? (Ctrl-C at the notarization prompt skips that part)'; then
+      APPLE_SIGNING_IDENTITY="$identity" /bin/bash "$PROJECT_DIR/scripts/setup-macos-signing.sh" || true
+      if output="$(codesign_server "$identity" "$binary")"; then
+        printf 'Signed target/release/pr0-server as %s (identifier %s).\n' "$identity" "$SERVICE_ID"
+        return 0
+      fi
+    fi
   fi
   printf '\n\033[31mSigning as %s failed:\033[0m %s\nThe server keeps its ad-hoc signature, so macOS asks for microphone access again after every rebuild.\nIf the login Keychain is locked or codesign is not yet authorized for this key, run ./init.sh --sign once from a terminal on the Mac, or run ./scripts/setup-macos-signing.sh over ssh -t first.\n' "$identity" "$output" >&2
   if [ "$required" = required ]; then return 1; fi

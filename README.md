@@ -51,6 +51,12 @@ Stops servers launched with `--start` from this project, including from another 
 With a startup service installed, restarts it, or starts it if it was stopped; any `--start` servers are stopped first so the port is free. `--no-ssl`, `--host` and `--port` are rejected in that case because the service always runs `.local/start-pr0former.sh` (regenerate it with `--startup`). Without a startup service, `--restart` stops any `--start` servers and then starts the server in the foreground, accepting the same options as `--start`.
 
 ```sh
+./init.sh --uar
+```
+
+Pulls the tracked branch (fast-forward only), rebuilds with `--update`, then runs `--restart`, so an installed startup service picks up the new build in one step. On macOS, when signing fails because the login Keychain is locked or codesign is not yet authorized for the key, an interactive build or `--sign` offers to unlock the Keychain and to run `scripts/setup-macos-signing.sh`; non-interactive builds keep the ad-hoc signature and warn.
+
+```sh
 ./init.sh --startup
 ```
 

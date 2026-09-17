@@ -8,7 +8,7 @@ test('granular sample MIDI feeds live convolution and pitch shifting with modal 
   const sample=await upload.json();expect((await page.request.put(`/api/projects/${p.id}/samples/${sample.id}`,{headers,data:{...sample,root_note:69}})).ok()).toBe(true)
   const n=(id:string,kind:string,x:number,y=0,parameters={})=>({id,kind,label:id,x,y,channels:2,parameters})
   const edge=(id:string,source:string,source_port:string,target:string,target_port:string)=>({id,source,source_port,target,target_port})
-  p.parts=[];p.graph={nodes:[n('Keys','piano',0),n('Grains','granular_synth',350),n('Response','oscillator',350,650,{frequency:440,amplitude:.5}),n('Convolve','convolution',700),n('Shift','granular_pitch_shift',1000),n('Meter','audio_visualizer',1300,0,{size:1024})],edges:[edge('a','Grains','out','Convolve','a'),edge('b','Response','out','Convolve','b'),edge('shift','Convolve','out','Shift','in'),edge('meter','Shift','out','Meter','in')]}
+  p.parts=[];p.graph={nodes:[n('Keys','piano',0),n('Grains','granular_synth',350),n('Response','oscillator',350,650,{frequency:440,amplitude:.5}),n('Convolve','convolution',820),n('Shift','granular_pitch_shift',1120),n('Meter','audio_visualizer',1420,0,{size:1024})],edges:[edge('a','Grains','out','Convolve','a'),edge('b','Response','out','Convolve','b'),edge('shift','Convolve','out','Shift','in'),edge('meter','Shift','out','Meter','in')]}
   for(const port of ['pitch','velocity','gate','trigger','note_off'])p.graph.edges.push(edge(port,'Keys',port,'Grains',port))
   expect((await page.request.put(`/api/projects/${p.id}`,{headers,data:p})).ok()).toBe(true)
   const load=async()=>(await(await page.request.get(`/api/projects/${p.id}`)).json()).project

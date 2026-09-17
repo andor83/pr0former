@@ -18,8 +18,10 @@ test('route targets keep typed drafts during telemetry, suggest existing names a
  await expect(input).toHaveValue('new route')
  await input.press('Tab')
  await expect.poll(async()=>(await load()).graph.nodes.find((n:any)=>n.id==='Receive').control_value).toBe('new route')
- const options=page.locator('#route-target-suggestions option')
- await expect.poll(()=>options.evaluateAll(els=>els.map(el=>(el as HTMLOptionElement).value))).toEqual(['dynamic','existing'])
+ // The suggestion list is ordinary markup (no datalist, which freezes Chrome on iOS); an empty query lists every known target.
+ await input.fill('')
+ const options=page.getByRole('listbox',{name:'Target name suggestions'}).getByRole('option')
+ await expect.poll(()=>options.evaluateAll(els=>els.map(el=>el.querySelector('span')?.textContent))).toEqual(['dynamic','existing'])
  await input.fill('existing');await input.press('Tab')
  await expect.poll(async()=>(await load()).graph.nodes.find((n:any)=>n.id==='Receive').control_value).toBe('existing')
  await page.getByRole('button',{name:'Close parameters'}).click()

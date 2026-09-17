@@ -6,7 +6,7 @@ test('Granular Cloud preserves numeric/sample controls, scans a live source and 
  const sample=await(await page.request.post(`${url}/samples/bundled-kick/add`,{headers,data:{}})).json()
  const n=(id:string,kind:string,x:number,y:number,parameters={})=>({id,kind,label:id,x,y,channels:2,parameters})
  const edge=(source:string,source_port:string,target:string,target_port:string)=>({id:`${source}-${target}-${target_port}`,source,source_port,target,target_port})
- p.parts=[];p.graph={nodes:[n('Center','value',0,0,{value:0.25}),n('Cloud','granular_cloud',300,0,{asset:sample.asset}),n('Listen','monitor_output',650,0),n('Keys','piano',0,500)],edges:[edge('Center','out','Cloud','position'),edge('Cloud','out','Listen','in')]}
+ p.parts=[];p.graph={nodes:[n('Center','value',0,0,{value:0.25}),n('Cloud','granular_cloud',300,0,{asset:sample.asset}),n('Listen','monitor_output',820,0),n('Keys','piano',0,500)],edges:[edge('Center','out','Cloud','position'),edge('Cloud','out','Listen','in')]}
  expect((await page.request.put(url,{headers,data:p})).ok()).toBe(true)
  const read=async()=>(await(await page.request.get(url)).json()).project
  let latest:any,peak=0

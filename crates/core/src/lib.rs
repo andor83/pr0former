@@ -1289,15 +1289,31 @@ pub fn catalog() -> Vec<Descriptor> {
         "LFO",
         "∿",
         "Control",
-        "Sine modulation with range and rate controls.",
-        vec![],
+        "Sine modulation with range and rate controls. Every LFO derives its phase from the engine's shared clock, so LFOs at the same rate are identical no matter when they were added; Phase offset shifts a cycle deliberately (180° inverts), and a rising Sync pulse restarts the cycle from that offset. Turn Clock lock off (or cable Rate) to let the LFO run free from its current phase, so rate changes glide instead of jumping.",
+        vec![port("sync", Control)],
         vec![port("out", Control)],
         vec![
             param("rate", "Rate", "Hz", 0.01, 50., 0.2),
+            param("phase", "Phase offset", "°", 0., 360., 0.),
+            param("clock_lock", "Clock lock", "", 0., 1., 1.),
             param("min", "Minimum", "", -100000., 100000., 0.),
             param("max", "Maximum", "", -100000., 100000., 1.),
         ],
-        &["osc~"],
+        &["osc~", "modulator", "sync lfo"],
+    );
+    add(
+        "phasor",
+        "Phasor",
+        "╱╱",
+        "Control",
+        "Repeating 0→1 sawtooth at a set frequency, for driving Sine, Cosine or any other control input once round a cycle. Unlike Ramp, which slews toward a target, this generates its own cycle. Frequency may be cabled. The output is the running phase, so a frequency change moves the slope without ever jumping the value; Glide gives that slope its own time constant so a stepped frequency eases in. Frequency 0 holds the ramp where it is, and a rising Sync pulse restarts the cycle at zero.",
+        vec![port("sync", Control)],
+        vec![port("out", Control)],
+        vec![
+            param("frequency", "Frequency", "Hz", 0., 100., 0.5),
+            param("glide", "Frequency glide", "ms", 0., 5000., 20.),
+        ],
+        &["phasor~", "sawtooth", "sawtooth loop", "ramp loop"],
     );
     add(
         "input",
@@ -1915,6 +1931,21 @@ pub fn catalog() -> Vec<Descriptor> {
             param("time", "Time", "ms", 1., 10000., 100.),
         ],
         &["line"],
+    );
+    add(
+        "smooth_change",
+        "Smooth change",
+        "↝",
+        "Control",
+        "Move a control value smoothly to whatever arrives at the input. A move starts when a settled output meets a new input value; an input that changes again mid-move only redirects where that move is heading, so the output never jumps. Linear, Ease in, Ease out and Ease in–out are shaped over the move and land exactly at Time to target. Exponential is the classic one-pole, 63% of the way in that time, and Spring is critically damped: velocity stays continuous and it never overshoots. Those two only approach the target, so Snap ends the move once the distance left falls below that percentage of the distance the move began with; the default 5% is what makes the value actually arrive, and 0 lets it chase indefinitely. The shaped curves suit stepped inputs, the chase curves a continuously moving one. The first sample adopts the input instead of sweeping up to it from zero.",
+        vec![port("in", Control)],
+        vec![port("out", Control)],
+        vec![
+            param("curve", "Curve", "", 0., 5., 3.),
+            param("time", "Time to target", "ms", 0., 60000., 200.),
+            param("snap", "Snap to target within", "%", 0., 100., 5.),
+        ],
+        &["slew", "glide", "portamento", "ease", "smoothing"],
     );
     add(
         "control_delay",

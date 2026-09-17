@@ -9,7 +9,7 @@ WASAPI endpoint IDs while showing friendly labels, preserving unambiguous legacy
 numeric route IDs. macOS CoreAudio behavior is unchanged. A local CPAL 0.16 patch
 skips the absent `/dev/dsp` OSS probe; native inventory is cached for 30 seconds.
 See [NATIVE_AUDIO.md](NATIVE_AUDIO.md) for dependencies, routing workflow and limits.
-369 core/DSP/server tests and 139 frontend tests pass, along with the production
+387 core/DSP/server tests and 139 frontend tests pass, along with the production
 build and five focused browser fixture/API cases. CPAL's Windows backend passes
 Windows-target type checking; this is not a full Windows application build.
 Physical Linux/Windows audio, pro-audio gear, hotplug and latency remain unverified.
@@ -79,6 +79,54 @@ negative values, held values, sign changes and repeated triggers. Physical
 MIDI timing remains unverified.
 
 pr0former is a development alpha. Software validation does not establish physical audio latency, deadline reliability, iPad compatibility, or readiness for a 32-player performance.
+
+## Clock-locked LFO (2026-09-16)
+
+`lfo` no longer starts its cycle when the node is created. Its phase is a function
+of the engine's shared graph clock (which keeps counting across live graph edits),
+so any LFOs at the same rate are identical wherever and whenever they were added.
+A new `phase` parameter (0–360°, connectable) offsets the cycle deliberately, and a
+new `sync` control input restarts the cycle from that offset on a rising edge; a
+shared trigger therefore re-aligns several LFOs at once. `clock_lock` (default on)
+can be turned off, and a cabled (modulated) Rate always runs free: the LFO then
+accumulates from its current phase so rate changes glide instead of jumping.
+Validation: four engine tests cover identity across a live replacement, 90°/180°
+offsets, sync/driven-rate behaviour, and glide versus jump on a rate change.
+
+## Phasor node (2026-09-16)
+
+`phasor` is a control-rate sawtooth: a repeating 0→1 ramp whose output is the
+running phase, so it drives Sine, Cosine or any other control input round a cycle.
+It generates a cycle; the existing `ramp` node slews toward a target and does not.
+`frequency` (0–100 Hz) is connectable. Because the node accumulates phase rather
+than evaluating a function of time, a frequency change bends the slope without ever
+jumping the value; `glide` (ms) is a one-pole on the frequency itself, so a stepped
+frequency eases into its new slope instead of switching in one sample. The first
+sample adopts the set frequency rather than sliding up from zero. Frequency 0 holds
+the ramp in place, and a rising edge on the `sync` input restarts it at zero.
+Validation: five engine tests cover the ramp shape and period, slope change without
+a value jump, glide easing and settling, zero-frequency hold, sync restart, and a
+cabled frequency.
+
+## Smooth change node (2026-09-17)
+
+`smooth_change` eases a cabled control value toward whatever arrives at its input.
+A move begins when a settled output meets a new input value; an input that changes
+again mid-move redirects that move rather than restarting it, so the output never
+jumps. `curve` selects Linear, Ease in, Ease out, Ease in–out (all shaped over the
+move, landing exactly at `time`), Exponential (one-pole; `time` is its time
+constant, 63% of the way) or Spring (critically damped, velocity-continuous, no
+overshoot). The two chase curves only approach the target, so `snap` (percent of
+the distance the move began with, default 5) ends the move and assigns the target
+exactly; `snap` 0 lets a chase run indefinitely. The first sample adopts its input
+rather than sweeping up from zero, and `time` under one sample is an instant move.
+The existing `ramp` node is unchanged: it slews a parameter target with a single
+one-pole and no arrival guarantee.
+Validation: five curve unit tests cover each easing's defining midpoint and exact
+landing, the chase curves' non-arrival and their snap arrival samples, first-sample
+adoption, a mid-move redirect keeping its schedule, and zero time; three engine
+tests cover a stepped cable gliding and arriving, snap on a chasing curve, and a
+live curve change.
 
 ## Granular Field node (2026-09-16)
 

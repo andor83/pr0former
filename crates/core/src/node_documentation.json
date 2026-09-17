@@ -3142,6 +3142,213 @@
       ]
     }
   },
+  "smooth_change": {
+    "title": "Ease a stepped control into a filter",
+    "explanation": "A slider sends its value the instant it is moved, which steps the cutoff. Smooth change eases each step over 400 ms with an ease in–out curve, and its 5% snap means the cutoff really does settle on the value the slider is showing.",
+    "steps": [],
+    "graph": {
+      "nodes": [
+        {
+          "id": "n0",
+          "kind": "control_input",
+          "label": "Cutoff slider",
+          "x": 0,
+          "y": 0,
+          "channels": 2,
+          "parameters": {
+            "mode": 3,
+            "min": 300,
+            "max": 2000
+          },
+          "control_value": 900
+        },
+        {
+          "id": "n1",
+          "kind": "smooth_change",
+          "label": "Smooth change",
+          "x": 420,
+          "y": 0,
+          "channels": 2,
+          "parameters": {
+            "curve": 3,
+            "time": 400,
+            "snap": 5
+          }
+        },
+        {
+          "id": "n2",
+          "kind": "oscillator",
+          "label": "Saw voice",
+          "x": 0,
+          "y": 440,
+          "channels": 2,
+          "parameters": {
+            "waveform": 2
+          }
+        },
+        {
+          "id": "n3",
+          "kind": "lowpass",
+          "label": "Low-pass",
+          "x": 900,
+          "y": 260,
+          "channels": 2,
+          "parameters": {}
+        },
+        {
+          "id": "n4",
+          "kind": "monitor_output",
+          "label": "Headphone mix",
+          "x": 1320,
+          "y": 260,
+          "channels": 2,
+          "parameters": {
+            "gain": -18
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "e0",
+          "source": "n0",
+          "source_port": "out",
+          "target": "n1",
+          "target_port": "in"
+        },
+        {
+          "id": "e1",
+          "source": "n1",
+          "source_port": "out",
+          "target": "n3",
+          "target_port": "cutoff"
+        },
+        {
+          "id": "e2",
+          "source": "n2",
+          "source_port": "out",
+          "target": "n3",
+          "target_port": "in"
+        },
+        {
+          "id": "e3",
+          "source": "n3",
+          "source_port": "out",
+          "target": "n4",
+          "target_port": "in"
+        }
+      ]
+    }
+  },
+  "phasor": {
+    "title": "Drive a circular pan from one phasor",
+    "explanation": "Phasor runs a 0→1 ramp once every ten seconds. Multiplying it by 2π turns the ramp into an angle, and Sine of that angle sweeps the pan smoothly from side to side. Cosine of the same angle gives the quarter-cycle-offset partner for a second destination.",
+    "steps": [],
+    "graph": {
+      "nodes": [
+        {
+          "id": "n0",
+          "kind": "phasor",
+          "label": "Cycle",
+          "x": 0,
+          "y": 0,
+          "channels": 2,
+          "parameters": {
+            "frequency": 0.1,
+            "glide": 200
+          }
+        },
+        {
+          "id": "n1",
+          "kind": "multiply",
+          "label": "× 2π",
+          "x": 360,
+          "y": 0,
+          "channels": 2,
+          "parameters": {
+            "b": 6.283185307179586
+          }
+        },
+        {
+          "id": "n2",
+          "kind": "sin",
+          "label": "Sine",
+          "x": 720,
+          "y": 0,
+          "channels": 2,
+          "parameters": {}
+        },
+        {
+          "id": "n3",
+          "kind": "oscillator",
+          "label": "Voice",
+          "x": 0,
+          "y": 440,
+          "channels": 2,
+          "parameters": {
+            "frequency": 220,
+            "waveform": 2
+          }
+        },
+        {
+          "id": "n4",
+          "kind": "pan",
+          "label": "Stereo pan",
+          "x": 1080,
+          "y": 260,
+          "channels": 2,
+          "parameters": {}
+        },
+        {
+          "id": "n5",
+          "kind": "monitor_output",
+          "label": "Headphone mix",
+          "x": 1440,
+          "y": 260,
+          "channels": 2,
+          "parameters": {
+            "gain": -18
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "e0",
+          "source": "n0",
+          "source_port": "out",
+          "target": "n1",
+          "target_port": "a"
+        },
+        {
+          "id": "e1",
+          "source": "n1",
+          "source_port": "out",
+          "target": "n2",
+          "target_port": "a"
+        },
+        {
+          "id": "e2",
+          "source": "n2",
+          "source_port": "out",
+          "target": "n4",
+          "target_port": "pan"
+        },
+        {
+          "id": "e3",
+          "source": "n3",
+          "source_port": "out",
+          "target": "n4",
+          "target_port": "in"
+        },
+        {
+          "id": "e4",
+          "source": "n4",
+          "source_port": "out",
+          "target": "n5",
+          "target_port": "in"
+        }
+      ]
+    }
+  },
   "lfo": {
     "title": "Sweep a sustained filter",
     "explanation": "A slow sine moves cutoff between 300 and 2000 Hz on a sawtooth voice. Frequency stays in a useful audible range.",
