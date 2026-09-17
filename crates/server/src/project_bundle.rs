@@ -34,6 +34,7 @@ fn assets(p: &Project) -> BTreeSet<u32> {
             }
         }
         ids.extend(n.sample_choices.iter().map(|c| c.asset));
+        ids.extend(crate::subgraphs::field_sample_setters(n));
     }
     ids
 }
@@ -375,6 +376,14 @@ pub async fn import(
         for c in &mut n.sample_choices {
             c.asset = mapping[&c.asset];
         }
+        if n.kind == "granular_field" {
+            // Sample setters follow the bundle; an id the bundle never carried resets to the list entry.
+            for (key, value) in n.parameters.iter_mut() {
+                if crate::subgraphs::is_field_sample_setter(key) && *value >= 1. {
+                    *value = mapping.get(&(*value as u32)).map_or(0., |id| *id as f64);
+                }
+            }
+        }
     }
     let result = if let Some(id) = target {
         drop(guard);
@@ -408,6 +417,25 @@ mod tests {
             zip.write_all(&bytes).unwrap();
         }
         zip.finish().unwrap().into_inner()
+    }
+    #[test]
+    fn granular_field_sample_setters_are_bundled_with_the_slot_list() {
+        let mut p = pr0_core::demo_project(crate::uid(), "Field".into(), pr0_core::Mode::Freeform);
+        let mut field = p.graph.nodes[0].clone();
+        field.id = "field".into();
+        field.kind = "granular_field".into();
+        field.parameters.clear();
+        field.sample_choices = [7, 9]
+            .into_iter()
+            .map(|asset| pr0_core::SampleChoice { asset, name: format!("S{asset}"), nickname: String::new() })
+            .collect();
+        field.parameters.insert("sample_2".into(), 7.);
+        field.parameters.insert("sample_5".into(), 12345.);
+        field.parameters.insert("source_1_x".into(), 0.2);
+        p.graph.nodes.push(field);
+        let ids = assets(&p);
+        assert!(ids.contains(&7) && ids.contains(&9) && ids.contains(&12345), "{ids:?}");
+        assert!(!ids.contains(&0));
     }
     #[test]
     fn exports_versioned_manifest_and_reads_it() {

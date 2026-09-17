@@ -1,12 +1,15 @@
 //! Fixed-capacity sample grains and a streaming two-head granular pitch shifter.
+use crate::envelope::{Adsr, Settings as EnvelopeSettings};
 #[derive(Clone, Copy, Default)]
 struct Voice {
     pitch: u8,
     velocity: f64,
+    /// 1 while the voice is allocated; 0 marks a free slot.
     level: f64,
     released: bool,
     serial: u64,
     countdown: f64,
+    envelope: Adsr,
 }
 #[derive(Clone, Copy, Default)]
 struct Grain {
@@ -25,7 +28,7 @@ pub struct Settings {
     pub grain_ms: f64,
     pub density: f64,
     pub amplitude: f64,
-    pub release_ms: f64,
+    pub envelope: EnvelopeSettings,
 }
 pub struct Granular {
     voices: [Voice; 16],
@@ -46,6 +49,19 @@ impl Default for Granular {
     }
 }
 impl Granular {
+    /// Envelope peak across active voices, plus sounding/held voice counts.
+    pub fn envelope_state(&self) -> (f64, usize, usize) {
+        self.voices
+            .iter()
+            .filter(|v| v.level > 0.)
+            .fold((0_f64, 0, 0), |(level, active, held), v| {
+                (
+                    level.max(v.envelope.level()),
+                    active + 1,
+                    held + usize::from(!v.released),
+                )
+            })
+    }
     /// A continuously held voice reuses the same bounded grain scheduler and windows.
     pub fn cloud(&mut self, pitch: u8, velocity: u8) {
         if self.voices[0].level <= 0. || self.voices[0].released {
@@ -86,6 +102,7 @@ impl Granular {
                 released: false,
                 serial: self.serial,
                 countdown: 0.,
+                envelope: Adsr::default(),
             };
         }
     }
@@ -106,8 +123,16 @@ impl Granular {
             if voice.level <= 0. {
                 continue;
             }
+            // Each voice runs its own ADSR; grains stop being scheduled at
+            // release and the slot frees once the release has ended.
+            voice
+                .envelope
+                .tick(!voice.released, false, false, s.envelope, rate);
+            if voice.envelope.idle() {
+                voice.level = 0.;
+                continue;
+            }
             if voice.released {
-                voice.level = (voice.level - 1. / (s.release_ms * rate / 1000.).max(1.)).max(0.);
                 continue;
             }
             voice.countdown -= 1.;
@@ -154,7 +179,7 @@ impl Granular {
                     + sample[(i + 1) % sample.len()][ch] as f64 * t)
                     * window
                     * grain.gain
-                    * voice.level
+                    * voice.envelope.level()
                     * s.amplitude;
             }
             grain.position += grain.increment;
@@ -258,7 +283,7 @@ mod tests {
             grain_ms: 40.,
             density: 50.,
             amplitude: 0.5,
-            release_ms: 20.,
+            envelope: EnvelopeSettings { attack: 0., decay: 0., sustain: 1., release: 20., reset: false },
         }
     }
     #[test]

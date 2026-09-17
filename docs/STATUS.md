@@ -9,7 +9,7 @@ WASAPI endpoint IDs while showing friendly labels, preserving unambiguous legacy
 numeric route IDs. macOS CoreAudio behavior is unchanged. A local CPAL 0.16 patch
 skips the absent `/dev/dsp` OSS probe; native inventory is cached for 30 seconds.
 See [NATIVE_AUDIO.md](NATIVE_AUDIO.md) for dependencies, routing workflow and limits.
-299 core/DSP/server tests and 117 frontend tests pass, along with the production
+369 core/DSP/server tests and 139 frontend tests pass, along with the production
 build and five focused browser fixture/API cases. CPAL's Windows backend passes
 Windows-target type checking; this is not a full Windows application build.
 Physical Linux/Windows audio, pro-audio gear, hotplug and latency remain unverified.
@@ -79,6 +79,27 @@ negative values, held values, sign changes and repeated triggers. Physical
 MIDI timing remains unverified.
 
 pr0former is a development alpha. Software validation does not establish physical audio latency, deadline reliability, iPad compatibility, or readiness for a 32-player performance.
+
+## Granular Field node (2026-09-16)
+
+`granular_field` is a continuous granular cloud with up to eight project-sample
+slots and two optional live audio inputs placed on a two-dimensional field. A
+control point (`x`, `y` in −1..1, connectable) steers the cloud: each grain picks
+its source with probability exp(−(distance/focus)²). Pitch transposes grains in
+semitones or, with Randomize pitch on, sets a per-grain random range; each source
+has its own tune and gain. Live inputs join the field only while cabled; each
+reserves a ten-second ring whose usable length (100 ms–10 s) changes live. The
+node has no note, gate or MIDI inputs and no ADSR. The node modal shows the field
+first with draggable, keyboard-operable source circles and control point, and an
+Edit sources dialog manages the slot list; the node face shows a compact field.
+Only configured slots expose `Sample N ID` setters; the server rejects edges to
+unconfigured slots and lists longer than eight.
+
+Validation: 25 core, 170 DSP library plus 7 allocation-guard integration tests,
+167 server tests (all passing), including field module tests for head-crossing,
+weighting and pitch randomisation and engine tests for width, live capture,
+memory cap and state carry; 139 frontend unit tests; `web/e2e/granular-field.spec.ts`
+passes end to end. Listening on real devices and multi-node CPU load remain unverified.
 
 ## Linux standard-port setup (2026-09-13)
 

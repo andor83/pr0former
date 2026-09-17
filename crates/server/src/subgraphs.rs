@@ -80,7 +80,7 @@ fn builtin_graph(id: &str) -> Option<Graph> {
             if sampler {
                 nodes.push(json!({"id":voice,"kind":"poly_sampler","label":format!("{name} sample"),"parent":"root","x":780,"y":y,"channels":2,"parameters":{"asset":f64::from(bundled_placeholder(i)),"root_note":60.0,"amplitude":0.8,"loop":0.0,"release":80.0}}));
             } else {
-                nodes.push(json!({"id":voice,"kind":"fm_synth","label":name,"parent":"root","x":780,"y":y,"channels":2,"parameters":{"carrier_frequency":carrier,"modulator_frequency":modulator,"fm_depth":depth,"amplitude":amplitude,"decay":decay,"release":release,"carrier_waveform":0.0,"modulator_waveform":modulator_wave}}));
+                nodes.push(json!({"id":voice,"kind":"fm_synth","label":name,"parent":"root","x":780,"y":y,"channels":2,"parameters":{"carrier_frequency":carrier,"modulator_frequency":modulator,"fm_depth":depth,"amplitude":amplitude,"decay":decay,"sustain":0.0,"release":release,"carrier_waveform":0.0,"modulator_waveform":modulator_wave}}));
             }
             edges.push(json!({"id":format!("m{i}"),"source":"midi","source_port":"out","target":decoder,"target_port":"midi"}));
             edges.push(json!({"id":format!("p{i}"),"source":"pitch","source_port":"out","target":voice,"target_port":"pitch"}));
@@ -303,6 +303,7 @@ pub async fn save(
         .filter(|v| *v != 0)
         .collect();
     assets.extend(graph.nodes.iter().flat_map(|n| n.sample_choices.iter().map(|s| s.asset)));
+    assets.extend(graph.nodes.iter().flat_map(field_sample_setters));
     let mut bytes = vec![];
     for asset in assets {
         bytes.push((
@@ -532,6 +533,13 @@ pub async fn insert(
                 {
                     n.parameters.insert("asset".into(), asset as f64);
                 }
+                if n.kind == "granular_field" {
+                    for (key, value) in n.parameters.iter_mut() {
+                        if is_field_sample_setter(key) && *value == old as f64 {
+                            *value = asset as f64;
+                        }
+                    }
+                }
             }
         }
         p.graph.nodes.extend(graph.nodes);
@@ -549,4 +557,20 @@ pub async fn insert(
         }
     }
     result
+}
+
+/// `sample_N` on a Granular Field: a sample-setter parameter holding an asset id.
+pub(crate) fn is_field_sample_setter(key: &str) -> bool {
+    key.strip_prefix("sample_").is_some_and(|v| v.parse::<usize>().is_ok())
+}
+/// Nonzero sample-setter asset ids of a Granular Field node (empty for other kinds).
+pub(crate) fn field_sample_setters(n: &pr0_core::Node) -> Vec<u32> {
+    if n.kind != "granular_field" {
+        return vec![];
+    }
+    n.parameters
+        .iter()
+        .filter(|(k, v)| is_field_sample_setter(k) && **v >= 1.)
+        .map(|(_, v)| *v as u32)
+        .collect()
 }

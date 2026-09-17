@@ -7,6 +7,7 @@ mod convolution;
 pub mod count_in;
 mod effects;
 mod envelope;
+pub mod granular_field;
 mod granular;
 mod looper;
 mod midi_controls;
@@ -156,8 +157,10 @@ struct Voice {
     mod_phase: f64,
     pitch: u8,
     phase: f64,
+    /// Velocity amplitude; 0 marks a free voice.
     level: f64,
     releasing: bool,
+    envelope: envelope::Adsr,
 }
 mod controllers;
 struct RuntimeNode {
@@ -170,6 +173,9 @@ struct RuntimeNode {
     midi_frame: Box<midi_events::Buffer>,
     midi_received: u64,
     midi_last: pr0_core::midi::Message,
+    /// Newest first: the note events an instrument dispatched to its voices.
+    recent_notes: [pr0_core::midi::Message; 5],
+    note_count: u64,
     clock_ratio: clock_ratio::ClockRatio,
     channel_map: channels::ChannelMap,
     adsr: envelope::Adsr,
@@ -214,6 +220,7 @@ struct RuntimeNode {
     osc_last: Option<visualizer::Datum>,
     sampler: Option<Box<sampler::Sampler>>,
     granular: Option<Box<granular::Granular>>,
+    granular_field: Option<Box<granular_field::GranularField>>,
     pitch_shift: Option<Box<granular::PitchShift>>,
     convolution: Option<Box<convolution::Convolution>>,
     pitch_tracker: Option<Box<pitch_tracker::PitchTracker>>,
@@ -251,7 +258,18 @@ struct RuntimeNode {
     reverb: Vec<[f64; 8]>,
 }
 impl RuntimeNode {
+    /// Remember a note event for the node face, newest first.
+    fn record_note(&mut self, pitch: u8, velocity: u8) {
+        self.recent_notes.rotate_right(1);
+        self.recent_notes[0] = pr0_core::midi::Message {
+            status: if velocity == 0 { 0x80 } else { 0x90 },
+            data1: pitch,
+            data2: velocity,
+        };
+        self.note_count = self.note_count.wrapping_add(1);
+    }
     fn synth_note(&mut self, owner: u64, note_id: u32, pitch: u8, velocity: u8) {
+        self.record_note(pitch, velocity);
         if velocity == 0 {
             for voice in &mut self.voices {
                 if voice.owner == owner && voice.note_id == note_id && voice.pitch == pitch {
@@ -284,6 +302,7 @@ impl RuntimeNode {
             mod_phase: 0.,
             level: velocity.min(127) as f64 / 127.,
             releasing: false,
+            envelope: envelope::Adsr::default(),
         };
     }
     fn graph_synth_event(&mut self, event: note_inputs::NoteEvent, lane: usize) {
@@ -301,6 +320,8 @@ impl RuntimeNode {
                 .min_by_key(|v| v.order)
             {
                 voice.releasing = true;
+                let pitch = voice.pitch;
+                self.record_note(pitch, 0);
             }
         } else {
             self.synth_note(
@@ -694,6 +715,7 @@ impl RuntimeNode {
                 if matches!(self.kind.as_str(), "granular_synth" | "granular_cloud") {
                     for note in notes.into_iter().flatten() {
                         if clock.running || note.velocity == 0 {
+                            self.record_note(note.pitch, note.velocity);
                             self.granular
                                 .as_mut()
                                 .unwrap()
@@ -712,7 +734,7 @@ impl RuntimeNode {
                         grain_ms: self.p("grain_ms"),
                         density: self.p("density"),
                         amplitude: self.p("amplitude"),
-                        release_ms: self.p("release"),
+                        envelope: self.envelope_settings(),
                     };
                     self.output = self.granular.as_mut().unwrap().render(
                         &self.sample,
@@ -723,6 +745,7 @@ impl RuntimeNode {
                 } else if self.kind == "poly_sampler" {
                     for note in notes.into_iter().flatten() {
                         if clock.running || note.velocity == 0 {
+                            self.record_note(note.pitch, note.velocity);
                             self.sampler
                                 .as_mut()
                                 .unwrap()
@@ -989,16 +1012,9 @@ impl RuntimeNode {
             "synth" | "fm_synth" => {
                 self.graph_synth_notes();
                 let mut sum = 0.;
-                let release = (-1. / (self.p("release") * 0.001 * sr)).exp();
-                // A positive decay makes every voice a one-shot: its level falls
-                // exponentially from the attack whether or not a release arrives,
-                // which is what percussive patches need.
-                let decay = self.p("decay");
-                let decay_coefficient = if decay > 0. {
-                    (-1. / (decay * 0.001 * sr)).exp()
-                } else {
-                    1.
-                };
+                // Every voice runs its own ADSR from its note-on; a sustain of 0
+                // gives the percussive one-shot contour.
+                let settings = self.envelope_settings();
                 let fm = self.kind == "fm_synth";
                 let (carrier, modulator, depth, carrier_shape, modulator_shape) = if fm {
                     (
@@ -1013,6 +1029,11 @@ impl RuntimeNode {
                 };
                 for v in &mut self.voices {
                     if v.level < 1e-5 {
+                        v.level = 0.;
+                        continue;
+                    }
+                    let gain = v.envelope.tick(!v.releasing, false, false, settings, sr);
+                    if v.envelope.idle() {
                         v.level = 0.;
                         continue;
                     }
@@ -1031,15 +1052,61 @@ impl RuntimeNode {
                     self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                     let carrier_noise = (self.seed >> 32) as f64 / u32::MAX as f64 * 2. - 1.;
                     sum += oscillator::wave(v.phase, step.abs(), carrier_shape, carrier_noise)
-                        * v.level;
-                    v.level *= if v.releasing {
-                        release.min(decay_coefficient)
-                    } else {
-                        decay_coefficient
-                    };
+                        * v.level
+                        * gain;
                 }
                 let amplitude = self.p("amplitude");
                 self.output[..self.channels].fill(sum * amplitude);
+            }
+            "granular_field" => {
+                // Continuous cloud: no notes, no MIDI. Every setting is a parameter read by index.
+                let field = self.granular_field.as_mut().unwrap();
+                let idx = field.indices;
+                let v = &self.values;
+                let bindings = &self.bindings;
+                let bound = |port: usize| bindings.iter().any(|b| !b.parameter && b.destination == port);
+                let mut sources = [granular_field::Source::MISSING; granular_field::SOURCES];
+                for slot in 0..self.sample_choices.len().min(granular_field::SAMPLES) {
+                    let request = v[idx.sample[slot]];
+                    let asset = if request >= 1. { request as u32 } else { self.sample_choices[slot] };
+                    let kind = field
+                        .resolve_slot(slot, asset, &self.sample_bank)
+                        .map_or(granular_field::Kind::Missing, granular_field::Kind::Sample);
+                    sources[slot] = granular_field::Source {
+                        x: v[idx.source_x[slot]],
+                        y: v[idx.source_y[slot]],
+                        tune: v[idx.source_tune[slot]],
+                        gain: v[idx.source_gain[slot]],
+                        kind,
+                    };
+                }
+                for i in 0..granular_field::LIVE {
+                    // A live input joins the field only while a cable feeds it.
+                    if bound(i) && field.live_connected(i) {
+                        field.write_live(i, self.input[i]);
+                        sources[granular_field::SAMPLES + i] = granular_field::Source {
+                            x: v[idx.live_x[i]],
+                            y: v[idx.live_y[i]],
+                            tune: v[idx.live_tune[i]],
+                            gain: v[idx.live_gain[i]],
+                            kind: granular_field::Kind::Live(i),
+                        };
+                    }
+                }
+                let settings = granular_field::Settings {
+                    x: v[idx.x],
+                    y: v[idx.y],
+                    focus: v[idx.focus],
+                    pitch: v[idx.pitch],
+                    randomize_pitch: v[idx.randomize_pitch] > 0.,
+                    position: v[idx.position],
+                    spray_ms: v[idx.spray],
+                    grain_ms: v[idx.grain_ms],
+                    density: v[idx.density],
+                    amplitude: v[idx.amplitude],
+                    buffer_ms: std::array::from_fn(|i| v[idx.live_buffer_ms[i]]),
+                };
+                self.output = field.render(&self.sample_bank, &sources, &settings, self.channels, sr);
             }
             "noise" => {
                 self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -1463,6 +1530,27 @@ impl Engine {
         if loop_bytes > 512. * 1024. * 1024. {
             return Err("Loopers exceed 512 MiB of recording memory; reduce capacity, channels or looper count".into());
         }
+        // Every connected Granular Field live input reserves its ten-second ring.
+        let field_rings = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "granular_field")
+            .map(|n| {
+                (1..=granular_field::LIVE)
+                    .filter(|i| {
+                        graph
+                            .edges
+                            .iter()
+                            .any(|e| e.target == n.id && e.target_port == format!("live_{i}"))
+                    })
+                    .count()
+            })
+            .sum::<usize>();
+        if field_rings as f64 * granular_field::MAX_BUFFER_SECONDS * sample_rate * granular_field::RING_BYTES_PER_FRAME
+            > 256. * 1024. * 1024.
+        {
+            return Err("Granular Field live buffers exceed 256 MiB; disconnect some live inputs".into());
+        }
         let descriptors = catalog();
         let mut nodes = Vec::new();
         for n in &graph.nodes {
@@ -1473,7 +1561,20 @@ impl Engine {
                 .iter()
                 .map(|p| n.parameters.get(&p.id).copied().unwrap_or(p.default))
                 .collect();
+            let names: Vec<String> = d.parameters.iter().map(|p| p.id.clone()).collect();
+            let granular_field = if n.kind == "granular_field" {
+                let connected = std::array::from_fn(|i| {
+                    graph
+                        .edges
+                        .iter()
+                        .any(|e| e.target == n.id && e.target_port == format!("live_{}", i + 1))
+                });
+                Some(Box::new(granular_field::GranularField::prepare(sample_rate, connected, &names)?))
+            } else {
+                None
+            };
             nodes.push(RuntimeNode {
+                granular_field,
                 script: None,
                 script_config: n.script.clone(),
                 clock_ratio: clock_ratio::ClockRatio::default(),
@@ -1522,7 +1623,7 @@ impl Engine {
                 } else {
                     n.channels
                 },
-                names: d.parameters.iter().map(|p| p.id.clone()).collect(),
+                names,
                 defaults: values.clone(),
                 values,
                 limits: d.parameters.iter().map(|p| (p.min, p.max)).collect(),
@@ -1582,6 +1683,8 @@ impl Engine {
                 midi_frame: Box::new(midi_events::Buffer::new()),
                 midi_received: 0,
                 midi_last: pr0_core::midi::Message::default(),
+                recent_notes: [pr0_core::midi::Message::default(); 5],
+                note_count: 0,
                 outgoing_notes: [None; 2],
                 outgoing_control: None,
                 last_control: None,
@@ -2164,6 +2267,13 @@ impl Engine {
                 if let (Some(a), Some(b)) = (&target.looper, &source.looper) {
                     if a.compatible(b) {
                         std::mem::swap(&mut target.looper, &mut source.looper);
+                    }
+                }
+                // Captured live audio and in-flight grains survive a sample-list edit; the
+                // slot cache re-validates itself against the new bank.
+                if let (Some(a), Some(b)) = (&target.granular_field, &source.granular_field) {
+                    if a.compatible(b) {
+                        std::mem::swap(&mut target.granular_field, &mut source.granular_field);
                     }
                 }
                 if target.kind == source.kind && target.midi_controls.is_some() {
@@ -3248,6 +3358,24 @@ impl Engine {
                         }
                     }
                 }
+                if let Some(field) = &n.granular_field {
+                    let idx = field.indices;
+                    values.insert("_x".into(), n.values[idx.x]);
+                    values.insert("_y".into(), n.values[idx.y]);
+                    for (i, w) in field.weights.iter().enumerate() {
+                        values.insert(format!("_source_{}_weight", i + 1), *w);
+                    }
+                    for (i, missing) in field.slot_missing.iter().enumerate() {
+                        values.insert(format!("_sample_{}_missing", i + 1), f64::from(*missing));
+                    }
+                    values.insert("_grains".into(), field.active_grains as f64);
+                    for i in 0..granular_field::LIVE {
+                        values.insert(
+                            format!("_live_{}_fill", i + 1),
+                            field.ring_fill(i, n.values[idx.live_buffer_ms[i]], self.clock.sample_rate),
+                        );
+                    }
+                }
                 if matches!(n.kind.as_str(), "midi_input" | "local_midi_input" | "midi_to_osc" | "osc_to_midi") {
                     for (key, value) in [
                         ("_midi_received", n.midi_received as f64),
@@ -3319,11 +3447,37 @@ impl Engine {
                         values.insert(name.into(), value);
                     }
                 }
-                if let Some(sampler) = &n.sampler {
-                    let (level, voices, held) = sampler.envelope_state();
+                let envelope_state = if let Some(sampler) = &n.sampler {
+                    Some(sampler.envelope_state())
+                } else if let Some(granular) = &n.granular {
+                    Some(granular.envelope_state())
+                } else if matches!(n.kind.as_str(), "synth" | "fm_synth") {
+                    Some(n.voices.iter().filter(|v| v.level > 0.).fold(
+                        (0_f64, 0, 0),
+                        |(level, active, held), v| {
+                            (
+                                level.max(v.envelope.level()),
+                                active + 1,
+                                held + usize::from(!v.releasing),
+                            )
+                        },
+                    ))
+                } else {
+                    None
+                };
+                if let Some((level, voices, held)) = envelope_state {
                     values.insert("_envelope".into(), level);
                     values.insert("_voices".into(), voices as f64);
                     values.insert("_held".into(), held as f64);
+                    values.insert("_note_count".into(), n.note_count as f64);
+                    for (i, message) in n.recent_notes.iter().enumerate() {
+                        if message.status == 0 {
+                            break;
+                        }
+                        values.insert(format!("_recent_{i}_status"), message.status as f64);
+                        values.insert(format!("_recent_{i}_data1"), message.data1 as f64);
+                        values.insert(format!("_recent_{i}_data2"), message.data2 as f64);
+                    }
                 }
                 if let Some(player) = &n.part_player {
                     let (bar, beat) = player.bar_beat();
@@ -5991,6 +6145,7 @@ mod feedback_and_pad_tests {
         for kind in ["synth", "fm_synth"] {
             let mut tone = node("tone", kind, 300.);
             tone.parameters.insert("decay".into(), 10.);
+            tone.parameters.insert("sustain".into(), 0.);
             let g = Graph {
                 nodes: vec![node("keys", "piano", 0.), tone],
                 edges: vec![edge("keys", "midi", "tone", "midi")],
@@ -6005,12 +6160,13 @@ mod feedback_and_pad_tests {
                     .unwrap()
                     .voices
                     .iter()
-                    .map(|v| v.level)
+                    .map(|v| v.level * v.envelope.level())
                     .fold(0., f64::max)
             };
             let early = level(&e);
             assert!(early > 0.5, "{kind}: {early}");
-            e.render(&[], &mut [[0.; 8]; 480]);
+            // 6 ms into a linear 10 ms decay to a sustain of 0.
+            e.render(&[], &mut [[0.; 8]; 300]);
             let later = level(&e);
             assert!(
                 later < early * 0.5 && later > 0.,
@@ -6029,6 +6185,61 @@ mod feedback_and_pad_tests {
             e.piano_note("keys", 60, 100);
             e.render(&[], &mut [[0.; 8]; 4800]);
             assert!((level(&e) - 100. / 127.).abs() < 1e-9);
+        }
+    }
+    #[test]
+    fn synth_voices_attack_sustain_and_release_per_voice() {
+        for kind in ["synth", "fm_synth"] {
+            let mut tone = node("tone", kind, 300.);
+            for (key, value) in [("attack", 100.), ("decay", 100.), ("sustain", 0.5), ("release", 100.)] {
+                tone.parameters.insert(key.into(), value);
+            }
+            let g = Graph {
+                nodes: vec![node("keys", "piano", 0.), tone],
+                edges: vec![edge("keys", "midi", "tone", "midi")],
+            };
+            let mut e = Engine::prepare(g, 48000.).unwrap();
+            let envelopes = |e: &Engine| -> Vec<f64> {
+                e.nodes
+                    .iter()
+                    .find(|n| n.id == "tone")
+                    .unwrap()
+                    .voices
+                    .iter()
+                    .filter(|v| v.level > 0.)
+                    .map(|v| v.envelope.level())
+                    .collect()
+            };
+            e.piano_note("keys", 60, 127);
+            // Halfway through a 100 ms attack the first voice is near 0.5.
+            e.render(&[], &mut [[0.; 8]; 2400]);
+            let mid = envelopes(&e);
+            assert_eq!(mid.len(), 1, "{kind}");
+            assert!((mid[0] - 0.5).abs() < 0.02, "{kind}: {mid:?}");
+            // A second voice starts its own attack while the first keeps rising.
+            e.piano_note("keys", 64, 127);
+            e.render(&[], &mut [[0.; 8]; 2400]);
+            let two = envelopes(&e);
+            assert_eq!(two.len(), 2, "{kind}");
+            assert!(two.iter().any(|l| (l - 1.).abs() < 0.02) && two.iter().any(|l| (l - 0.5).abs() < 0.02), "{kind}: {two:?}");
+            // After attack and decay both voices hold the sustain level.
+            for _ in 0..10 {
+                e.render(&[], &mut [[0.; 8]; 4800]);
+            }
+            assert!(envelopes(&e).iter().all(|l| (l - 0.5).abs() < 1e-6), "{kind}: {:?}", envelopes(&e));
+            let telemetry = e.telemetry();
+            let tone = &telemetry["tone"];
+            assert!((tone["_envelope"] - 0.5).abs() < 1e-6 && tone["_voices"] == 2. && tone["_held"] == 2., "{kind}: {tone:?}");
+            let notes = &e.telemetry()["tone"];
+            assert_eq!((notes["_note_count"], notes["_recent_0_status"], notes["_recent_0_data1"], notes["_recent_1_data1"]), (2., 0x90 as f64, 64., 60.), "{kind}");
+            // Releasing one voice frees only that voice once its release ends.
+            e.piano_note("keys", 60, 0);
+            e.render(&[], &mut [[0.; 8]; 2400]);
+            let releasing = envelopes(&e);
+            assert_eq!(releasing.len(), 2, "{kind}");
+            assert!(releasing.iter().any(|l| (l - 0.25).abs() < 0.02), "{kind}: {releasing:?}");
+            e.render(&[], &mut [[0.; 8]; 4800]);
+            assert_eq!(envelopes(&e), vec![0.5], "{kind}");
         }
     }
     #[test]
@@ -6660,3 +6871,5 @@ mod part_player_tests;
 
 #[cfg(test)]
 mod granular_cloud_tests;
+#[cfg(test)]
+mod granular_field_tests;

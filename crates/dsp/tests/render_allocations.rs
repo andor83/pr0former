@@ -109,6 +109,7 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
             ("sample", "poly_sampler"),
             ("grains", "granular_synth"),
             ("cloud", "granular_cloud"),
+            ("field", "granular_field"),
             ("tone", "oscillator"),
             ("shift", "granular_pitch_shift"),
             ("convolve", "convolution"),
@@ -144,6 +145,13 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
         }
         if n.id == "one" {
             n.parameters.insert("value".into(), 1.);
+        }
+        if n.id == "field" {
+            n.sample_choices = (1..=2)
+                .map(|asset| pr0_core::SampleChoice { asset, name: format!("Field {asset}"), nickname: String::new() })
+                .collect();
+            n.parameters.insert("randomize_pitch".into(), 1.);
+            n.parameters.insert("pitch".into(), 7.);
         }
         if n.id == "send" || n.id == "receive" {
             n.control_value = Some(ControlValue::Text("spectrum".into()));
@@ -181,12 +189,17 @@ fn prepared_polyphonic_spectral_recording_and_routing_render_without_heap_activi
         ("loop", "out", "record", "in"),
         ("one", "out", "loop", "start_loop"),
         ("one", "out", "record", "start"),
+        ("mic", "out", "field", "live_1"),
+        ("one", "out", "field", "x"),
     ] {
         wire(s, sp, t, tp);
     }
     let mut engine = pr0_dsp::Engine::prepare(graph, 48000.).unwrap();
     for id in ["sample", "grains", "cloud"] {
         engine.set_sample(id, vec![[0.1; 8]; 48000]);
+    }
+    for asset in 1..=2 {
+        engine.add_sample_choice("field", asset, vec![[0.1 * asset as f32; 8]; 48000]);
     }
     for pitch in 40..104 {
         engine.piano_note("keys", pitch, 100);
@@ -267,8 +280,19 @@ fn sample_shortlist_switching_neither_allocates_nor_frees_audio_buffers() {
             target_port: "sample_id".into(),
         });
     }
+    // The field's sample setter follows the same shortlist through a parameter.
+    let mut field = node("field", "granular_field");
+    field.sample_choices = graph.nodes[0].sample_choices.clone();
+    graph.nodes.push(field);
+    graph.edges.push(Edge {
+        id: "field-sample_1".into(),
+        source: "selector".into(),
+        source_port: "out".into(),
+        target: "field".into(),
+        target_port: "sample_1".into(),
+    });
     let mut engine = pr0_dsp::Engine::prepare(graph, 48000.).unwrap();
-    for kind in ["sample", "poly_sampler", "granular_synth"] {
+    for kind in ["sample", "poly_sampler", "granular_synth", "field"] {
         for asset in 1..=3 {
             engine.add_sample_choice(kind, asset, vec![[asset as f32 * 0.1; 8]; 4096]);
         }

@@ -377,6 +377,46 @@ fn envelope_parameters(defaults: [f64; 4]) -> Vec<Parameter> {
      ("sustain", "Sustain", "", 1.), ("release", "Release", "ms", 10000.)]
         .into_iter().zip(defaults).map(|((id,label,unit,max),value)| param(id,label,unit,0.,max,value)).collect()
 }
+/// Sample slots and live capture rings of the Granular Field node.
+pub const GRANULAR_FIELD_SAMPLES: usize = 8;
+pub const GRANULAR_FIELD_LIVE: usize = 2;
+/// Every Granular Field setting is an ordinary (connectable) parameter: the node has
+/// only two audio inputs, so sample setters and per-source positions live here rather
+/// than as ports. Fresh slots sit on a circle so a new node is already a usable field.
+fn granular_field_parameters() -> Vec<Parameter> {
+    let mut p = vec![
+        param("x", "Field X", "", -1., 1., 0.),
+        param("y", "Field Y", "", -1., 1., 0.),
+        param("focus", "Focus", "", 0.05, 2., 0.5),
+        param("pitch", "Pitch", "semitones", -24., 24., 0.),
+        param("randomize_pitch", "Randomize pitch", "", 0., 1., 0.),
+        param("position", "Position", "", 0., 1., 0.5),
+        param("spray", "Spray", "ms", 0., 500., 30.),
+        param("grain_ms", "Grain duration", "ms", 5., 500., 60.),
+        param("density", "Density", "grains/s", 1., 100., 30.),
+        param("amplitude", "Amplitude", "", 0., 1., 0.5),
+    ];
+    const RING: [(f64, f64); GRANULAR_FIELD_SAMPLES] = [
+        (0.7, 0.), (0.49, 0.49), (0., 0.7), (-0.49, 0.49), (-0.7, 0.), (-0.49, -0.49), (0., -0.7), (0.49, -0.49),
+    ];
+    for n in 1..=GRANULAR_FIELD_SAMPLES {
+        let (x, y) = RING[n - 1];
+        p.push(param(&format!("sample_{n}"), &format!("Sample {n} ID"), "", 0., 1000000000., 0.));
+        p.push(param(&format!("source_{n}_x"), &format!("Sample {n} X"), "", -1., 1., x));
+        p.push(param(&format!("source_{n}_y"), &format!("Sample {n} Y"), "", -1., 1., y));
+        p.push(param(&format!("source_{n}_tune"), &format!("Sample {n} tune"), "semitones", -24., 24., 0.));
+        p.push(param(&format!("source_{n}_gain"), &format!("Sample {n} gain"), "", 0., 1., 1.));
+    }
+    for (n, (x, y)) in [(0., 0.), (0.3, 0.3)].into_iter().enumerate() {
+        let n = n + 1;
+        p.push(param(&format!("live_{n}_x"), &format!("Live {n} X"), "", -1., 1., x));
+        p.push(param(&format!("live_{n}_y"), &format!("Live {n} Y"), "", -1., 1., y));
+        p.push(param(&format!("live_{n}_tune"), &format!("Live {n} tune"), "semitones", -24., 24., 0.));
+        p.push(param(&format!("live_{n}_gain"), &format!("Live {n} gain"), "", 0., 1., 1.));
+        p.push(param(&format!("live_{n}_buffer_ms"), &format!("Live {n} buffer"), "ms", 100., 10000., 500.));
+    }
+    p
+}
 fn port(id: &str, signal: Signal) -> Port {
     Port {
         id: id.into(),
@@ -800,8 +840,10 @@ pub fn catalog() -> Vec<Descriptor> {
             param("grain_ms", "Grain duration", "ms", 5., 500., 60.),
             param("density", "Density", "grains/s", 1., 100., 30.),
             param("amplitude", "Amplitude", "", 0., 1., 0.5),
-            param("release", "Release", "ms", 1., 2000., 120.),
-        ],
+        ]
+        .into_iter()
+        .chain(envelope_parameters([0., 0., 1., 120.]))
+        .collect(),
         &["granular sampler", "grain cloud"],
     );
     add(
@@ -821,6 +863,17 @@ pub fn catalog() -> Vec<Descriptor> {
             param("mix", "Wet/dry", "", 0., 1., 1.),
         ],
         &["realtime pitch shift", "live granular"],
+    );
+    add(
+        "granular_field",
+        "Granular Field",
+        "⁘",
+        "Audio",
+        "Continuous granular cloud drawn from up to eight project samples and two live audio inputs placed on a two-dimensional field. Move the X/Y control point toward a source to hear more of it: each grain picks its source at birth with probability exp(-(distance/focus)^2), so a small Focus lets the nearest source dominate and a large one blends neighbours. Grains are Hann-windowed slices read from Position with random Spray; Density is the total grain rate. Pitch transposes every grain in semitones, or, with Randomize pitch on, sets how far each grain may wander up or down. Live inputs are captured into rings of up to ten seconds and join the field only while a cable is connected (Position 0 is the oldest audio, 1 the newest). Add samples in Options; slot N shows a Sample N ID input. Runs continuously while the engine is enabled: no note, gate or MIDI inputs and no envelope.",
+        vec![port("live_1", Audio), port("live_2", Audio)],
+        vec![port("out", Audio)],
+        granular_field_parameters(),
+        &["grain field", "sample field", "xy granular", "2d granular", "live granular", "granular morph", "texture"],
     );
     add(
         "pitch_tracker",
@@ -1472,16 +1525,10 @@ pub fn catalog() -> Vec<Descriptor> {
         vec![port("out", Audio)],
         vec![
             param("amplitude", "Amplitude", "", 0., 1., 0.2),
-            param(
-                "decay",
-                "Decay (0 holds until release)",
-                "ms",
-                0.,
-                5000.,
-                0.,
-            ),
-            param("release", "Release", "ms", 1., 2000., 80.),
-        ],
+        ]
+        .into_iter()
+        .chain(envelope_parameters([0., 0., 1., 80.]))
+        .collect(),
         &["poly"],
     );
     add(
@@ -1516,16 +1563,10 @@ pub fn catalog() -> Vec<Descriptor> {
             param("modulator_waveform", "Modulator waveform", "", 0., 4., 0.),
             param("fm_depth", "FM depth", "Hz at A4", 0., 20000., 220.),
             param("amplitude", "Amplitude", "", 0., 1., 0.2),
-            param(
-                "decay",
-                "Decay (0 holds until release)",
-                "ms",
-                0.,
-                5000.,
-                0.,
-            ),
-            param("release", "Release", "ms", 1., 2000., 80.),
-        ],
+        ]
+        .into_iter()
+        .chain(envelope_parameters([0., 0., 1., 80.]))
+        .collect(),
         &["poly", "FM", "frequency modulation", "two oscillator"],
     );
     add(
@@ -2301,8 +2342,20 @@ impl Graph {
                 .iter()
                 .find(|d| d.kind == n.kind)
                 .ok_or(format!("Unknown node {}", n.kind))?;
-            if !n.sample_choices.is_empty() && n.kind != "sample_selector" {
-                return Err("Sample lists belong only to Sample selector nodes".into());
+            if !n.sample_choices.is_empty()
+                && !matches!(n.kind.as_str(), "sample_selector" | "granular_field")
+            {
+                return Err("Sample lists belong only to Sample selector and Granular Field nodes".into());
+            }
+            if n.kind == "granular_field" {
+                if n.sample_choices.len() > GRANULAR_FIELD_SAMPLES {
+                    return Err("Granular Field holds at most 8 sample sources".into());
+                }
+                if n.parameters.iter().any(|(key, value)| {
+                    key.starts_with("sample_") && key.len() == 8 && value.fract() != 0.
+                }) {
+                    return Err("Granular Field sample IDs must be whole numbers".into());
+                }
             }
             if n.sample_choices.len() > MAX_SAMPLE_CHOICES || n.sample_choices.iter().any(|s|
                 s.asset == 0 || s.asset > 1_000_000_000 || s.name.len() > 256 || s.nickname.len() > 80
@@ -2598,6 +2651,15 @@ impl Graph {
                     })
             {
                 return Err("Controller output is not enabled".into());
+            }
+            if self.nodes[t].kind == "granular_field"
+                && edge
+                    .target_port
+                    .strip_prefix("sample_")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .is_some_and(|slot| slot == 0 || slot > self.nodes[t].sample_choices.len())
+            {
+                return Err("Granular Field sample slot is not configured; add the sample to the node's list first".into());
             }
             if self.nodes[t].kind == "sliders"
                 && edge.target_port != "midi"
@@ -2986,6 +3048,24 @@ impl Project {
     pub fn quarter_beats_per_bar(&self) -> f64 {
         let (beats, unit) = self.initial_meter();
         beats as f64 * 4. / unit as f64
+    }
+
+    /// Synth voices used to have only decay and release, where a positive decay
+    /// made every voice a one-shot that fell to silence. With the full per-voice
+    /// ADSR that contour is decay to a sustain of 0, so a saved decay without a
+    /// saved sustain keeps its sound. Returns whether anything changed.
+    pub fn upgrade_legacy_envelopes(&mut self) -> bool {
+        let mut changed = false;
+        for node in &mut self.graph.nodes {
+            if matches!(node.kind.as_str(), "synth" | "fm_synth")
+                && node.parameters.get("decay").is_some_and(|d| *d > 0.)
+                && !node.parameters.contains_key("sustain")
+            {
+                node.parameters.insert("sustain".into(), 0.);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -3679,6 +3759,77 @@ mod tests {
         let mut p = demo_project("x".into(), "x".into(), Mode::Freeform);
         p.graph.nodes[0].channels = 9;
         assert!(p.validate().is_err());
+    }
+    fn field_node(template: &Node, choices: &[u32]) -> Node {
+        let mut n = template.clone();
+        n.id = "field".into();
+        n.kind = "granular_field".into();
+        n.channels = 2;
+        n.parameters.clear();
+        n.sample_choices = choices
+            .iter()
+            .map(|asset| SampleChoice { asset: *asset, name: format!("S{asset}"), nickname: String::new() })
+            .collect();
+        n
+    }
+    fn field_graph(template: &Node, choices: &[u32], edges: Vec<Edge>) -> Graph {
+        let mut value = template.clone();
+        value.id = "v".into();
+        value.kind = "value".into();
+        value.channels = 1;
+        value.parameters.clear();
+        let mut input = template.clone();
+        input.id = "mic".into();
+        input.kind = "input".into();
+        input.channels = 2;
+        input.parameters.clear();
+        Graph { nodes: vec![field_node(template, choices), value, input], edges }
+    }
+    fn wire(source: &str, source_port: &str, target_port: &str) -> Edge {
+        Edge { id: format!("{source}-{target_port}"), source: source.into(), source_port: source_port.into(), target: "field".into(), target_port: target_port.into() }
+    }
+    #[test]
+    fn granular_field_descriptor_has_two_audio_inputs_and_only_live_parameters() {
+        let catalog = catalog();
+        let d = catalog.iter().find(|d| d.kind == "granular_field").expect("granular_field in catalog");
+        assert_eq!(d.inputs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["live_1", "live_2"]);
+        assert!(d.inputs.iter().all(|p| p.signal == Signal::Audio), "no control or MIDI inlets");
+        assert_eq!(d.outputs.len(), 1);
+        assert_eq!(d.parameters.len(), 10 + GRANULAR_FIELD_SAMPLES * 5 + GRANULAR_FIELD_LIVE * 5);
+        assert!(d.parameters.iter().all(|p| !p.structural), "every setting changes live");
+        let find = |id: &str| d.parameters.iter().find(|p| p.id == id).unwrap();
+        assert_eq!((find("x").min, find("x").max, find("y").default), (-1., 1., 0.));
+        assert_eq!((find("focus").min, find("focus").max, find("focus").default), (0.05, 2., 0.5));
+        assert_eq!((find("randomize_pitch").min, find("randomize_pitch").max, find("randomize_pitch").default), (0., 1., 0.));
+        assert_eq!((find("pitch").min, find("pitch").max), (-24., 24.));
+        assert_eq!(find("sample_8").max, 1000000000.);
+        assert_eq!((find("live_2_buffer_ms").min, find("live_2_buffer_ms").max, find("live_2_buffer_ms").default), (100., 10000., 500.));
+        assert_eq!(find("source_1_x").default, 0.7, "fresh slots sit on a ring");
+        assert!(d.documentation.is_some());
+    }
+    #[test]
+    fn granular_field_validation_gates_sample_lists_slots_and_whole_numbers() {
+        let template = demo_project("x".into(), "x".into(), Mode::Freeform).graph.nodes[0].clone();
+        assert!(field_graph(&template, &[1, 2, 3, 4, 5, 6, 7, 8], vec![]).validate().is_ok());
+        let err = field_graph(&template, &[1, 2, 3, 4, 5, 6, 7, 8, 9], vec![]).validate().unwrap_err();
+        assert!(err.contains("at most 8"), "{err}");
+        let mut other = field_graph(&template, &[], vec![]);
+        other.nodes[1].sample_choices = vec![SampleChoice { asset: 1, name: "s".into(), nickname: String::new() }];
+        assert!(other.validate().unwrap_err().contains("Sample lists belong"));
+        assert!(field_graph(&template, &[1, 2], vec![wire("v", "out", "sample_2")]).validate().is_ok());
+        let err = field_graph(&template, &[1, 2], vec![wire("v", "out", "sample_3")]).validate().unwrap_err();
+        assert!(err.contains("not configured"), "{err}");
+        assert!(field_graph(&template, &[], vec![wire("mic", "out", "live_1"), wire("v", "out", "x")]).validate().is_ok(), "live ports are always connectable");
+        assert!(field_graph(&template, &[], vec![wire("mic", "out", "live_2")]).validate().is_ok());
+        let mut fractional = field_graph(&template, &[1], vec![]);
+        fractional.nodes[0].parameters.insert("sample_1".into(), 1.5);
+        assert!(fractional.validate().unwrap_err().contains("whole numbers"));
+        let mut tuned = field_graph(&template, &[1], vec![]);
+        tuned.nodes[0].parameters.insert("source_1_tune".into(), 3.5);
+        assert!(tuned.validate().is_ok(), "tune is continuous");
+        let mut wide = field_graph(&template, &[], vec![wire("mic", "out", "live_1")]);
+        wide.nodes[2].channels = 4;
+        assert!(wide.validate().is_err(), "audio widths must match like any audio port");
     }
     #[test]
     fn part_setup_validates_name_view_and_loop() {

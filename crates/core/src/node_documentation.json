@@ -2767,7 +2767,8 @@
           "parameters": {
             "fm_depth": 250,
             "decay": 800,
-            "release": 350
+            "release": 350,
+            "sustain": 0
           }
         },
         {
@@ -3022,7 +3023,8 @@
           "parameters": {
             "carrier_frequency": 55,
             "modulator_frequency": 80,
-            "decay": 180
+            "decay": 180,
+            "sustain": 0
           }
         },
         {
@@ -3092,7 +3094,8 @@
           "channels": 2,
           "parameters": {
             "carrier_frequency": 55,
-            "decay": 180
+            "decay": 180,
+            "sustain": 0
           }
         },
         {
@@ -9200,6 +9203,105 @@
           "source": "cloud",
           "source_port": "out",
           "target": "listen",
+          "target_port": "in"
+        }
+      ]
+    }
+  },
+  "granular_field": {
+    "title": "Morph a texture between samples and a live microphone",
+    "explanation": "Granular Field is a continuous cloud with no note, gate or MIDI inputs. Its sources sit on a two-dimensional field: add up to eight project samples in Options and cable audio into Live 1 or Live 2, which join the field only while connected. The X and Y values steer a control point; every grain picks its source with probability exp(-(distance/focus)^2), so a small Focus lets the nearest source dominate and a large one blends neighbours. Pitch transposes grains in semitones, or with Randomize pitch on it sets how far each grain may wander. Live audio is captured into a ring of up to ten seconds; Position 0 reads the oldest audio and 1 the newest.",
+    "steps": [
+      "Open the node's Options and use Edit sources to add project samples; drag their circles to place them on the field.",
+      "Cable the audio Input into Live 1: its circle appears on the field while the cable is connected.",
+      "Drive X and Y from the Value nodes, Knobs or Sliders (-1 to 1) and enable the engine.",
+      "Lower Focus to hear one source at a time; raise it to blend. Density is the total grain rate across all sources."
+    ],
+    "graph": {
+      "nodes": [
+        {
+          "id": "n0",
+          "kind": "value",
+          "label": "Field X",
+          "x": 0,
+          "y": 0,
+          "channels": 1,
+          "parameters": {
+            "value": -0.5
+          }
+        },
+        {
+          "id": "n1",
+          "kind": "value",
+          "label": "Field Y",
+          "x": 0,
+          "y": 160,
+          "channels": 1,
+          "parameters": {
+            "value": 0.25
+          }
+        },
+        {
+          "id": "n2",
+          "kind": "input",
+          "label": "Audio input",
+          "x": 0,
+          "y": 320,
+          "channels": 2,
+          "parameters": {}
+        },
+        {
+          "id": "n3",
+          "kind": "granular_field",
+          "label": "Granular Field",
+          "x": 480,
+          "y": 0,
+          "channels": 2,
+          "parameters": {
+            "focus": 0.6,
+            "live_1_x": 0.6,
+            "live_1_y": 0
+          }
+        },
+        {
+          "id": "n4",
+          "kind": "monitor_output",
+          "label": "Headphone mix",
+          "x": 960,
+          "y": 0,
+          "channels": 2,
+          "parameters": {
+            "gain": -18
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "e0",
+          "source": "n0",
+          "source_port": "out",
+          "target": "n3",
+          "target_port": "x"
+        },
+        {
+          "id": "e1",
+          "source": "n1",
+          "source_port": "out",
+          "target": "n3",
+          "target_port": "y"
+        },
+        {
+          "id": "e2",
+          "source": "n2",
+          "source_port": "out",
+          "target": "n3",
+          "target_port": "live_1"
+        },
+        {
+          "id": "e3",
+          "source": "n3",
+          "source_port": "out",
+          "target": "n4",
           "target_port": "in"
         }
       ]

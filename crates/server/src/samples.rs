@@ -128,25 +128,38 @@ pub fn prepare(
     for node in &project.graph.nodes {
         if !matches!(
             node.kind.as_str(),
-            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "granular_cloud" | "convolution_reverb"
+            "sample" | "phase_vocoder" | "poly_sampler" | "granular_synth" | "granular_cloud" | "granular_field" | "convolution_reverb"
         ) {
             continue;
         }
         let default_asset = node.parameters.get("asset").copied().unwrap_or(0.) as u32;
         let dynamic = matches!(
             node.kind.as_str(),
-            "sample" | "poly_sampler" | "granular_synth" | "granular_cloud"
+            "sample" | "poly_sampler" | "granular_synth" | "granular_cloud" | "granular_field"
         );
+        // A Granular Field always needs its own slot list; any cabled Sample N setter may
+        // also point at anything on the project shortlist.
+        let field = node.kind == "granular_field";
+        let own: std::collections::BTreeSet<u32> = if field {
+            node.sample_choices.iter().map(|s| s.asset).collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
         let connected = dynamic
-            && flat
-                .edges
-                .iter()
-                .any(|e| e.target == node.id && e.target_port == "sample_id");
+            && flat.edges.iter().any(|e| {
+                e.target == node.id
+                    && (e.target_port == "sample_id"
+                        || (field
+                            && e.target_port
+                                .strip_prefix("sample_")
+                                .is_some_and(|v| v.parse::<usize>().is_ok())))
+            });
         let mut assets = if connected {
             shortlist.clone()
         } else {
             std::collections::BTreeSet::new()
         };
+        assets.extend(own.iter().copied());
         if default_asset != 0 {
             assets.insert(default_asset);
         }
@@ -162,7 +175,7 @@ pub fn prepare(
                     ));
                 }
             } else if spec.channels as usize != node.channels {
-                if asset != default_asset {
+                if asset != default_asset && !own.contains(&asset) {
                     continue;
                 }
                 return Err(format!(

@@ -1,5 +1,6 @@
 import { newId } from './id'
 import type { Descriptor, GraphNode, GraphEdge, Signal } from './types'
+import { granularFieldDescriptor } from './granularField'
 export function nodeDescriptor(node: GraphNode, nodes: GraphNode[], catalog: Descriptor[]): Descriptor {
   const base = catalog.find(d => d.kind === node.kind)!
   if(node.kind==='js_control'){
@@ -12,6 +13,7 @@ export function nodeDescriptor(node: GraphNode, nodes: GraphNode[], catalog: Des
     const count=Math.max(1,Math.min(8,node.parameters.count??4)), enabled=(p:{id:string})=>p.id==='midi'||Number(p.id.split('_').at(-1))<=count
     return {...base,inputs:base.inputs.filter(enabled),outputs:base.outputs.filter(enabled)}
   }
+  if (node.kind === 'granular_field') return granularFieldDescriptor(base, node)
   if (node.kind === 'subgraph') {
     const ports = (direction: string) => nodes.filter(n => n.parent === node.id && n.kind.startsWith(`subgraph_${direction}_`)).map(n => ({ id: n.id, label: n.label, signal: n.kind.split('_').at(-1) as Signal, fixed_channels: n.channels }))
     return {...base, inputs: ports('input'), outputs: ports('output')}

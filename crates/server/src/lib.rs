@@ -367,7 +367,9 @@ fn load(app: &App, id: &str) -> Api<Project> {
         .unwrap()
         .query_row("SELECT body FROM projects WHERE id=?1", [id], |r| r.get(0))
         .map_err(|_| Failure(StatusCode::NOT_FOUND, "Project not found".into()))?;
-    serde_json::from_str(&body).map_err(internal)
+    let mut project: Project = serde_json::from_str(&body).map_err(internal)?;
+    project.upgrade_legacy_envelopes();
+    Ok(project)
 }
 fn update_working_copy(app: &App, project: &mut Project) -> Api<()> {
     let mut db = app.db.lock().unwrap();
@@ -1379,7 +1381,10 @@ async fn transport(
         *app.active.lock().unwrap() = None;
         let _ = app.events.send(engine_status(&app));
     } else {
-        if (!matches!(c.action.as_str(), "tempo" | "metronome")
+        // Tempo, metronome and seek only adjust the loaded engine's clock, so they need the
+        // graph but not an active show: score editing seeks to the clicked note while the
+        // engine is enabled and silent.
+        if (!matches!(c.action.as_str(), "tempo" | "metronome" | "seek")
             && app.active.lock().unwrap().as_deref() != Some(&id))
             || app.graph.lock().unwrap().as_deref() != Some(&id)
         {

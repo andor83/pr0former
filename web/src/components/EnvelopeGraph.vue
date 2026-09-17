@@ -157,6 +157,6 @@ function keys(event: KeyboardEvent, handle: Handle, locked: boolean) {
 .stage{fill:#f2953a;fill-opacity:.6;font-size:6.5px;font-family:monospace;pointer-events:none}
 .envelope-zoom{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:10px;color:var(--ink-muted);letter-spacing:.6px}.envelope-zoom input{flex:1;min-width:0;accent-color:#f2953a;margin:0}.envelope-zoom output{font-family:monospace;color:var(--control-ink);min-width:40px;text-align:right}.envelope-zoom .text-button{padding:4px 0}
 .level{stroke:#ffd9a8;stroke-opacity:.5;stroke-width:1;stroke-dasharray:3 3}.level.gated{stroke:#fff1dc;stroke-opacity:.95}
-.preview{pointer-events:none}.preview rect{fill:var(--shade-deep);stroke:#ffb35c;stroke-width:.8}.preview text{fill:var(--control-ink);font-size:7.5px;font-family:monospace;font-variant-numeric:tabular-nums}
+.preview{pointer-events:none}.preview rect{fill:var(--shade-deep);stroke:#ffb35c;stroke-width:.8}.preview text{fill:var(--well-control-ink);font-size:7.5px;font-family:monospace;font-variant-numeric:tabular-nums}
 .handle{fill:var(--shade-deep);stroke:#ffb35c;stroke-width:2;cursor:grab}.handle:hover,.handle.active{fill:#ffb35c;cursor:grabbing}.handle.locked{stroke:#7a6248;cursor:not-allowed}.handle:focus-visible{outline:none;stroke:#e7f5f1;stroke-width:3}
 </style>

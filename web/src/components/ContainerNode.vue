@@ -55,6 +55,6 @@ function controlSelect(event: MouseEvent) {
 .container-resize{position:absolute;right:3px;bottom:3px;width:18px;height:18px;cursor:nwse-resize;border-right:2px solid var(--container);border-bottom:2px solid var(--container);border-radius:0 0 7px 0;opacity:.85;touch-action:none}
 .container-resize:hover{opacity:1}
 :global(.vue-flow__node-container){z-index:-1!important}
-:global(.graph-light) .container-node{background:color-mix(in srgb,var(--container) 20%,#dfe7e8);color:#1b3035}
+:global(.graph-light) .container-node{background:color-mix(in srgb,var(--container) 16%,#f4f8f8);color:#1b3035}
 :global(.graph-light) .container-title{color:#1b3035}
 </style>
