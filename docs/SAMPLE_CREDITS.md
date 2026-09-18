@@ -31,9 +31,42 @@ traced.
 | Cymbal | `cymbal.wav` | `drum_cymbal_hard` | https://www.freesound.org/people/menegass/sounds/100056/ |
 
 Conversion: the original mono 44.1 kHz FLAC files were converted with FFmpeg
-to 48 kHz stereo 16-bit PCM WAV with metadata stripped, so they match the
-stereo voices of the preset and the project sample cache. Total size is under
-one megabyte.
+to 48 kHz stereo 16-bit with metadata stripped, so they match the stereo voices
+of the preset and the project sample cache.
+
+## How bundled audio is stored
+
+Bundled audio ships as **FLAC** and is expanded to WAV when a sample is first
+seeded, by `sample_library::wav_bytes`. Symphonia already decodes FLAC for the
+sample importer, so this needs no new dependency and still cross-compiles for
+iOS, and FLAC is lossless, so the stored WAV is bit-identical to the WAV the
+kit shipped as before. Seeding is idempotent and skips samples that already have
+a library row, so a first install expands everything once and an update that adds
+a sample expands only that one.
+
+All eight bundled files total about 1.2 MB as FLAC, against 4.1 MB as WAV.
+
+To add or replace one, convert to 48 kHz stereo 16-bit FLAC:
+
+```sh
+ffmpeg -y -i source.wav -ar 48000 -ac 2 -c:a flac -compression_level 12 \
+  -sample_fmt s16 -map_metadata -1 -fflags +bitexact crates/server/assets/<dir>/<name>.flac
+```
+
+## Licence policy for bundled samples
+
+**Only CC0, public-domain or equivalently permissive material may be bundled or
+seeded.** A sample that requires attribution would pass that obligation on to
+every performer who uses pr0former in their own work, which is not acceptable
+for material the application ships by default. CC BY, CC BY-SA, CC BY-NC and the
+legacy Freesound Sampling+ terms are therefore all out, however convenient the
+sound. Courtesy credit is still recorded in this file for everything bundled, so
+sources can be traced; the difference is that nobody downstream is obliged to
+repeat it.
+
+This rules out the CC BY and CC BY-NC sources listed further down as fallbacks:
+they remain useful as things a user may download for their own project, but they
+must not be added to `crates/server/assets` or the seeded library.
 
 ## Other bundled samples
 
@@ -44,7 +77,8 @@ administrator deletes them — but carry their own category and tags.
 
 | Bundled file | Library name | Category | Source | License |
 | --- | --- | --- | --- | --- |
-| `voices/atari-speech.wav` | Atari speech (bundled) | Voices | https://freesound.org/people/Timbre/sounds/547419/ | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| `voices/atari-speech.flac` | Atari speech (bundled) | Voices | https://freesound.org/people/Timbre/sounds/547419/ | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| `instruments/music-box.flac` | Music box (bundled) | Instruments | https://freesound.org/people/Flying_Deer_Fx/sounds/369405/ | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
 
 "2020 remix of i-have-an-atari-speech-synthesizer-and-i-m-not-afraid-to-use-it"
 by **Timbre**: an Atari speech synthesizer recording put through a
@@ -61,12 +95,40 @@ lossless original, download the FLAC from the sound page while signed in and
 re-run:
 
 ```sh
-ffmpeg -y -i 547419__timbre__*.flac -ar 48000 -ac 2 -c:a pcm_s16le \
-  -map_metadata -1 -fflags +bitexact crates/server/assets/voices/atari-speech.wav
+ffmpeg -y -i 547419__timbre__*.flac -ar 48000 -ac 2 -c:a flac -sample_fmt s16 \
+  -map_metadata -1 -fflags +bitexact crates/server/assets/voices/atari-speech.flac
 ```
 
 The WAV is about 1 MB, which is roughly the size of the whole drum kit; the
 stereo conversion doubles a mono source to match the project convention.
+
+### Music box
+
+"Music Box - J. Brahms - Opus 39 - Waltz no 3" by **Flying_Deer_Fx**: a music
+box playing Brahms's waltz, 59 s. Dedicated to the public domain under CC0 1.0,
+so attribution is not required; it is recorded here as a courtesy and for
+traceability, as with the kit. The waltz itself is long out of copyright.
+
+This replaced an earlier CC BY 4.0 music box, which was removed: see the licence
+policy above.
+
+Conversion: as with the Atari sound, the lossless original is behind a Freesound
+login, so the bundled file was made from the public HQ MP3 preview
+(`https://cdn.freesound.org/previews/369/369405_6812364-hq.mp3`) with FFmpeg, to
+48 kHz stereo 16-bit PCM WAV with metadata stripped, and **carries MP3
+artifacts**. To replace it with the original, download it while signed in and
+re-run:
+
+```sh
+ffmpeg -y -i 369405__flying_deer_fx__*.wav -ar 48000 -ac 2 -c:a flac -sample_fmt s16 \
+  -map_metadata -1 -fflags +bitexact crates/server/assets/instruments/music-box.flac
+```
+
+Only the first **10 seconds** are bundled, with a 0.6 s fade-out, because the
+sample is example material rather than a work to be reproduced: the full 59 s
+came to 11.4 MB of WAV, which dwarfed everything else shipped. The excerpt is
+731 KB as FLAC. To bundle a different span, adjust `-ss`/`-t` in the command
+above.
 
 ## Other kits considered
 

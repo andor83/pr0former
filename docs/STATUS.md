@@ -114,6 +114,23 @@ parameter), and a normalized phasor driving one whole sine cycle.
 
 ## Bundled sample library beyond the drum kit (2026-09-18)
 
+`BUNDLED_EXTRAS` now also carries "Music box (bundled)" (category Instruments),
+a 10-second excerpt of a CC0 Brahms waltz recording by Flying_Deer_Fx from
+freesound.org. Bundled material is restricted to CC0 or otherwise
+attribution-free licences, recorded as a policy in docs/SAMPLE_CREDITS.md, so
+that a performer never inherits a credit obligation in their own work; a CC BY
+music box added earlier was removed under that rule. Both bundled extras come
+from the published Freesound previews, their lossless originals being behind a
+login, and so carry MP3 artifacts.
+
+Bundled audio now ships as FLAC and is expanded to WAV by
+`sample_library::wav_bytes` when a sample is first seeded, so a first install
+expands everything once and an update expands only the samples it adds. Symphonia
+already decodes FLAC for the importer, so this adds no dependency and still
+cross-compiles for iOS; FLAC is lossless and the expanded audio was checked
+bit-identical to the WAVs that shipped before. The eight bundled files total about
+1.2 MB, against 4.1 MB as WAV (and 12.2 MB before the music box was trimmed).
+
 `BUNDLED_EXTRAS` seeds bundled samples that are not drum pads, each with its own
 category and tags; the Drum Sampler subgraph still indexes `BUNDLED_KIT` by
 position, so the kit is unchanged. The first entry is "Atari speech (bundled)"
@@ -121,6 +138,25 @@ position, so the kit is unchanged. The first entry is "Atari speech (bundled)"
 lossless original only to signed-in users, so the bundled WAV was converted from
 the public MP3 preview and carries MP3 artifacts; docs/SAMPLE_CREDITS.md records
 the source, the licence and the command to swap in the FLAC original.
+
+## Light-mode controls and wider modal sample search (2026-09-18)
+
+Buttons, text fields, tag chips and modals took fixed dark colours, so in the
+light graph theme the node's Open subgraph button, the sample finder, the Import
+audio and Browse all buttons, sample tag chips and the whole sample browser stayed
+dark. Those primitives now read `--field-face`/`--field-ink`,
+`--button-face`/`--button-line`, `--chip-*` and `--modal-face`/`--modal-line`,
+whose `:root` values are exactly the previous dark colours, so `.graph-light`
+retunes them and dark mode is unchanged. A modal opened from inside the graph
+workspace (the sample browser and sample editor) therefore follows the light
+theme; the node modal renders outside that subtree and stays dark.
+
+The sample pickers in node modals (Sample selector shortlist, Granular Field
+slots) now search every sample the user can reach, not only the ones already in
+the project: App fetches `/sample-library` the first time a node modal opens and
+refreshes it when the library changes. Picking a sample that is not in the
+project adds it first through the existing `ensureProjectSample`, then uses the
+asset id it returns; suggestions mark those rows "add to project".
 
 ## Smooth change node (2026-09-17)
 

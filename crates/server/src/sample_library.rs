@@ -59,13 +59,14 @@ pub fn path(config: &RuntimeConfig, id: &str) -> PathBuf {
 pub const BUNDLED_OWNER: &str = "pr0former";
 /// Six CC0 one-shots (48 kHz stereo 16-bit) bundled with the server as
 /// global library samples; see docs/SAMPLE_CREDITS.md for their sources.
+/// Stored as FLAC and expanded by [`wav_bytes`] when seeded.
 pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
     (
         "bundled-kick",
         "Kick",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/assets/drums/kick.wav"
+            "/assets/drums/kick.flac"
         )),
     ),
     (
@@ -73,7 +74,7 @@ pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
         "Snare",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/assets/drums/snare.wav"
+            "/assets/drums/snare.flac"
         )),
     ),
     (
@@ -81,7 +82,7 @@ pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
         "Tom 1",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/assets/drums/tom-1.wav"
+            "/assets/drums/tom-1.flac"
         )),
     ),
     (
@@ -89,7 +90,7 @@ pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
         "Tom 2",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/assets/drums/tom-2.wav"
+            "/assets/drums/tom-2.flac"
         )),
     ),
     (
@@ -97,7 +98,7 @@ pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
         "Hi hat",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/assets/drums/hi-hat.wav"
+            "/assets/drums/hi-hat.flac"
         )),
     ),
     (
@@ -105,12 +106,15 @@ pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
         "Cymbal",
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/assets/drums/cymbal.wav"
+            "/assets/drums/cymbal.flac"
         )),
     ),
 ];
 /// A bundled sample that is not a drum pad. The Drum Sampler subgraph indexes
 /// BUNDLED_KIT by position, so anything that is not a pad is seeded from here.
+/// Everything bundled must be CC0 or otherwise free of an attribution
+/// requirement: a performer using pr0former must not inherit a credit
+/// obligation in their own work. See docs/SAMPLE_CREDITS.md.
 pub struct Bundled {
     pub id: &'static str,
     pub name: &'static str,
@@ -119,7 +123,7 @@ pub struct Bundled {
     pub description: &'static str,
     pub bytes: &'static [u8],
 }
-pub const BUNDLED_EXTRAS: [Bundled; 1] = [Bundled {
+pub const BUNDLED_EXTRAS: [Bundled; 2] = [Bundled {
     id: "bundled-atari-speech",
     name: "Atari speech (bundled)",
     category: "Voices",
@@ -127,9 +131,103 @@ pub const BUNDLED_EXTRAS: [Bundled; 1] = [Bundled {
     description: "CC0 speech-synthesizer phrase through a small-speaker impulse response, by Timbre (freesound.org), bundled with pr0former; see docs/SAMPLE_CREDITS.md.",
     bytes: include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/assets/voices/atari-speech.wav"
+        "/assets/voices/atari-speech.flac"
+    )),
+},
+Bundled {
+    id: "bundled-music-box",
+    name: "Music box (bundled)",
+    category: "Instruments",
+    tags: "music box, melodic, acoustic, cc0",
+    description: "CC0 music box playing a Brahms waltz, recorded by Flying_Deer_Fx (freesound.org), bundled with pr0former; see docs/SAMPLE_CREDITS.md.",
+    bytes: include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instruments/music-box.flac"
     )),
 }];
+/// Expand a bundled FLAC into the 16-bit WAV the sample library stores.
+///
+/// Bundled audio ships compressed because it is only ever example material, and
+/// is expanded once, when a sample is first seeded; an update that adds a sample
+/// expands only that one. FLAC is lossless, so the stored WAV is the same audio
+/// the kit has always had, and Symphonia already decodes FLAC for the importer,
+/// so this costs no new dependency and still cross-compiles for iOS.
+pub fn wav_bytes(compressed: &[u8]) -> Result<Vec<u8>, String> {
+    use symphonia::core::{
+        audio::SampleBuffer,
+        codecs::{CODEC_TYPE_NULL, DecoderOptions},
+        errors::Error as Symphonia,
+        formats::FormatOptions,
+        io::{MediaSourceStream, MediaSourceStreamOptions},
+        meta::MetadataOptions,
+        probe::Hint,
+    };
+    let source = std::io::Cursor::new(compressed.to_vec());
+    let stream = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
+    let probed = symphonia::default::get_probe()
+        .format(
+            &Hint::new(),
+            stream,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| format!("bundled sample container: {e}"))?;
+    let mut reader = probed.format;
+    let track = reader
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or("bundled sample has no audio track")?;
+    let track_id = track.id;
+    let parameters = track.codec_params.clone();
+    let channels = parameters
+        .channels
+        .ok_or("bundled sample declares no channels")?
+        .count() as u16;
+    let sample_rate = parameters
+        .sample_rate
+        .ok_or("bundled sample declares no sample rate")?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&parameters, &DecoderOptions::default())
+        .map_err(|e| format!("bundled sample codec: {e}"))?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(
+        &mut out,
+        hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let mut interleaved: Option<SampleBuffer<i16>> = None;
+    loop {
+        let packet = match reader.next_packet() {
+            Ok(packet) => packet,
+            // Symphonia reports the end of a stream as an unexpected EOF.
+            Err(Symphonia::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("bundled sample stream: {e}")),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = decoder
+            .decode(&packet)
+            .map_err(|e| format!("bundled sample audio: {e}"))?;
+        if decoded.frames() == 0 {
+            continue;
+        }
+        let buffer = interleaved
+            .get_or_insert_with(|| SampleBuffer::new(decoded.capacity() as u64, *decoded.spec()));
+        buffer.copy_interleaved_ref(decoded);
+        for sample in buffer.samples() {
+            writer.write_sample(*sample).map_err(|e| e.to_string())?;
+        }
+    }
+    writer.finalize().map_err(|e| e.to_string())?;
+    Ok(out.into_inner())
+}
 /// Seed the bundled kit as global library samples visible to every account.
 /// Idempotent: rows that already exist, including ones an administrator has
 /// deleted, are left alone, so the kit never comes back uninvited.
@@ -162,12 +260,13 @@ fn seed_bundled_into(db: &Connection, dir: &std::path::Path) -> Result<(), Strin
         if exists {
             continue;
         }
+        let bytes = wav_bytes(bytes)?;
         let reader =
-            hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+            hound::WavReader::new(std::io::Cursor::new(&bytes)).map_err(|e| e.to_string())?;
         let spec = reader.spec();
         let frames = reader.duration();
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join(format!("{id}.wav")), bytes).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(format!("{id}.wav")), &bytes).map_err(|e| e.to_string())?;
         db.execute(
             "INSERT INTO sample_library(id,owner,origin,name,description,tags,category,global,ever_global,channels,sample_rate,frames,root_note) VALUES(?1,?2,'bundled',?3,?4,?8,?9,1,1,?5,?6,?7,60)",
             params![

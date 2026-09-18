@@ -143,7 +143,8 @@ mod builtin_tests {
             (0..kit.len()).map(bundled_placeholder).collect()
         );
         for (id, _, bytes) in kit {
-            let reader = hound::WavReader::new(std::io::Cursor::new(bytes)).unwrap();
+            let wav = crate::sample_library::wav_bytes(bytes).expect(id);
+            let reader = hound::WavReader::new(std::io::Cursor::new(&wav)).unwrap();
             let spec = reader.spec();
             assert_eq!(
                 (spec.channels, spec.sample_rate, spec.bits_per_sample),
@@ -418,7 +419,11 @@ pub async fn insert(
             for (i, (sample, _, bytes)) in crate::sample_library::BUNDLED_KIT.iter().enumerate() {
                 match crate::sample_library::attach(&app.config, &db, &project, sample) {
                     Ok(asset) => linked.push((bundled_placeholder(i), asset)),
-                    Err(_) => fallback.push((bundled_placeholder(i), bytes.to_vec())),
+                    // The private copy is the expanded audio, not the bundled FLAC.
+                    Err(_) => fallback.push((
+                        bundled_placeholder(i),
+                        crate::sample_library::wav_bytes(bytes).map_err(internal)?,
+                    )),
                 }
             }
             (graph, fallback, linked)

@@ -184,6 +184,10 @@ function randomizeHero(randomizeSlogan = true) {
 watch(() => descriptors.value.length, count => { if (count && !user.value) randomizeHero(false) }, { immediate: true })
 const nodeLibraryOpen = ref(true), sampleLibraryOpen=ref(false)
 const samplePanel=ref<InstanceType<typeof SampleLibrary>>(),projectSamples=ref<SampleEntry[]>([])
+// Modal sample pickers search everything the user can reach, not just what the
+// project already holds, so the catalog is fetched the first time a node modal
+// opens and refreshed whenever the library changes.
+const librarySamples=ref<SampleEntry[]>([]),libraryLoadedFor=ref('')
 const tab = ref('graph'), library = ref(true), search = ref(''), category = ref('All nodes')
 watch(() => [project.value?.id, project.value?.name, tab.value, stage.value] as const,
   ([id, name, view, isStage]) => updateDesktopWindow(user.value ? id : undefined, name, isStage ? 'stage' : view))
@@ -374,7 +378,10 @@ watch([() => project.value?.id, countIn], ([id, value]) => {
   if (!id || !countInOptions.has(value)) return
   try { localStorage.setItem(`pr0former.count-in.${id}`, value) } catch { /* ignore unavailable storage */ }
 })
-watch(()=>project.value?.id,async id=>{projectSamples.value=[];if(id){try{const samples=await api<SampleEntry[]>(`/projects/${id}/samples`);if(project.value?.id===id)projectSamples.value=samples}catch(e){report(e)}}})
+watch(()=>project.value?.id,async id=>{projectSamples.value=[];librarySamples.value=[];libraryLoadedFor.value='';if(id){try{const samples=await api<SampleEntry[]>(`/projects/${id}/samples`);if(project.value?.id===id)projectSamples.value=samples}catch(e){report(e)}}})
+async function loadLibrarySamples(force=false){const id=project.value?.id;if(!id||(!force&&libraryLoadedFor.value===id))return
+  try{const all=await api<SampleEntry[]>(`/projects/${id}/sample-library`);if(project.value?.id!==id)return;librarySamples.value=all;libraryLoadedFor.value=id}catch(e){report(e)}}
+watch(selectedNode,id=>{if(id)void loadLibrarySamples()})
 const countingIn = computed(() => active.value && !stale.value && telemetry.value?.count_in_remaining != null)
 const graphEditable = computed(() => editable.value && !saving.value && !parameterPending.value && !progress.value)
 const graphActive = computed(() => !!project.value && graphId.value === project.value.id)
@@ -568,7 +575,7 @@ function connect(id: string) {
     conductorMidi.receive(message)
     if(message.type==='local_midi_status')localMidi.receive(message)
     if(message.type==='piano_error'||message.type==='control_error')report(new Error(message.error))
-    if(message.type==='samples')void samplePanel.value?.refresh()
+    if(message.type==='samples'){void samplePanel.value?.refresh();if(libraryLoadedFor.value)void loadLibrarySamples(true)}
     if(message.type==='hardware_levels'){hardwareLevels.value=message;hardwareReceived.value=performance.now()}
     if(message.type==='project_save') acceptSaveStatus(id, message.save)
     if(message.type==='members_changed') void refreshMembers().catch(report)
@@ -656,7 +663,11 @@ async function ensureProjectSample(id:string):Promise<SampleEntry>{
   if(existing)return existing
   if(!project.value)throw new Error('Open a project first')
   const sample=await api<SampleEntry>(`/projects/${project.value.id}/samples/${id}/add`,'POST')
-  await samplePanel.value?.refresh();return sample
+  await samplePanel.value?.refresh()
+  // The catalog row now carries the project asset id, so refresh it too.
+  if(libraryLoadedFor.value)await loadLibrarySamples(true)
+  projectSamples.value=[...projectSamples.value.filter(s=>s.id!==sample.id),sample]
+  return sample
 }
 function quickInsert(item:LibraryItem,point?:{x:number;y:number}){
   quickNodes.value=false
@@ -1259,7 +1270,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize',phoneLayoutChanged);
     <TaskProgress v-if="progress" :title="progress" />
     <ProjectSettings v-if="settingsOpen && project" :key="project.id" :project="project" :active="active" :editable="editable" @close="settingsOpen = false" @saved="settingsSaved" />
     <PartPlaybackDialog v-if="project && previewNode" :key="`${project.id}/${previewNode.id}/${previewNode.part_id}`" :project="project" :part="project.parts.find(p=>p.id===previewNode?.part_id)" :values="telemetry?.values[previewNode.id]" :stale="stale || !graphActive" @close="partPlayerPreview=null" />
-    <NodeModal :apply-script="applyScript" :script-status="telemetry?.scripts?.[selectedNode!]" :osc-message="telemetry?.osc_messages?.[selectedNode!]" :route-targets="telemetry?.route_targets" :route-target="telemetry?.route_targets?.[selected?.id??'']" :samples="projectSamples" @sample="assignSample" @sample-choices="updateSampleChoices" @sources="updateGranularSources" :input-error="telemetry?.midi_input_error" :io-status="telemetry?.node_io" @io="assignNodeIo" :parts="project?.parts" @part="assignNodePart" :project-id="project?.id" v-if="selected && selectedDescriptor && project" :visualization="telemetry?.visualizations?.[selected.id]" :sample-rate="audioSettings.sample_rate" :block-size="audioSettings.block_size" :interfaces="audioSettings.interfaces.filter(i=>i.enabled).map(i=>({...i,name:devices?.interfaces?.find((d:any)=>d.id===i.id)?.label||i.name}))" :node="selected" :descriptor="selectedDescriptor" :nodes="project.graph.nodes" :edges="project.graph.edges" :values="telemetry?.values[selected.id]" :stale="stale" :editable="editable" :active="graphActive" :saving="saving" @rename="renameNode" @expand="navigateGraph(selected!.id)" @close="selectedNode = null" @change="editParameter" @disconnect="disconnect" @source="id => selectedNode = id" @undo="task(undoEdit)" @remove="removeNode" @upload="file => task(() => withProgress('Importing and converting clip', () => uploadSample(file)))" @channels="nodeChannels" @control="controlValue" @curve="editCurve" />
+    <NodeModal :apply-script="applyScript" :script-status="telemetry?.scripts?.[selectedNode!]" :osc-message="telemetry?.osc_messages?.[selectedNode!]" :route-targets="telemetry?.route_targets" :route-target="telemetry?.route_targets?.[selected?.id??'']" :samples="projectSamples" :library-samples="librarySamples" :attach-sample="ensureProjectSample" @sample="assignSample" @sample-choices="updateSampleChoices" @sources="updateGranularSources" :input-error="telemetry?.midi_input_error" :io-status="telemetry?.node_io" @io="assignNodeIo" :parts="project?.parts" @part="assignNodePart" :project-id="project?.id" v-if="selected && selectedDescriptor && project" :visualization="telemetry?.visualizations?.[selected.id]" :sample-rate="audioSettings.sample_rate" :block-size="audioSettings.block_size" :interfaces="audioSettings.interfaces.filter(i=>i.enabled).map(i=>({...i,name:devices?.interfaces?.find((d:any)=>d.id===i.id)?.label||i.name}))" :node="selected" :descriptor="selectedDescriptor" :nodes="project.graph.nodes" :edges="project.graph.edges" :values="telemetry?.values[selected.id]" :stale="stale" :editable="editable" :active="graphActive" :saving="saving" @rename="renameNode" @expand="navigateGraph(selected!.id)" @close="selectedNode = null" @change="editParameter" @disconnect="disconnect" @source="id => selectedNode = id" @undo="task(undoEdit)" @remove="removeNode" @upload="file => task(() => withProgress('Importing and converting clip', () => uploadSample(file)))" @channels="nodeChannels" @control="controlValue" @curve="editCurve" />
     <div v-if="creating" class="overlay"><form class="dialog-card" @submit.prevent="createProject"><header><div><div class="eyebrow">START SOMETHING</div><h2>New performance</h2></div><button type="button" class="icon-button" aria-label="Close" @click="creating = false"><X :size="20" /></button></header><label>Project name<input v-model="newName" maxlength="120" required autofocus></label><label>Performance mode</label><label v-for="m in [{ id: 'structured', title: 'Structured', text: 'A repeatable score and a shared timeline.' }, { id: 'conducted', title: 'Conducted', text: 'One conductor, an evolving performance.' }, { id: 'freeform', title: 'Freeform', text: 'Independent players, a common pulse.' }]" :key="m.id" class="mode-choice" :class="{ chosen: newMode === m.id }"><input v-model="newMode" type="radio" :value="m.id"><div><strong>{{ m.title }}</strong><p>{{ m.text }}</p></div></label><HelpNote>Structured mode follows the shared score. Conducted and freeform modes also support individual part launching.</HelpNote><button class="button primary wide" :disabled="busy">{{ busy ? 'Creating…' : 'Create performance' }}<Plus :size="16" /></button></form></div>
 
     <div v-if="revisionsOpen" class="overlay" @click.self="revisionsOpen=false"><section class="dialog-card revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revisions-title"><header><div><div class="eyebrow">PROJECT HISTORY</div><h2 id="revisions-title">Revisions</h2></div><button type="button" class="icon-button" aria-label="Close" @click="revisionsOpen=false"><X :size="20" /></button></header><HelpNote>Select a revision to load it. Editing an older revision creates a new revision at the end of the history.</HelpNote><ol class="revision-list"><li v-for="entry in revisions" :key="entry.revision" :class="{ current: entry.current, loaded: loadedRevision === entry.revision }"><span class="revision-line" aria-hidden="true"></span><button class="revision-entry" @click="loadRevision(entry.revision)"><strong>Revision {{ entry.revision }}</strong><small v-if="entry.current">Current working copy</small><small v-else-if="loadedRevision === entry.revision">Loaded source · next save branches here</small><small v-else>Saved snapshot</small></button></li></ol></section></div>

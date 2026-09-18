@@ -55,7 +55,7 @@ defineExpose({refresh,edit})
 </template>
 <style scoped>
 .modal-header{display:flex;align-items:center;justify-content:space-between}
-.sample-library{border-top:1px solid var(--line);padding:8px 0;display:flex;flex:0 0 auto;flex-direction:column;min-height:0}.sample-library.expanded{flex:1 1 0%}.sample-library-content{display:flex;flex-direction:column;min-height:0;gap:10px;overflow:auto}.sample-library-content>input{width:100%;font-size:11px}.sample-library-actions{display:flex;gap:5px;flex-wrap:wrap}.sample-rows{min-height:0;overflow:auto}.sample-row{padding:8px 0;border-bottom:1px solid var(--line)}.sample-row-title{display:flex;gap:6px;align-items:center}.sample-name{flex:1;min-width:0;text-align:left;overflow-wrap:anywhere}.sample-row small{display:block;color:var(--muted);font-size:10px;margin-top:4px}
+.sample-library{border-top:1px solid var(--line);padding:8px 0;display:flex;flex:0 0 auto;flex-direction:column;min-height:0}.sample-library.expanded{flex:1 1 0%}.sample-library-content{display:flex;flex-direction:column;min-height:0;gap:10px;overflow:auto}.sample-library-content>input{width:100%;font-size:11px}.sample-library-actions{display:flex;gap:5px;flex-wrap:wrap}.sample-rows{min-height:0;overflow:auto}.sample-row{padding:8px 0;border-bottom:1px solid var(--line)}.sample-row-title{display:flex;gap:6px;align-items:center}.sample-name{flex:1;min-width:0;text-align:left;overflow-wrap:anywhere}.sample-row small{display:block;color:var(--ink-muted);font-size:10px;margin-top:4px}
 /* Full browser: pinned header/tools and pager, a scrolling list with a sticky column header, one row per sample. */
 .sample-browser{width:min(1000px,96vw);max-width:1000px}
 .sample-browser[open]{display:flex;flex-direction:column;max-height:calc(100dvh - 64px)}
@@ -65,14 +65,14 @@ defineExpose({refresh,edit})
 .sample-browser-tools :deep(.tag-chips){margin:0}
 .sample-browser-list{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;padding:0 27px}
 .sample-browser-head,.sample-browser-row{display:grid;grid-template-columns:76px minmax(150px,1.1fr) minmax(180px,1.4fr) minmax(140px,2fr) 118px;gap:12px;align-items:center}
-.sample-browser-head{position:sticky;top:0;z-index:1;padding:8px 0;background:#1c2426;border-bottom:1px solid #334044;font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted)}
+.sample-browser-head{position:sticky;top:0;z-index:1;padding:8px 0;background:var(--modal-face);border-bottom:1px solid var(--rail-line);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--ink-muted)}
 .sample-browser-row{padding:7px 0;border-bottom:1px solid var(--line)}
 .sample-browser-row .sample-name{flex:none;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;overflow-wrap:normal}
-.sample-browser-row .sb-details{display:block;min-width:0;margin:0;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sample-browser-row .sb-details{display:block;min-width:0;margin:0;color:var(--ink-muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sb-tags{min-width:0;overflow:hidden}.sb-tags :deep(.tag-chips){margin:0;flex-wrap:nowrap;overflow:hidden}
 .sb-add{justify-self:end}
-.sample-browser-empty{padding:16px 0;color:var(--muted)}
-.sample-browser-pager{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 27px;border-top:1px solid #334044;background:#172023;font-size:12px;color:var(--muted)}
+.sample-browser-empty{padding:16px 0;color:var(--ink-muted)}
+.sample-browser-pager{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 27px;border-top:1px solid var(--rail-line);background:var(--rail-face);font-size:12px;color:var(--ink-muted)}
 .sample-browser-pager .page-size{display:flex;align-items:center;gap:8px}.sample-browser-pager select{padding:6px 26px 6px 8px;font-size:12px}
 .pager-buttons{display:flex;align-items:center;gap:8px}
 @media(max-width:740px){

@@ -6,24 +6,35 @@ import SuggestInput from './SuggestInput.vue'
 import { FIELD_MAX_LIVE, FIELD_MAX_SAMPLES, fieldDefault, fieldValue, removeSlotParameters, slotKeys, swapSlotParameters } from '../granularField'
 // Second dialog of a Granular Field node: the ordered sample slots and the two live
 // inputs. It stacks above the node modal in the browser's top layer.
-const props = defineProps<{ node: GraphNode; samples: SampleEntry[]; edges: GraphEdge[]; nodes: GraphNode[]; values?: Record<string, number>; active: boolean; stale: boolean; editable: boolean; saving: boolean }>()
+const props = defineProps<{ node: GraphNode; samples: SampleEntry[]; library: SampleEntry[]; attach?: (id: string) => Promise<SampleEntry>; edges: GraphEdge[]; nodes: GraphNode[]; values?: Record<string, number>; active: boolean; stale: boolean; editable: boolean; saving: boolean }>()
 const emit = defineEmits<{ close: []; sources: [choices: SampleChoice[], parameters: Record<string, number>]; change: [key: string, value: number] }>()
 const dialog = ref<HTMLDialogElement>()
 const uid = useId()
 const search = ref('')
+const adding = ref(false)
 const live = computed(() => props.active && !props.stale)
 const choices = computed(() => (props.node.sample_choices ?? []).slice(0, FIELD_MAX_SAMPLES))
 const busy = computed(() => !props.editable || props.saving)
-const label = (s: SampleEntry) => `${s.name} (#${s.asset})`
-const match = computed(() => props.samples.find(s => s.asset && (label(s) === search.value || s.name === search.value || String(s.asset) === search.value)))
+// The slot list searches every sample the user can reach; one that is not in the
+// project yet has no asset id until it is picked, and is added to the project then.
+const choosable = computed(() => (props.library.length ? props.library : props.samples))
+const label = (s: SampleEntry) => (s.asset ? `${s.name} (#${s.asset})` : s.name)
+const match = computed(() => choosable.value.find(s => label(s) === search.value || s.name === search.value || (!!s.asset && String(s.asset) === search.value)))
 const driver = (port: string) => props.edges.find(e => e.target === props.node.id && e.target_port === port)
 const sourceName = (edge: GraphEdge) => `${props.nodes.find(n => n.id === edge.source)?.label || edge.source} / ${edge.source_port}`
 const valueOf = (key: string) => fieldValue(props.node, key, live.value ? props.values : undefined)
-function add() {
+async function add() {
   const sample = match.value
-  if (!sample?.asset || busy.value || choices.value.length >= FIELD_MAX_SAMPLES) return
+  if (!sample || adding.value || busy.value || choices.value.length >= FIELD_MAX_SAMPLES) return
+  let asset = sample.asset
+  if (!asset) {
+    if (!props.attach) return
+    adding.value = true
+    try { asset = (await props.attach(sample.id)).asset } finally { adding.value = false }
+    if (!asset || choices.value.length >= FIELD_MAX_SAMPLES) return
+  }
   const slot = choices.value.length + 1, keys = slotKeys(slot)
-  emit('sources', [...choices.value, { asset: sample.asset, name: sample.name, nickname: '' }], { [keys.x]: fieldDefault(keys.x), [keys.y]: fieldDefault(keys.y), [keys.tune]: 0, [keys.gain]: 1, [keys.sample]: 0 })
+  emit('sources', [...choices.value, { asset, name: sample.name, nickname: '' }], { [keys.x]: fieldDefault(keys.x), [keys.y]: fieldDefault(keys.y), [keys.tune]: 0, [keys.gain]: 1, [keys.sample]: 0 })
   search.value = ''
 }
 function rename(i: number, nickname: string) { emit('sources', choices.value.map((s, j) => j === i ? { ...s, nickname: nickname.trim() } : s), {}) }
@@ -58,7 +69,7 @@ onBeforeUnmount(() => { dialog.value?.close(); if (previousFocus?.isConnected) p
     <div class="parameter-list">
       <section class="parameter-row">
         <h3>Sample slots<HelpNote label="Sample slots">Up to eight project samples, numbered from 1. Each slot has a position on the field, a tune offset in semitones and a gain; drag the circles on the field to place them. Slot N also exposes a Sample N ID input on the node, so a Sample selector or number can swap that slot's sample while playing. Moving a slot carries its settings with it.</HelpNote></h3>
-        <div class="sample-add"><label>Find a sample<SuggestInput label="Find field sample" :value="search" :suggestions="samples.filter(s => s.asset).map(s => ({ value: label(s), detail: `${s.channels} ch` }))" placeholder="Search project samples…" :disabled="busy || choices.length >= FIELD_MAX_SAMPLES" @input="text => search = text" @enter="add" /></label><button class="button small" :disabled="busy || !match || choices.length >= FIELD_MAX_SAMPLES" @click="add">Add sample</button></div>
+        <div class="sample-add"><label>Find a sample<SuggestInput label="Find field sample" :value="search" :suggestions="choosable.map(s => ({ value: label(s), detail: s.asset ? `${s.channels} ch` : `${s.channels} ch · add to project` }))" placeholder="Search all your samples…" :disabled="busy || adding || choices.length >= FIELD_MAX_SAMPLES" @input="text => search = text" @enter="add" /></label><button class="button small" :disabled="busy || adding || !match || choices.length >= FIELD_MAX_SAMPLES" @click="add">{{ adding ? 'Adding…' : 'Add sample' }}</button></div>
         <ol>
           <li v-for="(sample, i) in choices" :key="i" class="slot-row">
             <div class="slot-name"><strong>{{ i + 1 }} · {{ sample.name }}</strong><small>Sample ID {{ sample.asset }}<template v-if="live && values?.[`_sample_${i + 1}_missing`]"> · <span class="missing">audio missing</span></template><template v-if="driver(`sample_${i + 1}`)"> · setter cabled from {{ sourceName(driver(`sample_${i + 1}`)!) }}</template></small></div>
