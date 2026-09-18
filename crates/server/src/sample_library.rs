@@ -109,6 +109,27 @@ pub const BUNDLED_KIT: [(&str, &str, &[u8]); 6] = [
         )),
     ),
 ];
+/// A bundled sample that is not a drum pad. The Drum Sampler subgraph indexes
+/// BUNDLED_KIT by position, so anything that is not a pad is seeded from here.
+pub struct Bundled {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub category: &'static str,
+    pub tags: &'static str,
+    pub description: &'static str,
+    pub bytes: &'static [u8],
+}
+pub const BUNDLED_EXTRAS: [Bundled; 1] = [Bundled {
+    id: "bundled-atari-speech",
+    name: "Atari speech (bundled)",
+    category: "Voices",
+    tags: "voice, speech, lo-fi, cc0",
+    description: "CC0 speech-synthesizer phrase through a small-speaker impulse response, by Timbre (freesound.org), bundled with pr0former; see docs/SAMPLE_CREDITS.md.",
+    bytes: include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/voices/atari-speech.wav"
+    )),
+}];
 /// Seed the bundled kit as global library samples visible to every account.
 /// Idempotent: rows that already exist, including ones an administrator has
 /// deleted, are left alone, so the kit never comes back uninvited.
@@ -116,6 +137,7 @@ pub fn seed_bundled(config: &RuntimeConfig, db: &Connection) -> Result<(), Strin
     seed_bundled_into(db, &config.sample_library_dir())
 }
 const BUNDLED_TAGS: &str = "drum, kit, cc0";
+const KIT_DESCRIPTION: &str = "CC0 acoustic drum one-shot recorded by menegass (freesound.org), bundled with pr0former; see docs/SAMPLE_CREDITS.md.";
 fn seed_bundled_into(db: &Connection, dir: &std::path::Path) -> Result<(), String> {
     // Earlier seeds tagged the kit "drums"; retag rows nobody has edited since.
     db.execute(
@@ -123,7 +145,13 @@ fn seed_bundled_into(db: &Connection, dir: &std::path::Path) -> Result<(), Strin
         [BUNDLED_TAGS],
     )
     .map_err(|e| e.to_string())?;
-    for (id, name, bytes) in BUNDLED_KIT {
+    let kit = BUNDLED_KIT.iter().map(|(id, name, bytes)| {
+        (*id, format!("{name} (bundled kit)"), "Drums", BUNDLED_TAGS, KIT_DESCRIPTION, *bytes)
+    });
+    let extras = BUNDLED_EXTRAS
+        .iter()
+        .map(|b| (b.id, b.name.to_string(), b.category, b.tags, b.description, b.bytes));
+    for (id, name, category, tags, description, bytes) in kit.chain(extras) {
         let exists: bool = db
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sample_library WHERE id=?1)",
@@ -141,16 +169,17 @@ fn seed_bundled_into(db: &Connection, dir: &std::path::Path) -> Result<(), Strin
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         std::fs::write(dir.join(format!("{id}.wav")), bytes).map_err(|e| e.to_string())?;
         db.execute(
-            "INSERT INTO sample_library(id,owner,origin,name,description,tags,category,global,ever_global,channels,sample_rate,frames,root_note) VALUES(?1,?2,'bundled',?3,?4,?8,'Drums',1,1,?5,?6,?7,60)",
+            "INSERT INTO sample_library(id,owner,origin,name,description,tags,category,global,ever_global,channels,sample_rate,frames,root_note) VALUES(?1,?2,'bundled',?3,?4,?8,?9,1,1,?5,?6,?7,60)",
             params![
                 id,
                 BUNDLED_OWNER,
-                format!("{name} (bundled kit)"),
-                "CC0 acoustic drum one-shot recorded by menegass (freesound.org), bundled with pr0former; see docs/SAMPLE_CREDITS.md.",
+                name,
+                description,
                 spec.channels,
                 spec.sample_rate,
                 frames,
-                BUNDLED_TAGS
+                tags,
+                category
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -204,17 +233,18 @@ mod bundled_tests {
         let dir = std::env::temp_dir().join(format!("pr0-bundled-{}", crate::uid()));
         seed_bundled_into(&db, &dir).unwrap();
         let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        let bundled = (BUNDLED_KIT.len() + BUNDLED_EXTRAS.len()) as i64;
         assert_eq!(
             count(
                 "SELECT count(*) FROM sample_library WHERE origin='bundled' AND global=1 AND ever_global=1 AND root_note=60"
             ),
-            6
+            bundled
         );
         assert_eq!(
             count(
                 "SELECT count(*) FROM sample_library WHERE owner='pr0former' AND channels=2 AND sample_rate=48000 AND frames>0"
             ),
-            6
+            bundled
         );
         for (id, _, _) in BUNDLED_KIT {
             assert!(dir.join(format!("{id}.wav")).exists(), "{id}");
@@ -223,8 +253,21 @@ mod bundled_tests {
             count(
                 "SELECT count(*) FROM sample_library WHERE origin='bundled' AND tags='drum, kit, cc0'"
             ),
-            6
+            BUNDLED_KIT.len() as i64
         );
+        // Samples outside the kit keep their own category, tags and description.
+        for extra in BUNDLED_EXTRAS {
+            assert!(dir.join(format!("{}.wav", extra.id)).exists(), "{}", extra.id);
+            assert_eq!(
+                count(&format!(
+                    "SELECT count(*) FROM sample_library WHERE id='{}' AND category='{}' AND tags='{}' AND name='{}'",
+                    extra.id, extra.category, extra.tags, extra.name
+                )),
+                1,
+                "{}",
+                extra.id
+            );
+        }
         // Rows seeded with the older "drums" tag are retagged unless edited since.
         db.execute(
             "UPDATE sample_library SET tags='drums, kit, cc0' WHERE id='bundled-snare'",
@@ -258,7 +301,7 @@ mod bundled_tests {
         seed_bundled_into(&db, &dir).unwrap();
         assert_eq!(
             count("SELECT count(*) FROM sample_library WHERE origin='bundled'"),
-            6
+            bundled
         );
         assert_eq!(
             count("SELECT count(*) FROM sample_library WHERE id='bundled-kick' AND deleted=1"),

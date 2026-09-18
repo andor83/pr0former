@@ -4,6 +4,7 @@
 /data
 *.log
 .DS_Store
+__pycache__/
 /.local
 /web/test-results
 /web/playwright-report

@@ -35,6 +35,39 @@ to 48 kHz stereo 16-bit PCM WAV with metadata stripped, so they match the
 stereo voices of the preset and the project sample cache. Total size is under
 one megabyte.
 
+## Other bundled samples
+
+Samples seeded into the shared library that are not drum pads live in
+`crates/server/assets` alongside the kit and are listed in `BUNDLED_EXTRAS`.
+They are seeded the same way — global, idempotent, never resurrected after an
+administrator deletes them — but carry their own category and tags.
+
+| Bundled file | Library name | Category | Source | License |
+| --- | --- | --- | --- | --- |
+| `voices/atari-speech.wav` | Atari speech (bundled) | Voices | https://freesound.org/people/Timbre/sounds/547419/ | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
+
+"2020 remix of i-have-an-atari-speech-synthesizer-and-i-m-not-afraid-to-use-it"
+by **Timbre**: an Atari speech synthesizer recording put through a
+small-speaker impulse response, 5.2 s. Dedicated to the public domain under
+CC0 1.0, so attribution is not required; it is recorded here as a courtesy and
+for traceability, as with the kit.
+
+Conversion: Freesound serves the 44.1 kHz mono 16-bit FLAC original only to
+signed-in users, so the bundled file was made from the public HQ MP3 preview
+(`https://cdn.freesound.org/previews/547/547419_1015240-hq.mp3`) with FFmpeg,
+to 48 kHz stereo 16-bit PCM WAV with metadata stripped. **It therefore carries
+MP3 encoding artifacts the original does not.** To replace it with the
+lossless original, download the FLAC from the sound page while signed in and
+re-run:
+
+```sh
+ffmpeg -y -i 547419__timbre__*.flac -ar 48000 -ac 2 -c:a pcm_s16le \
+  -map_metadata -1 -fflags +bitexact crates/server/assets/voices/atari-speech.wav
+```
+
+The WAV is about 1 MB, which is roughly the size of the whole drum kit; the
+stereo conversion doubles a mono source to match the project convention.
+
 ## Other kits considered
 
 - [Boochi44/free-drum-samples](https://github.com/Boochi44/free-drum-samples):
@@ -78,5 +111,6 @@ may not be re-shipped as samples or a sampler instrument) and Freesound packs
 under CC BY-NC or the legacy Sampling+ terms, such as Carlos_Vaquero's string
 and wind packs.
 
-Add every sample actually shipped or seeded to the table above with its source
-URL and license before it lands in `crates/server/assets` or the seeded library.
+Add every sample actually shipped or seeded to one of the tables above with its
+source URL and license before it lands in `crates/server/assets` or the seeded
+library.

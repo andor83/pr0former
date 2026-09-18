@@ -9,7 +9,7 @@ WASAPI endpoint IDs while showing friendly labels, preserving unambiguous legacy
 numeric route IDs. macOS CoreAudio behavior is unchanged. A local CPAL 0.16 patch
 skips the absent `/dev/dsp` OSS probe; native inventory is cached for 30 seconds.
 See [NATIVE_AUDIO.md](NATIVE_AUDIO.md) for dependencies, routing workflow and limits.
-387 core/DSP/server tests and 139 frontend tests pass, along with the production
+389 core/DSP/server tests and 139 frontend tests pass, along with the production
 build and five focused browser fixture/API cases. CPAL's Windows backend passes
 Windows-target type checking; this is not a full Windows application build.
 Physical Linux/Windows audio, pro-audio gear, hotplug and latency remain unverified.
@@ -104,9 +104,23 @@ jumping the value; `glide` (ms) is a one-pole on the frequency itself, so a step
 frequency eases into its new slope instead of switching in one sample. The first
 sample adopts the set frequency rather than sliding up from zero. Frequency 0 holds
 the ramp in place, and a rising edge on the `sync` input restarts it at zero.
-Validation: five engine tests cover the ramp shape and period, slope change without
-a value jump, glide easing and settling, zero-frequency hold, sync restart, and a
-cabled frequency.
+Sine and Cosine gain a `units` option, read as Radians (the default, so existing
+patches are unchanged), Degrees, or Normalized where 1 is one whole turn. A Phasor
+therefore drives a full trig cycle with no conversion node in between.
+Validation: seven engine tests cover the ramp shape and period, slope change
+without a value jump, glide easing and settling, zero-frequency hold, sync restart,
+a cabled frequency, the three trig input units (including a node saved without the
+parameter), and a normalized phasor driving one whole sine cycle.
+
+## Bundled sample library beyond the drum kit (2026-09-18)
+
+`BUNDLED_EXTRAS` seeds bundled samples that are not drum pads, each with its own
+category and tags; the Drum Sampler subgraph still indexes `BUNDLED_KIT` by
+position, so the kit is unchanged. The first entry is "Atari speech (bundled)"
+(category Voices), a CC0 sound by Timbre from freesound.org. Freesound serves the
+lossless original only to signed-in users, so the bundled WAV was converted from
+the public MP3 preview and carries MP3 artifacts; docs/SAMPLE_CREDITS.md records
+the source, the licence and the command to swap in the FLAC original.
 
 ## Smooth change node (2026-09-17)
 

@@ -3241,7 +3241,7 @@
   },
   "phasor": {
     "title": "Drive a circular pan from one phasor",
-    "explanation": "Phasor runs a 0→1 ramp once every ten seconds. Multiplying it by 2π turns the ramp into an angle, and Sine of that angle sweeps the pan smoothly from side to side. Cosine of the same angle gives the quarter-cycle-offset partner for a second destination.",
+    "explanation": "Phasor runs a 0→1 ramp once every ten seconds. Sine reads it with Input units set to Normalized, so one ramp is one whole cycle and the pan sweeps smoothly from side to side. Cosine of the same ramp gives the quarter-cycle-offset partner for a second destination.",
     "steps": [],
     "graph": {
       "nodes": [
@@ -3258,24 +3258,15 @@
           }
         },
         {
-          "id": "n1",
-          "kind": "multiply",
-          "label": "× 2π",
-          "x": 360,
-          "y": 0,
-          "channels": 2,
-          "parameters": {
-            "b": 6.283185307179586
-          }
-        },
-        {
           "id": "n2",
           "kind": "sin",
           "label": "Sine",
-          "x": 720,
+          "x": 420,
           "y": 0,
           "channels": 2,
-          "parameters": {}
+          "parameters": {
+            "units": 2
+          }
         },
         {
           "id": "n3",
@@ -3314,13 +3305,6 @@
         {
           "id": "e0",
           "source": "n0",
-          "source_port": "out",
-          "target": "n1",
-          "target_port": "a"
-        },
-        {
-          "id": "e1",
-          "source": "n1",
           "source_port": "out",
           "target": "n2",
           "target_port": "a"

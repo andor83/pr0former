@@ -543,8 +543,16 @@ impl RuntimeNode {
             "not" => scalar = (a == 0.) as u8 as f64,
             "abs" => scalar = a.abs(),
             "sqrt" => scalar = a.sqrt(),
-            "sin" => scalar = a.sin(),
-            "cos" => scalar = a.cos(),
+            "sin" | "cos" => {
+                // Input units is a node option, not a port: radians, degrees, or
+                // normalized turns, where 1 is a whole cycle.
+                let angle = match self.p("units").round() as i64 {
+                    1 => a.to_radians(),
+                    2 => a * TAU,
+                    _ => a,
+                };
+                scalar = if self.kind == "sin" { angle.sin() } else { angle.cos() };
+            }
             "log" => scalar = a.ln(),
             "exp" => scalar = a.exp(),
             "mtof" => scalar = 440. * 2_f64.powf((a - 69.) / 12.),

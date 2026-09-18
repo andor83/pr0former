@@ -589,6 +589,8 @@ pub fn catalog() -> Vec<Descriptor> {
             "Math",
             if kind == "atodb" {
                 "Convert amplitude magnitude to dB, limited by minimum and maximum dB (default -90 to +6). Amplitude 1 is 0 dB; amplitudes above 1 produce positive dB. Reversed limits are ordered automatically."
+            } else if matches!(kind, "sin" | "cos") {
+                "Single-input conversion. Input units reads the input as Radians (the default), Degrees, or Normalized, where 1 is one whole turn — so a Phasor's 0→1 ramp drives a full cycle with no conversion node in between."
             } else {
                 "Single-input conversion."
             },
@@ -599,6 +601,12 @@ pub fn catalog() -> Vec<Descriptor> {
                     param("a", "Input", "", -100000., 100000., 0.),
                     param("min", "Minimum dB", "dB", -180., 100., -90.),
                     param("max", "Maximum dB", "dB", -180., 100., 6.),
+                ]
+            } else if matches!(kind, "sin" | "cos") {
+                // Radians stays the default so existing patches read unchanged.
+                vec![
+                    param("a", "Input", "", -100000., 100000., 0.),
+                    param("units", "Input units", "", 0., 2., 0.),
                 ]
             } else {
                 vec![param("a", "Input", "", -100000., 100000., 0.)]

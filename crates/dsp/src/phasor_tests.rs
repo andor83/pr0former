@@ -114,3 +114,39 @@ fn a_cabled_frequency_drives_the_ramp() {
     let values = trace(&mut e, "f", 1000);
     assert_eq!(values.windows(2).filter(|w| w[1] < w[0]).count(), 4, "one second at the cabled 5 Hz: {values:?}");
 }
+#[test]
+fn trig_nodes_read_radians_degrees_or_turns() {
+    // A quarter cycle expressed in each unit is the sine peak and the cosine zero.
+    for (units, quarter) in [(0., std::f64::consts::FRAC_PI_2), (1., 90.), (2., 0.25)] {
+        let g = Graph {
+            nodes: vec![
+                node("s", "sin", &[("a", quarter), ("units", units)]),
+                node("c", "cos", &[("a", quarter), ("units", units)]),
+            ],
+            edges: vec![],
+        };
+        let mut e = Engine::prepare(g, 1000.).unwrap();
+        e.render(&[], &mut [[0.; 8]]);
+        assert!((out(&e, "s") - 1.).abs() < 1e-9, "units {units}: {}", out(&e, "s"));
+        assert!(out(&e, "c").abs() < 1e-9, "units {units}: {}", out(&e, "c"));
+    }
+    // A node saved before Input units existed has none, and still reads radians.
+    let g = Graph { nodes: vec![node("s", "sin", &[("a", std::f64::consts::FRAC_PI_2)])], edges: vec![] };
+    let mut e = Engine::prepare(g, 1000.).unwrap();
+    e.render(&[], &mut [[0.; 8]]);
+    assert!((out(&e, "s") - 1.).abs() < 1e-9, "{}", out(&e, "s"));
+}
+#[test]
+fn a_normalized_phasor_drives_one_whole_sine_cycle() {
+    let g = Graph {
+        nodes: vec![phasor("p", &[("frequency", 2.)]), node("s", "sin", &[("units", 2.)])],
+        edges: vec![pr0_core::Edge { id: "e".into(), source: "p".into(), source_port: "out".into(), target: "s".into(), target_port: "a".into() }],
+    };
+    let mut e = Engine::prepare(g, 1000.).unwrap();
+    let values = trace(&mut e, "s", 500);
+    // 2 Hz at 1 kHz: one 500-sample ramp is exactly one sine cycle, peaking a
+    // quarter of the way through and troughing at three quarters.
+    assert!((values[125] - 1.).abs() < 1e-6, "{}", values[125]);
+    assert!((values[375] + 1.).abs() < 1e-6, "{}", values[375]);
+    assert!(values[0].abs() < 1e-9 && values[250].abs() < 1e-6, "zero crossings");
+}
