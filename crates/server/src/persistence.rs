@@ -12,6 +12,7 @@ enum Job {
     Reset,
     Data(String, Vec<crate::recordings::Chunk>, Option<LoopChunk>),
     Retire(String, Box<Engine>),
+    Discard(Box<Engine>),
     Barrier(oneshot::Sender<Result<(), String>>),
 }
 pub struct Persistence {
@@ -75,6 +76,7 @@ impl Persistence {
                             }
                             result
                         }
+                        Job::Discard(engine) => {drop(engine); Ok(())}
                         Job::Retire(project, mut engine) => {
                             engine.finish_loops();
                             engine.finish_recordings();
@@ -159,6 +161,8 @@ impl Persistence {
             self.send(Job::Data(project.into(), records, chunk));
         }
     }
+    /// Uninstalled preparation has no runtime recordings to flush.
+    pub fn discard(&mut self, engine: Box<Engine>) { self.send(Job::Discard(engine)); }
     pub fn retire(&mut self, project: String, engine: Engine) {
         self.send(Job::Retire(project, Box::new(engine)));
     }

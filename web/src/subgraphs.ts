@@ -16,7 +16,7 @@ export function nodeDescriptor(node: GraphNode, nodes: GraphNode[], catalog: Des
   if (node.kind === 'granular_field') return granularFieldDescriptor(base, node)
   if (node.kind === 'subgraph') {
     const ports = (direction: string) => nodes.filter(n => n.parent === node.id && n.kind.startsWith(`subgraph_${direction}_`)).map(n => ({ id: n.id, label: n.label, signal: n.kind.split('_').at(-1) as Signal, fixed_channels: n.channels }))
-    return {...base, inputs: ports('input'), outputs: ports('output')}
+    return {...base, inputs: [{id:'state',label:'State',signal:'control',fixed_channels:null},...ports('input')], outputs: ports('output')}
   }
   if (node.kind.startsWith('subgraph_input_')) return {...base, inputs: []}
   if (node.kind.startsWith('subgraph_output_')) return {...base, outputs: []}
@@ -36,6 +36,7 @@ export function duplicateNodes(nodes: GraphNode[], edges: GraphEdge[], selection
   const included = descendants(nodes, roots)
   const ids = new Map([...included].map(id => [id, newId()]))
   const copies: GraphNode[] = nodes.filter(n => included.has(n.id)).map(n => ({...JSON.parse(JSON.stringify(n)), id: ids.get(n.id)!, parent: n.parent ? ids.get(n.parent) || n.parent : null, x: n.x + (roots.includes(n.id) ? 40 : 0), y: n.y + (roots.includes(n.id) ? 40 : 0)}))
+  for(const n of copies)for(const slot of n.states?.slots??[])for(const saved of slot.nodes)saved.id=ids.get(saved.id)??saved.id
   const connections: GraphEdge[] = edges.filter(e => included.has(e.source) && included.has(e.target)).map(e => ({...e, id: newId(), source: ids.get(e.source)!, target: ids.get(e.target)!, source_port: nodes.find(n=>n.id===e.source)?.kind === 'subgraph' ? ids.get(e.source_port) || e.source_port : e.source_port, target_port: nodes.find(n=>n.id===e.target)?.kind === 'subgraph' ? ids.get(e.target_port) || e.target_port : e.target_port}))
   return {nodes: copies, edges: connections, id: ids.get(roots[0]!)!}
 }
@@ -62,7 +63,7 @@ export function makeSubgraph(nodes: GraphNode[], edges: GraphEdge[], selection: 
     const port=(direction==='input'?d.inputs:d.outputs).find(p=>p.id===portId)
     const parameter=direction==='input'?d.parameters.find(p=>p.id===portId):undefined
     if (!port&&!parameter) throw new Error('Missing port while grouping.')
-    const signal=port?.signal||'control', contract=n.kind==='subgraph'?original.get(portId)!:n
+    const signal=port?.signal||'control', contract=n.kind==='subgraph'&&portId!=='state'?original.get(portId)!:n
     const boundary:GraphNode={id:newId(),kind:`subgraph_${direction}_${signal}`,label:`${n.label} · ${port?.label||parameter?.label}`,parent:group.id,channels:signal==='control'?1:port?.fixed_channels||contract.channels,x:direction==='input'?0:Math.max(...chosen.map(n=>n.x))+300,y:80+(direction==='input'?ins++:outs++)*190,parameters:signal==='spectral'?{size:contract.parameters.size??1024,overlap:contract.parameters.overlap??4}:{}}
     nodes.push(boundary);return boundary.id
   }

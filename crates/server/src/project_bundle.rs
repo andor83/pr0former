@@ -18,6 +18,7 @@ const LIMIT: usize = 256 * 1024 * 1024;
 fn assets(p: &Project) -> BTreeSet<u32> {
     let mut ids = BTreeSet::new();
     for n in &p.graph.nodes {
+        if let Some(bank)=&n.states {for slot in &bank.slots {for node in &slot.nodes {ids.extend(node.assets());}}}
         if [
             "sample",
             "phase_vocoder",
@@ -357,6 +358,7 @@ pub async fn import(
         mapping.insert(old, id);
     }
     for n in &mut p.graph.nodes {
+        if let Some(bank)=&mut n.states {bank.remap(&Default::default(),&mapping);}
         if [
             "sample",
             "phase_vocoder",

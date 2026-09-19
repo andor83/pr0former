@@ -9,7 +9,7 @@ export interface IoConfig { port: string; address: string; destination: string }
 export interface SampleChoice { asset: number; name: string; nickname: string }
 export interface ScriptConfig { revision?:number; source:string; inputs:{name:string;initial:number}[]; outputs:{name:string;initial:number}[]; bindings:{kind:'send'|'receive'|'publish';name:string}[] }
 export interface ScriptStatus {error?:string|null;faulted:boolean;events:number;dropped:number;late:number;logs:{sample:number;level:string;message:string}[]}
-export interface GraphNode { script?:ScriptConfig|null; sample_choices?: SampleChoice[]; io?: IoConfig | null; part_id?: string | null; library?:{id:string;version:number}|null; parent?: string | null; id: string; kind: string; label: string; x: number; y: number; channels: number; parameters: Record<string, number>; control_value?: number | string | null }
+export interface GraphNode { control_positions?:(number|null)[]; states?:import("./states").StateBank|null; script?:ScriptConfig|null; sample_choices?: SampleChoice[]; io?: IoConfig | null; part_id?: string | null; library?:{id:string;version:number}|null; parent?: string | null; id: string; kind: string; label: string; x: number; y: number; channels: number; parameters: Record<string, number>; control_value?: number | string | null }
 export interface GraphEdge { id: string; source: string; source_port: string; target: string; target_port: string }
 export type MarkKind = 'text'|'rehearsal'|'cue'|'expression'|'tempo'|'lyric'|'chord'
 export interface StaffMark {id:string;beat:number;kind:MarkKind;text:string}

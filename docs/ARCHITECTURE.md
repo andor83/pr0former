@@ -26,6 +26,64 @@ MIDI 1.0 on each part’s selected channel and the OSC pitch/velocity output con
 
 The WebRTC adapter encodes the selected master mix or dedicated monitor output as 10 ms stereo Opus packets. Projects can contain up to 32 monitor outputs. Dedicated outputs are not summed into hardware speakers; mono duplicates to stereo and wider bundles explicitly select their first two channels. Monitor PCM collection occurs outside Engine::render on the orchestration worker. A project member selects `monitor_node` when offering SDP; the server validates the node. Removal of a selected output yields silence, never fallback to the master. Feed changes currently require reconnecting. Optional microphone uplinks decode into bounded browser-input queues. Codec/network work occurs outside device callbacks. Native and browser sources are separately identifiable nodes. There is no external STUN/TURN dependency. Audio admission reserves one of 32 slots before negotiation and keeps it through peer cleanup; one project/user may have only one pending or live session. Duplicate offers return 409 and require explicit disconnect. Cancellation marks pending offers and final registration rechecks cancellation and active-show ownership. Peer closure happens outside the registry lock; reservation identity prevents delayed cleanup from removing a replacement.
 
+## Subgraph saved states
+
+Subgraph nodes optionally carry a `states` bank: a monotonically increasing
+`next_slot` and at most 64 numbered, uniquely named snapshots. Names are trimmed,
+case-sensitive and limited to 256 UTF-8 bytes. `pr0-core::states::Options` is an
+explicit option whitelist: node identity/kind, label, channels, parameters,
+literals, controller positions, sample choices, script and local I/O configuration.
+Snapshots include all descendants, including nested containers, but exclude
+positions, connections, parent/library references, nested banks, part/user
+assignments and DSP history. Undo retains the bank's slot high-water mark.
+Project bundles and library versions include assets used only by saved states;
+copy/insertion remaps saved node identities and imported asset references.
+
+`POST /api/projects/{id}/subgraphs/{node}/states` manages slots with an expected
+revision and `save`, `rename` or `delete` action. It follows normal editing and
+performance-lock rules. Saving offline captures configured options; saving online
+requests an authoritative option snapshot between engine blocks. Connected
+parameter values do not replace defaults, and cable-driven slider positions are
+omitted. `POST .../subgraphs/{node}/recall` takes `selector`, either an integer slot
+number or exact string name (numeric strings remain names). Manual recall requires
+editing permission and a loaded engine, but works under the performance lock.
+
+Flattening retains each subgraph as an internal State control receiver, without
+adding a visible boundary node. Its inline pending datum and last-seen datum track
+changes and explicit repeated events; held values do not retrigger. Selector
+history transfers across graph replacements. Requests drain outside rendering in
+sample order into a latest-request mailbox. Because only one project graph can
+own the engine, one preparation worker and one pending mailbox cover the active
+project. Preparation runs under the existing setup serialization while playback
+continues. It matches surviving descendant IDs/kinds, reports skipped IDs, validates
+the candidate against current wiring, sample ownership, scripts, device routes and
+resource limits, and prepares storage off-render. Project revision, runtime and
+request generations are checked before installation. Superseded preparation is
+destroyed on the persistence worker without flushing uninstalled recordings.
+
+Recall uses graph replacement between DSP blocks. Compatible histories and both
+musical clocks survive; Smooth change retains its value, progress and velocity
+even when smoothing options change. Restored Value and literal controls publish
+again, with cable authority retained and without restoring note/bang history.
+The worker's effective project remains separate from SQLite's authored project.
+Later authored edits merge changed fields (individual parameter keys) with other
+runtime options. Modal edits also send an `X-Pr0former-Fields` request mask, so an
+explicit edit can replace a recalled field even when its authored value is
+unchanged. The mask is validated against the candidate and never persisted.
+Disabling the engine clears recalled options. Effective
+options are available to project members via `/effective-options` and live events;
+the endpoint also exposes up to 32 recent recall failure diagnostics.
+
+Only completed installations broadcast `state_recalled`, with a UUID event ID,
+exact restored/skipped IDs and effective options. These events are independent of
+telemetry. Clients deduplicate them, animate only currently visible restored nodes
+for 650 ms, restart feedback on a subsequent recall, and clear presentation state
+on navigation/reconnect. Reduced motion uses a static outline. Effective options
+and feedback never enter undo or project revisions. Preparation/snapshot/event
+serialization occurs outside `Engine::render` and device callbacks. Recall is a
+block-boundary operation, not a sample-accurate scheduled recall; no physical
+hardware deadline or latency guarantee is established by these software tests.
+
 ## Sample shortlists and switching
 
 `sample_selector` stores up to 64 ordered `sample_choices` (project-local numeric

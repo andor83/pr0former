@@ -305,6 +305,7 @@ pub async fn save(
         .collect();
     assets.extend(graph.nodes.iter().flat_map(|n| n.sample_choices.iter().map(|s| s.asset)));
     assets.extend(graph.nodes.iter().flat_map(field_sample_setters));
+    for n in &graph.nodes {if let Some(bank)=&n.states {for slot in &bank.slots {for node in &slot.nodes {assets.extend(node.assets());}}}}
     let mut bytes = vec![];
     for asset in assets {
         bytes.push((
@@ -467,6 +468,7 @@ pub async fn insert(
         .map(|n| n.id.clone())
         .collect();
     for n in &mut graph.nodes {
+        if let Some(bank)=&mut n.states {bank.remap(&ids,&linked.iter().copied().collect());}
         // Library copies cannot inherit a source part from another performance.
         n.part_id = None;
         if n.id == root {
@@ -486,7 +488,7 @@ pub async fn insert(
                 .cloned()
                 .ok_or_else(|| bad("Library output missing"))?;
         }
-        if containers.contains(&e.target) {
+        if containers.contains(&e.target) && e.target_port != "state" {
             e.target_port = ids
                 .get(&e.target_port)
                 .cloned()
@@ -528,6 +530,7 @@ pub async fn insert(
             use tokio::io::AsyncWriteExt;
             file.write_all(&bytes).await.map_err(internal)?;
             for n in &mut graph.nodes {
+                if let Some(bank)=&mut n.states {bank.remap(&Default::default(),&BTreeMap::from([(old,asset)]));}
                 for choice in &mut n.sample_choices {
                     if choice.asset == old { choice.asset = asset; }
                 }

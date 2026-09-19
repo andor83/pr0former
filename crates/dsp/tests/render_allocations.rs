@@ -63,6 +63,8 @@ fn script_bridge_commands_events_overflow_and_replacement_do_not_allocate() {
 }
 fn node(id: &str, kind: &str) -> Node {
     Node {
+        states: None,
+        control_positions: vec![],
         script: None,
         sample_choices: vec![],
         id: id.into(),
@@ -414,4 +416,18 @@ fn independent_part_players_repeat_retrigger_stop_and_retire_without_heap_activi
         0,
         "part playback must not allocate or free storage while rendering or carrying state"
     );
+}
+
+#[test]
+fn state_selector_emission_and_recall_transfer_are_allocation_free() {
+    let mut source=node("source","value");source.parameters.insert("value".into(),1.);
+    let receiver=node("receiver","subgraph");
+    let graph=Graph{nodes:vec![source,receiver],edges:vec![Edge{id:"state".into(),source:"source".into(),source_port:"out".into(),target:"receiver".into(),target_port:"state".into()}]};
+    let mut engine=pr0_dsp::Engine::prepare(graph.clone(),48000.).unwrap();
+    let mut replacement=pr0_dsp::Engine::prepare(graph,48000.).unwrap();
+    let restored=vec!["source".into()];
+    CHECK.set(true);CALLS.set(0);
+    engine.render(&[],&mut [[0.;8];128]);replacement.carry_recall_state(&mut engine);
+    for _ in 0..256 {replacement.republish_restored(&restored);replacement.render(&[],&mut [[0.;8];128]);}
+    CHECK.set(false);assert_eq!(CALLS.get(),0);assert_eq!(replacement.take_state_requests().len(),1);
 }

@@ -8,3 +8,6 @@ license.workspace = true
 pr0-core.workspace = true
 rustfft = "6"
 rtrb = "0.3"
+
+[dev-dependencies]
+serde_json.workspace = true

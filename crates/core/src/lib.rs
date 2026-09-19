@@ -1,4 +1,5 @@
 //! Versioned project model and graph validation. No device or UI dependencies.
+pub mod states;
 pub mod documentation;
 pub mod script;
 use serde::{Deserialize, Serialize};
@@ -163,6 +164,10 @@ pub struct SampleChoice {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub states: Option<states::Bank>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_positions: Vec<Option<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<script::Script>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -495,8 +500,8 @@ pub fn catalog() -> Vec<Descriptor> {
         "Subgraph",
         "▣",
         "Subgraphs",
-        "Open a nested graph. Named boundary nodes define its ports.",
-        vec![],
+        "Open a nested graph. State accepts a slot number or exact name; named boundary nodes define other ports.",
+        vec![port("state", Control)],
         vec![],
         vec![],
         &[],
@@ -2251,6 +2256,10 @@ impl Graph {
         metadata.validate_flat_inner(false)?;
         let nodes: BTreeMap<_, _> = self.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
         for node in &self.nodes {
+            if let Some(bank) = &node.states {
+                if node.kind != "subgraph" { return Err("Only subgraphs have state banks".into()); }
+                bank.validate()?;
+            }
             if let Some(reference) = &node.library {
                 if node.kind != "subgraph"
                     || reference.id.is_empty()
@@ -2280,7 +2289,8 @@ impl Graph {
             }
         }
         let mut flat = self.clone();
-        flat.nodes.retain(|n| n.kind != "subgraph");
+        // Containers themselves are invisible control receivers in the flat engine.
+        for n in &mut flat.nodes { n.states = None; }
         for n in &mut flat.nodes {
             n.parent = None;
         }
@@ -2311,7 +2321,7 @@ impl Graph {
                 edge.source = port.id.clone();
                 edge.source_port = "out".into();
             }
-            if target.kind == "subgraph" {
+            if target.kind == "subgraph" && edge.target_port != "state" {
                 let port = nodes
                     .get(edge.target_port.as_str())
                     .ok_or("Missing subgraph input port")?;
@@ -2337,6 +2347,10 @@ impl Graph {
         self.validate_flat_inner(true)
     }
     fn validate_flat_inner(&self, check_routes: bool) -> Result<Schedule, String> {
+        for n in &self.nodes {
+            if n.control_positions.len()>8 || (!n.control_positions.is_empty() && !matches!(n.kind.as_str(),"knobs"|"sliders")) || n.control_positions.iter().flatten().any(|v| !v.is_finite() || *v<n.parameters.get("min").copied().unwrap_or(0.) || *v>n.parameters.get("max").copied().unwrap_or(1.)) {return Err("Invalid saved controller positions".into());}
+        }
+
         if self.nodes.iter().filter(|n| n.kind == "record").count() > 16 {
             return Err("At most 16 record nodes are supported".into());
         }
@@ -2959,7 +2973,7 @@ impl Graph {
                     && (edge.target_port == "target" || self.nodes[target].kind == "send_control"))
                 && !matches!(
                     self.nodes[target].kind.as_str(),
-                    "control_visualizer" | "control_input" | "osc_output" | "console_out" | "toggle"
+                    "control_visualizer" | "control_input" | "osc_output" | "console_out" | "toggle" | "subgraph"
                 )
                 && !(self.nodes[target].kind.starts_with("subgraph_")
                     && self.nodes[target].kind.ends_with("_control"))
@@ -3311,6 +3325,8 @@ pub fn demo_project(id: String, name: String, mode: Mode) -> Project {
         .map(|(id, kind, x, y)| {
             let d = catalog.iter().find(|d| d.kind == *kind).unwrap();
             Node {
+                states: None,
+                control_positions: vec![],
                 script: None,
                 sample_choices: vec![],
                 part_id: None,

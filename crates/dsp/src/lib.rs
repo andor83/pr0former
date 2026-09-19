@@ -165,6 +165,9 @@ struct Voice {
 }
 mod controllers;
 struct RuntimeNode {
+    recall_pending: Option<(u64, visualizer::Datum)>,
+    republish: bool,
+    structural: Vec<bool>,
     pad_triggers: [bool; 6],
     script: Option<Box<script::Bridge>>,
     script_config: Option<pr0_core::script::Script>,
@@ -473,6 +476,13 @@ impl RuntimeNode {
             }
         }
         match self.kind.as_str() {
+            "subgraph" => {
+                if !self.bindings.is_empty() && (!self.input_event_only[0] || self.input_events[0]) {
+                    let value = self.input_text.map(visualizer::Datum::Text).unwrap_or(visualizer::Datum::Number(input[0]));
+                    if self.last_control != Some(value) || self.input_events[0] { self.recall_pending=Some((clock.sample,value)); }
+                    self.last_control=Some(value);
+                }
+            }
             "js_control" => {
                 if let Some(script) = &self.script { self.control = script.outputs; scalar = self.control[0]; }
             }
@@ -504,13 +514,15 @@ impl RuntimeNode {
                 } else {
                     let value = if connected && !self.manual_override { self.control_input_seen.unwrap_or(incoming) } else { self.fallback };
                     match value { visualizer::Datum::Number(v) => scalar=v, visualizer::Datum::Text(v) => self.control_text=Some(v) }
-                    self.control_event = scalar != self.previous || self.control_text != self.toggle_text || (!self.manual_override && self.input_events[0]);
+                    self.control_event = self.republish || scalar != self.previous || self.control_text != self.toggle_text || (!self.manual_override && self.input_events[0]);
                     self.control_event_only = self.p("changes_only") == 1. || (connected && self.input_event_only[0]);
-                    self.previous=scalar;self.toggle_text=self.control_text;
+                    self.previous=scalar;self.toggle_text=self.control_text;self.republish=false;
                 }
             }
             "control_visualizer" => {
                 if self.bindings.is_empty() {
+                    self.control_event = self.republish;
+                    self.republish = false;
                     match self.fallback {
                         visualizer::Datum::Number(value) => scalar = value,
                         visualizer::Datum::Text(value) => self.control_text = Some(value),
@@ -598,6 +610,8 @@ impl RuntimeNode {
                     self.control[index] = controls.values[index];
                 }
                 scalar = self.control[0];
+                self.control_event = self.republish;
+                self.republish = false;
             }
             "piano" => {
                 let values = std::array::from_fn(|i| self.input[i][0]);
@@ -941,11 +955,12 @@ impl RuntimeNode {
                     .bindings
                     .iter()
                     .any(|b| !b.parameter && b.destination == 0);
-                if !driven || input[0] != 0. {
+                if self.republish || !driven || input[0] != 0. {
                     self.count = self.p("value");
                 }
                 // A triggered zero is an explicit command, not absence of a signal.
-                self.control_event = driven && input[0] != 0.;
+                self.control_event = self.republish || (driven && input[0] != 0.);
+                self.republish=false;
                 scalar = self.count;
             }
             "random" => {
@@ -1644,6 +1659,8 @@ impl Engine {
                 None
             };
             nodes.push(RuntimeNode {
+                recall_pending: None, republish: false,
+                structural: d.parameters.iter().map(|p| p.structural).collect(),
                 granular_field,
                 lfo_origin: 0,
                 lfo_sync_high: false,
@@ -1752,6 +1769,7 @@ impl Engine {
                         decimals: (n.kind == "sliders").then_some(p("decimals", 2.) as i32),
                     });
                     controls.values = [controls.value(min); 8];
+                    for (i,value) in n.control_positions.iter().enumerate() {if let Some(value)=value {controls.values[i]=controls.value(*value);}}
                     controls
                 }),
                 midi_frame: Box::new(midi_events::Buffer::new()),
@@ -2131,6 +2149,58 @@ impl Engine {
             graph,
         })
     }
+    /// Called off-render. One latest request per node is stored inline during rendering.
+    pub fn take_state_requests(&mut self) -> Vec<(String, pr0_core::ControlValue)> {
+        let mut pending:Vec<_>=self.nodes.iter_mut().filter_map(|n| n.recall_pending.take().map(|(sample,v)| (sample,n.id.clone(), match v {
+            visualizer::Datum::Number(v)=>pr0_core::ControlValue::Number(v),
+            visualizer::Datum::Text(v)=>pr0_core::ControlValue::Text(v.as_str().to_owned()),
+        }))).collect();
+        pending.sort_by_key(|(sample,_,_)|*sample);
+        pending.into_iter().map(|(_,id,value)|(id,value)).collect()
+    }
+    /// Authoritative literal/default snapshot. Cable values are never copied into defaults.
+    pub fn snapshot_options(&self, graph:&mut Graph) {
+        for n in &mut graph.nodes {
+            let Some(live)=self.nodes.iter().find(|v|v.id==n.id) else {continue};
+            for (i,key) in live.names.iter().enumerate() {
+                if n.parameters.contains_key(key) {
+                    n.parameters.insert(key.clone(),live.defaults[i]);
+                }
+            }
+            if let Some(controls)=&live.controllers {
+                n.control_positions=(0..controls.count).map(|i|if live.kind=="sliders" && live.bindings.iter().any(|b|!b.parameter && b.signal==pr0_core::Signal::Control && b.destination==i) {None} else {Some(controls.values[i])}).collect();
+            }
+            if matches!(n.kind.as_str(), "control_input" | "toggle") {
+                n.control_value=Some(match live.fallback {
+                    visualizer::Datum::Number(v)=>pr0_core::ControlValue::Number(v),
+                    visualizer::Datum::Text(v)=>pr0_core::ControlValue::Text(v.as_str().to_owned()),
+                });
+            }
+        }
+    }
+    /// Prepared literals publish once after installation. Connected inputs keep authority.
+    pub fn republish_restored(&mut self, ids:&[String]) {
+        for node in &mut self.nodes {
+            if !ids.contains(&node.id) {continue;}
+            if let Some(controls)=&mut node.controllers {
+                node.republish=true;
+                if let Some(saved)=self.graph.nodes.iter().find(|n|n.id==node.id) {
+                    for (i,value) in saved.control_positions.iter().enumerate() {
+                        if !node.bindings.iter().any(|b|!b.parameter && b.signal==pr0_core::Signal::Control && b.destination==i) {if let Some(v)=value {controls.values[i]=controls.value(*v);}}
+                    }
+                }
+            }
+            if node.kind=="control_visualizer" && node.bindings.is_empty() {node.republish=true;}
+            if node.kind=="value" {node.republish=true;}
+            if node.kind=="control_input" && !node.bindings.is_empty() {node.manual_override=false;}
+            if node.kind=="control_input" && node.p("mode")!=0. && node.bindings.is_empty() {
+                node.manual_override=false; node.republish=true;
+            }
+            if node.kind=="toggle" && node.bindings.is_empty() {
+                if let visualizer::Datum::Number(v)=node.fallback { node.count=v; node.bang=true; }
+            }
+        }
+    }
     /// Latest received/prepared OSC values, serialized outside rendering.
     pub fn osc_messages(&self) -> std::collections::BTreeMap<String, (u64, pr0_core::ControlValue)> {
         self.nodes.iter().filter(|node| matches!(node.kind.as_str(), "osc_input" | "osc_output"))
@@ -2278,7 +2348,9 @@ impl Engine {
     /// Move state for unchanged nodes into a prepared graph. Binding indices
     /// belong to each compiled graph and must never move with runtime history.
     /// Runs between render blocks; swapping prepared storage does not allocate.
-    pub fn carry_node_state(&mut self, previous: &mut Self) {
+    pub fn carry_node_state(&mut self, previous: &mut Self) { self.carry_state(previous, false); }
+    pub fn carry_recall_state(&mut self, previous: &mut Self) { self.carry_state(previous, true); }
+    fn carry_state(&mut self, previous: &mut Self, recall: bool) {
         if self.clock.sample_rate != previous.clock.sample_rate {
             return;
         }
@@ -2310,8 +2382,8 @@ impl Engine {
                 && target.channels == source.channels
                 && target.recorder.as_ref().map(|r| r.channels)
                     == source.recorder.as_ref().map(|r| r.channels)
-                && (target.defaults == source.defaults || target.kind == "piano")
-                && target.fallback == source.fallback
+                && (target.defaults == source.defaults || target.kind == "piano" || (recall && target.names == source.names && target.structural.iter().enumerate().all(|(i, structural)| !structural || target.defaults[i]==source.defaults[i])))
+                && (recall || target.fallback == source.fallback)
                 && target.latency == source.latency
                 && target.bindings.len() == source.bindings.len()
                 && target
@@ -2328,9 +2400,14 @@ impl Engine {
                             && a.signal == b.signal
                             && target.compensations[i].len() == source.compensations[i].len()
                     });
+            // Selector history survives every compatible identity, independently of options.
+            if target.kind == "subgraph" && source.kind == "subgraph" {
+                self.nodes[index].last_control = source.last_control;
+            }
             if !compatible {
                 let target = &mut self.nodes[index];
                 let source = &mut previous.nodes[source_index];
+                if recall && target.kind == "smooth_change" && source.kind == "smooth_change" { target.smoothing=source.smoothing; }
                 if target.kind == source.kind {
                     if let (Some(a), Some(b)) = (&mut target.controllers, &source.controllers) {
                         for i in 0..a.count.min(b.count) {
@@ -2375,7 +2452,14 @@ impl Engine {
             for (old, new) in target.midi_lanes.iter_mut().zip(&mut source.midi_lanes) {
                 std::mem::swap(&mut old.source, &mut new.source);
             }
-            if target.kind == "piano" {
+            if recall {
+                std::mem::swap(&mut target.defaults, &mut source.defaults);
+                std::mem::swap(&mut target.fallback, &mut source.fallback);
+                for i in 0..target.values.len() {
+                    if !target.bindings.iter().any(|b|b.parameter && b.destination==i) { target.values[i]=target.defaults[i]; }
+                }
+            }
+            if target.kind == "piano" && !recall {
                 // Octave is display configuration; changing it must not release held notes.
                 std::mem::swap(&mut target.defaults, &mut source.defaults);
                 std::mem::swap(&mut target.values, &mut source.values);
@@ -6885,7 +6969,7 @@ mod unified_midi_tests {
 mod console_tests {
     use super::*;
     use pr0_core::{ControlValue, Edge, Node};
-    fn node(id:&str,kind:&str)->Node { Node {script:None,sample_choices:vec![],id:id.into(),kind:kind.into(),label:id.into(),x:0.,y:0.,channels:1,parameters:Default::default(),part_id:None,io:None,library:None,parent:None,control_value:None} }
+    fn node(id:&str,kind:&str)->Node { Node {states:None,control_positions:vec![],script:None,sample_choices:vec![],id:id.into(),kind:kind.into(),label:id.into(),x:0.,y:0.,channels:1,parameters:Default::default(),part_id:None,io:None,library:None,parent:None,control_value:None} }
     fn engine()->Engine {
         Engine::prepare(Graph {nodes:vec![node("source","control_input"),node("debug","console_out")],edges:vec![Edge{id:"wire".into(),source:"source".into(),source_port:"out".into(),target:"debug".into(),target_port:"in".into()}]},48000.).unwrap()
     }
@@ -6953,3 +7037,6 @@ mod lfo_tests;
 mod phasor_tests;
 #[cfg(test)]
 mod smooth_change_tests;
+
+#[cfg(test)]
+mod state_tests;

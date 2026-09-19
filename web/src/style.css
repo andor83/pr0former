@@ -272,3 +272,12 @@ body{position:fixed;inset:0}
 .field-readout{display:flex;flex-direction:column;gap:6px;font-size:12px}.field-readout input{width:100%}.field-readout output{font-variant-numeric:tabular-nums;color:var(--amber)}.field-readout .text-button{padding:0;text-align:left;font-size:11px}
 .granular-sources-modal{width:min(760px,96vw)}
 @media(max-width:740px){.field-layout{grid-template-columns:1fr}}
+
+/* Recall feedback is a separate outer layer, preserving node colors and selection. */
+.vue-flow__node.state-recalled-a::after,.vue-flow__node.state-recalled-b::after{content:'';position:absolute;inset:-5px;border:2px solid #39e3ef;border-radius:12px;pointer-events:none;z-index:20;animation:state-glow-a 650ms ease-out both}
+.vue-flow__node.state-recalled-b::after{animation-name:state-glow-b}
+@keyframes state-glow-a{0%{opacity:.15;box-shadow:0 0 0 #39e3ef}12%{opacity:1;box-shadow:0 0 18px 5px #39e3efaa}100%{opacity:0;box-shadow:0 0 1px transparent}}
+@keyframes state-glow-b{0%{opacity:.15;box-shadow:0 0 0 #39e3ef}12%{opacity:1;box-shadow:0 0 18px 5px #39e3efaa}100%{opacity:0;box-shadow:0 0 1px transparent}}
+@media(prefers-reduced-motion:reduce){.vue-flow__node.state-recalled-a::after,.vue-flow__node.state-recalled-b::after{animation:none;opacity:1;box-shadow:none}}
+.subgraph-open{position:absolute;bottom:38px;left:50%;transform:translateX(-50%);min-height:44px;white-space:nowrap}
+.canvas-caption:has(button){display:flex;align-items:center;gap:8px}.canvas-caption button{min-height:44px}

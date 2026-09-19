@@ -61,6 +61,7 @@ mod score_automation;
 mod settings;
 mod linux_audio;
 mod subgraphs;
+mod states;
 mod tls;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
@@ -124,6 +125,7 @@ impl From<Value> for Event {
 }
 #[derive(Clone)]
 struct App {
+    recalls: states::Recalls,
     config: Arc<RuntimeConfig>,
     conductor_midi: std::sync::mpsc::SyncSender<conductor_midi::Message>,
     presence: Arc<Mutex<presence::Presence>>,
@@ -742,6 +744,7 @@ async fn store_import(app: &App, owner: String, mut p: Project) -> Api<Json<Proj
     p.validate().map_err(bad)?;
     scripts::validate_graph(&p.graph, None).await.map_err(bad)?;
     samples::validate_choices(&app.config, &p).map_err(bad)?;
+    states::validate_banks(&app,&p).await?;
     project_bundle::validate_assets(&app.config, &p).map_err(bad)?;
     settings::validate_routes(&p, &settings::read(&app.config)).map_err(bad)?;
     let mut db = app.db.lock().unwrap();
@@ -841,10 +844,18 @@ async fn update_project(
     let previous = load(&app, &id)?;
     if p.local_audio_assignments != previous.local_audio_assignments && !matches!(membership.as_str(),"owner"|"editor") {return Err(Failure(StatusCode::FORBIDDEN,"Only owners and editors can assign local audio inputs".into()));}
     for target in p.local_audio_assignments.values() { role(&app,&id,target).map_err(|_|bad("Assign local audio inputs to ensemble members"))?; }
+    // Revision restores and undo must not reuse a previously allocated slot number.
+    for node in &mut p.graph.nodes {
+        if let Some(old)=previous.graph.nodes.iter().find(|n|n.id==node.id && n.kind==node.kind).and_then(|n|n.states.as_ref()) {
+            let bank=node.states.get_or_insert_with(Default::default);
+            bank.next_slot=bank.next_slot.max(old.next_slot);
+        }
+    }
     sample_library::assign_roots(&app.db.lock().unwrap(), &previous, &mut p)?;
     p.validate().map_err(bad)?;
     scripts::validate_graph(&p.graph, Some(&previous.graph)).await.map_err(bad)?;
     samples::validate_choices(&app.config, &p).map_err(bad)?;
+    states::validate_banks(&app,&p).await?;
     validate_conductor(&app, &p)?;
     let active = app.active.lock().unwrap().as_deref() == Some(&id);
     settings::validate_route_changes(&previous, &p, &settings::read(&app.config)).map_err(bad)?;
@@ -888,24 +899,35 @@ async fn update_project(
             .map_err(|message| Failure(StatusCode::CONFLICT, message))?;
     }
     let prepared = if app.graph.lock().unwrap().as_deref() == Some(&id) {
-        let prepared_project = p.clone();
+        let (runtime, _) = states::snapshot(&app, &id).await?;
+        let mut prepared_project = p.clone();
+        prepared_project.graph = pr0_core::states::reconcile(&previous.graph, &p.graph, &runtime.graph);
+        if let Some(fields)=headers.get("x-pr0former-fields") {
+            let fields:std::collections::BTreeMap<String,Vec<String>>=serde_json::from_str(fields.to_str().map_err(bad)?).map_err(bad)?;
+            pr0_core::states::apply_fields(&mut prepared_project.graph,&p.graph,&fields).map_err(bad)?;
+        }
+        prepared_project.validate().map_err(bad)?;
+        scripts::validate_graph(&prepared_project.graph, None).await.map_err(bad)?;
         let config = app.config.clone();
-        Some(
+        let effective_project = prepared_project.clone();
+        Some((effective_project,
             tokio::task::spawn_blocking(move || samples::prepare(&config, &prepared_project))
                 .await
                 .map_err(internal)?
                 .map_err(bad)?,
-        )
+        ))
     } else {
         None
     };
     update_working_copy(&app, &mut p)?;
     app.media.reconcile_inputs(&p).await;
-    if let Some(engine) = prepared {
+    if let Some((mut effective, engine)) = prepared {
+        effective.revision = p.revision;
         send(
             &app,
             audio::Command::Replace {
-                project: p.clone(),
+                recall: None,
+                project: effective,
                 engine: Box::new(engine),
             },
         )?;
@@ -1778,6 +1800,7 @@ async fn remove_member(
         return Err(bad("Project owners cannot be removed"));
     }
     let mut project = load(&app, &id)?;
+    let previous_project=project.clone();
     let changed = unassign_member_parts(&mut project, &target);
     let conductor_changed = project.conductor.as_deref() == Some(&target);
     if conductor_changed {
@@ -1785,14 +1808,18 @@ async fn remove_member(
     }
     let project_changed = changed > 0 || conductor_changed;
     let prepared = if project_changed && app.graph.lock().unwrap().as_deref() == Some(&id) {
-        let next = project.clone();
+        let (runtime,_)=states::snapshot(&app,&id).await?;
+        let mut next = project.clone();
+        next.graph=pr0_core::states::reconcile(&previous_project.graph,&project.graph,&runtime.graph);
+        next.validate().map_err(bad)?;
+        let effective=next.clone();
         let config = app.config.clone();
-        Some(
+        Some((effective,
             tokio::task::spawn_blocking(move || samples::prepare(&config, &next))
                 .await
                 .map_err(internal)?
                 .map_err(bad)?,
-        )
+        ))
     } else {
         None
     };
@@ -1829,11 +1856,13 @@ async fn remove_member(
         .map_err(internal)?;
         tx.commit().map_err(internal)?;
     }
-    if let Some(engine) = prepared {
+    if let Some((mut effective,engine)) = prepared {
+        effective.revision=project.revision;
         send(
             &app,
             audio::Command::Replace {
-                project: project.clone(),
+                recall: None,
+                project: effective,
                 engine: Box::new(engine),
             },
         )?;
@@ -2560,6 +2589,7 @@ pub(crate) fn assemble(config: Arc<RuntimeConfig>) -> Result<Assembled, String> 
     );
     let (conductor_midi, conductor_rx) = std::sync::mpsc::sync_channel(1024);
     let app = App {
+        recalls: states::Recalls::new(),
         config: config.clone(),
         conductor_midi,
         presence: Arc::new(Mutex::new(presence::Presence::default())),
@@ -2577,6 +2607,7 @@ pub(crate) fn assemble(config: Arc<RuntimeConfig>) -> Result<Assembled, String> 
         desktop_session: session.clone(),
         media,
     };
+    states::start(app.clone());
     conductor_midi::start(app.clone(), conductor_rx);
     app.osc.listen(&app);
     start_autosave(app.clone());
@@ -2604,6 +2635,9 @@ pub(crate) fn assemble(config: Arc<RuntimeConfig>) -> Result<Assembled, String> 
         .route("/api/projects/{id}/preview", get(preview))
         .route("/api/projects/{id}/control", put(control_input))
         .route("/api/projects/{id}/piano", put(piano_note))
+        .route("/api/projects/{id}/effective-options", get(states::effective))
+        .route("/api/projects/{id}/subgraphs/{node}/states", post(states::manage))
+        .route("/api/projects/{id}/subgraphs/{node}/recall", post(states::recall))
         .route("/api/projects/{id}/export", get(project_bundle::export))
         .route("/api/projects/bundle/inspect", post(project_bundle::inspect).layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)))
         .route("/api/projects/bundle/import", post(project_bundle::import).layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)))

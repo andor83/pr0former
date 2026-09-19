@@ -21,6 +21,7 @@ pub fn monotonic_ms() -> f64 {
     START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.
 }
 pub enum Command {
+    Snapshot { project:String, reply:oneshot::Sender<Result<(Project,u64),String>> },
     LiveControl { project: String, node: String, value: f64, revision: u64 },
     LocalMidi {
         project: String,
@@ -84,6 +85,7 @@ pub enum Command {
     Test(bool),
     Load(Project, Box<Engine>),
     Replace {
+        recall: Option<crate::states::Install>,
         project: Project,
         engine: Box<Engine>,
     },
@@ -195,6 +197,7 @@ fn run(
     let mut shutting_down = false;
     let mut project: Option<Project> = None;
     let mut epoch = String::new();
+    let mut runtime_generation=0_u64;
     let mut log_project = String::new();
     let mut outputs: Vec<Output> = vec![];
     let mut enabled = false;
@@ -301,6 +304,7 @@ fn run(
 
             match command {
                 Command::Shutdown(reply) => {
+                    runtime_generation=runtime_generation.wrapping_add(1);
                     outputs.clear();
                     inputs.clear();
                     // Nothing may reopen a device after this point, including a
@@ -629,15 +633,31 @@ fn run(
                         q.extend(pcm);
                     }
                 }
+                Command::Snapshot {project:id,reply} => {
+                    let result=match (&project,&engine) {
+                        (Some(p),Some(e)) if p.id==id => {let mut p=p.clone(); e.snapshot_options(&mut p.graph); Ok((p,runtime_generation))},
+                        _=>Err("Engine is not enabled for this project".into()),
+                    };
+                    let _=reply.send(result);
+                }
                 Command::Replace {
+                    recall,
                     project: p,
                     engine: prepared,
                 } => {
+                    if let Some(r)=&recall {
+                        if runtime_generation!=r.runtime_generation || r.current.load(std::sync::atomic::Ordering::SeqCst)!=r.generation || !project.as_ref().is_some_and(|old|old.id==p.id && old.revision==p.revision) {
+                            let _=recall.unwrap().reply.send(Err("Recall superseded by a runtime change".into()));
+                            persistence.discard(prepared);
+                            continue;
+                        }
+                    }
                     if let (Some(e), Some((part, staff, node, channel, pitch, _))) =
                         (engine.as_mut(), audition.take())
                     {
                         audition_note(e, &part, staff, node.as_deref(), channel, pitch, 0);
                     }
+                    runtime_generation=runtime_generation.wrapping_add(1);
                     // Retire changed/deleted external routes before installing their replacements.
                     let next_routes = prepare_node_routes(&p);
                     let retired: Vec<_> = node_routes
@@ -665,7 +685,7 @@ fn run(
                             Some(seq) => seq.replace(&p, previous, &mut prepared, &io),
                             None => crate::performance::Sequencer::new(&p),
                         });
-                        prepared.carry_node_state(previous);
+                        if recall.is_some() { prepared.carry_recall_state(previous); } else { prepared.carry_node_state(previous); }
                         if let Some(seq) = &sequencer {
                             seq.seed_part_nodes(previous, &mut prepared);
                         }
@@ -684,11 +704,19 @@ fn run(
                     if let (Some(old), Some(previous)) = (&project, engine.take()) {
                         persistence.retire(old.id.clone(), previous);
                     }
+                    let success = if let Some(r)=recall {
+                        prepared.republish_restored(&r.restored);
+                        let event=json!({"type":"state_recalled","project_id":p.id,"event_id":uuid::Uuid::new_v4().to_string(),"node":r.node,"restored":r.restored,"skipped":r.skipped,"nodes":p.graph.nodes.iter().map(pr0_core::states::Options::capture).collect::<Vec<_>>()});
+                        Some((r.reply,event))
+                    } else { None };
+                    let _=events.send(json!({"type":"effective_options","project_id":p.id,"nodes":p.graph.nodes.iter().map(pr0_core::states::Options::capture).collect::<Vec<_>>()}).into());
                     project = Some(p);
                     engine = Some(*prepared);
+                    if let Some((reply,event))=success {let _=events.send(event.clone().into());let _=reply.send(Ok(event));}
                 }
 
                 Command::Load(p, mut e) => {
+                    runtime_generation=runtime_generation.wrapping_add(1);
                     max_work_us = 0;
                     max_block_gap_us = 0;
                     previous_block = Instant::now();
@@ -732,6 +760,7 @@ fn run(
                     }
                 }
                 Command::Unload => {
+                    runtime_generation=runtime_generation.wrapping_add(1);
                     audition = None;
                     if let (Some(p), Some(e)) = (&project, engine.take()) {
                         persistence.retire(p.id.clone(), e);
@@ -767,6 +796,7 @@ fn run(
                     value,
                     revision,
                 } => {
+                    runtime_generation=runtime_generation.wrapping_add(1);
                     if let Some(e) = engine.as_mut() {
                         if let Err(err) = e.parameter(&node, &key, value) {
                             device_error = err;
@@ -862,6 +892,7 @@ fn run(
                     }
                 }
                 Command::LiveControl { project: id, node, value, revision } => {
+                    runtime_generation=runtime_generation.wrapping_add(1);
                     if project.as_ref().is_some_and(|p| p.id == id && p.revision == revision) {
                         if let Some(e) = engine.as_mut() { e.external_control(&node, &pr0_core::ControlValue::Number(value)); }
                     }
@@ -871,6 +902,7 @@ fn run(
                     value,
                     revision,
                 } => {
+                    runtime_generation=runtime_generation.wrapping_add(1);
                     if let Some(e) = engine.as_mut() {
                         e.control(&node, &value);
                     }
@@ -953,6 +985,7 @@ fn run(
                     value,
                     cancel,
                 } => {
+                    runtime_generation=runtime_generation.wrapping_add(1);
                     if project.as_ref().is_some_and(|p| p.id == id) {
                         if let Some(e) = engine.as_mut() {
                             if cancel {
@@ -1298,6 +1331,11 @@ fn run(
                 }
             }
 
+            for (node, selector) in e.take_state_requests() {
+                if project.as_ref().and_then(|p|p.graph.nodes.iter().find(|n|n.id==node)).and_then(|n|n.states.as_ref()).and_then(|b|b.select(&selector)).is_some() {
+                    let _=events.send(json!({"type":"state_request","runtime_generation":runtime_generation,"project_id":project.as_ref().unwrap().id,"node":node,"selector":selector}).into());
+                }
+            }
             // Bounded OSC value output: the newest pending value goes out once
             // per node interval; intermediate values are coalesced, never queued.
             osc_values.retain(|node, _| node_routes.iter().any(|(id, _, _)| id == node));

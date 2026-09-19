@@ -61,6 +61,8 @@ async function toggleEngine(){if(!project.value)return;await api(`/projects/${pr
 
 const stage = ref(false), stageMonitor = ref(false)
 import { api } from './api'
+import StateManager from './components/StateManager.vue'
+import { effectiveNode, RecallFeedback, type StateOptions } from './states'
 import { nodeDescriptor, descendants, duplicateNodes, makeSubgraph } from './subgraphs'
 import { FIELD_MAX_SAMPLES, pruneGranularEdges } from './granularField'
 import {scoreMeasures} from './score'
@@ -406,6 +408,47 @@ function visibilityChanged() { if (document.visibilityState === 'visible') link.
 const beat = computed(() => presentationClock.read(telemetry.value, active.value, stale.value, now.value + offset))
 const meterBeat = computed(() => beat.value * (project.value?.beat_unit || 4) / 4)
 const graphParent = ref<string | null>(null)
+const managingStates=ref(false), stateBusy=ref(false), stateStatus=ref(''), stateError=ref('')
+const runtimeOptions=ref<Record<string,StateOptions>>({}), recallGlows=ref<Record<string,number>>({})
+const recallFeedback=new RecallFeedback()
+let recallSerial=0, effectiveRequest=0
+const glowTimers=new Set<ReturnType<typeof setTimeout>>()
+const stateBank=computed(()=>project.value?.graph.nodes.find(n=>n.id===graphParent.value)?.states)
+const canRecallState=computed(()=>['owner','editor','conductor'].includes(role.value))
+function acceptEffective(nodes:StateOptions[]){
+ const next:Record<string,StateOptions>={}
+ for(const option of nodes){const authored=project.value?.graph.nodes.find(n=>n.id===option.id);if(authored&&effectiveNode(authored,{[option.id]:option})!==authored)next[option.id]=option}
+ if(JSON.stringify(runtimeOptions.value)!==JSON.stringify(next))runtimeOptions.value=next
+}
+async function refreshEffective(){
+ const id=project.value?.id, request=++effectiveRequest
+ if(!id||!graphActive.value){runtimeOptions.value={};return}
+ try{const response=await api<{nodes:StateOptions[]}>(`/projects/${id}/effective-options`);if(project.value?.id===id&&graphActive.value&&request===effectiveRequest)acceptEffective(response.nodes)}catch{/* Engine may have been disabled while the snapshot was in flight. */}
+}
+watch([()=>project.value?.id,()=>project.value?.revision,graphActive,connected],()=>{void refreshEffective()})
+watch([graphParent,()=>project.value?.id,connected],()=>{recallGlows.value={};stateStatus.value='';stateError.value='';managingStates.value=false})
+onBeforeUnmount(()=>{for(const timer of glowTimers)clearTimeout(timer)})
+function stateRecalled(message:{event_id:string;restored:string[];skipped:string[];nodes:StateOptions[]}){
+ ++effectiveRequest;acceptEffective(message.nodes)
+ stateStatus.value=`Loaded state${message.skipped.length?` · ${message.skipped.length} nodes skipped`:''}`;stateError.value=''
+ for(const id of recallFeedback.accept(message.event_id,message.restored,visibleNodes.value.map(n=>n.id))){
+   let serial=++recallSerial;if(recallGlows.value[id]&&serial%2===recallGlows.value[id]!%2)serial=++recallSerial;recallGlows.value={...recallGlows.value,[id]:serial}
+   const timer=setTimeout(()=>{glowTimers.delete(timer);if(recallGlows.value[id]===serial){const next={...recallGlows.value};delete next[id];recallGlows.value=next}},650);glowTimers.add(timer)
+ }
+}
+async function manageState(action:string,slot?:number,name?:string){
+ if(!project.value||!graphParent.value||stateBusy.value)return
+ stateBusy.value=true;stateError.value=''
+ const previous=clone(project.value)
+ try{const saved=await api<Project>(`/projects/${previous.id}/subgraphs/${graphParent.value}/states`,'POST',{revision:previous.revision,action,slot,name});undo.value=[...undo.value.slice(-49),previous];if(project.value?.id===saved.id)project.value=saved;stateStatus.value=action==='save'?'State saved':''}
+ catch(e){stateError.value=String(e);managingStates.value=true}finally{stateBusy.value=false}
+}
+async function loadState(slot:number){
+ if(!project.value||!graphParent.value)return
+ stateBusy.value=true;stateError.value='';stateStatus.value='Preparing state…'
+ try{await api(`/projects/${project.value.id}/subgraphs/${graphParent.value}/recall`,'POST',{selector:slot})}catch(e){stateError.value=String(e);stateStatus.value=''}finally{stateBusy.value=false}
+}
+
 /** Remembered pan/zoom for the current project and subgraph; VueFlow mounts straight into it instead of refitting. */
 const graphView = ref<GraphViewport | null>(null)
 watch([() => project.value?.id, graphParent], ([id, parent]) => {
@@ -418,11 +461,12 @@ onViewportChangeEnd((v) => {
   graphView.value = next
   writeView(graphViewKey(id), { ...(readView<Record<string, GraphViewport>>(graphViewKey(id)) || {}), [graphParent.value || 'root']: next })
 })
-const visibleNodes = computed(() => project.value?.graph.nodes.filter(n => (n.parent || null) === graphParent.value) || [])
+const effectiveNodes=computed(()=>project.value?.graph.nodes.map(n=>effectiveNode(n,graphActive.value?runtimeOptions.value:{}))??[])
+const visibleNodes = computed(() => effectiveNodes.value.filter(n => (n.parent || null) === graphParent.value))
 const visibleEdges = computed(() => project.value?.graph.edges.filter(e => visibleNodes.value.some(n => n.id === e.source)) || [])
 const breadcrumbs = computed(() => {
   const path: GraphNode[] = []; let id = graphParent.value
-  while (id) { const node = project.value?.graph.nodes.find(n => n.id === id); if (!node || path.includes(node)) break; path.unshift(node); id = node.parent || null }
+  while (id) { const node = effectiveNodes.value.find(n => n.id === id); if (!node || path.includes(node)) break; path.unshift(node); id = node.parent || null }
   return path
 })
 watch(() => project.value?.graph.nodes, nodes => { if (graphParent.value && !nodes?.some(n=>n.id===graphParent.value)) void navigateGraph(null) })
@@ -434,8 +478,8 @@ function openNode(id: string) {
   const node = project.value?.graph.nodes.find(n=>n.id===id)
   if (node?.kind === 'subgraph') void navigateGraph(id); else selectedNode.value = id
 }
-const selected = computed(() => project.value?.graph.nodes.find(n => n.id === selectedNode.value))
-const selectedDescriptor = computed(() => selected.value && project.value ? nodeDescriptor(selected.value, project.value.graph.nodes, descriptors.value) : undefined)
+const selected = computed(() => {const node=project.value?.graph.nodes.find(n => n.id === selectedNode.value);return node?effectiveNode(node,graphActive.value?runtimeOptions.value:{}):undefined})
+const selectedDescriptor = computed(() => selected.value && project.value ? nodeDescriptor(selected.value, effectiveNodes.value, descriptors.value) : undefined)
 const part = computed(() => project.value?.parts.find(p => p.id === selectedPart.value) || project.value?.parts[0])
 const partPlayback = computed(() => active.value ? telemetry.value?.parts?.find(p => p.id === part.value?.id) : undefined)
 watch(() => telemetry.value?.parts, states => {
@@ -497,7 +541,7 @@ function resizeContainer(id: string, width: number, height: number) {
   frame.parameters.width = width; frame.parameters.height = height
   void task(() => saveProject(next))
 }
-const flowNodes = computed<FlowNode[]>(() => placedNodes.value.map(n => ({ id: n.id, ...flowPlacement(n), draggable: graphEditable.value, data: { previewPart:(id:string)=>partPlayerPreview.value=id,partName:project.value!.parts.find(p=>p.id===n.part_id)?.name,parameter:queueNodeParameter,projectId:project.value!.id,controller:controllerGesture.bind(null,project.value!.id),canMute:canMuteInput(n.id),connected:project.value!.graph.edges.filter(e=>e.target===n.id).map(e=>e.target_port),piano:pianoNote,active:graphActive.value,editable:editable.value&&!progress.value,driven:project.value!.graph.edges.some(e=>e.target===n.id&&e.target_port==='in'),setControl:graphControl,previewControl:previewGraphControl,bang:bangControl,node: n, descriptor: nodeDescriptor(n, project.value!.graph.nodes, descriptors.value), open: openNode, edit: (id: string) => selectedNode.value = id, connectPort, toggleSelection, contextMenu: openNodeMenu, resize: resizeContainer } })))
+const flowNodes = computed<FlowNode[]>(() => placedNodes.value.map(n => ({ id: n.id, class: recallGlows.value[n.id] ? `state-recalled-${recallGlows.value[n.id]!%2 ? "a":"b"}` : undefined, ...flowPlacement(n), draggable: graphEditable.value, data: { previewPart:(id:string)=>partPlayerPreview.value=id,partName:project.value!.parts.find(p=>p.id===n.part_id)?.name,parameter:queueNodeParameter,projectId:project.value!.id,controller:controllerGesture.bind(null,project.value!.id),canMute:canMuteInput(n.id),connected:project.value!.graph.edges.filter(e=>e.target===n.id).map(e=>e.target_port),piano:pianoNote,active:graphActive.value,editable:editable.value&&!progress.value,driven:project.value!.graph.edges.some(e=>e.target===n.id&&e.target_port==='in'),setControl:graphControl,previewControl:previewGraphControl,bang:bangControl,node: n, descriptor: nodeDescriptor(n, effectiveNodes.value, descriptors.value), open: openNode, edit: (id: string) => selectedNode.value = id, connectPort, toggleSelection, contextMenu: openNodeMenu, resize: resizeContainer } })))
 const flowEdges = computed<FlowEdge[]>(() => visibleEdges.value.filter(e=>!inputDrag.hidden.value.has(e.id)).map(e => {
   const source = project.value!.graph.nodes.find(n => n.id === e.source)
   const d = source ? nodeDescriptor(source, project.value!.graph.nodes, descriptors.value) : undefined
@@ -575,6 +619,9 @@ function connect(id: string) {
     conductorMidi.receive(message)
     if(message.type==='local_midi_status')localMidi.receive(message)
     if(message.type==='piano_error'||message.type==='control_error')report(new Error(message.error))
+    if(message.type==='state_recalled')stateRecalled(message)
+    if(message.type==='effective_options'){++effectiveRequest;acceptEffective(message.nodes)}
+    if(message.type==='state_status'&&message.node===graphParent.value){stateStatus.value=message.status==='preparing'?'Preparing state…':'';stateError.value=message.error??''}
     if(message.type==='samples'){void samplePanel.value?.refresh();if(libraryLoadedFor.value)void loadLibrarySamples(true)}
     if(message.type==='hardware_levels'){hardwareLevels.value=message;hardwareReceived.value=performance.now()}
     if(message.type==='project_save') acceptSaveStatus(id, message.save)
@@ -611,13 +658,13 @@ function connect(id: string) {
 }
 async function createProject() { busy.value = true; await task(async () => { const p = await api<Project>('/projects', 'POST', { name: newName.value, mode: newMode.value }); creating.value = false; await refresh(); await openProject(p.id) }); busy.value = false }
 function remember() { if (project.value) undo.value = [...undo.value.slice(-49), clone(project.value)] }
-async function saveProject(next: Project, record = true) {
+async function saveProject(next: Project, record = true, fields?:Record<string,string[]>) {
   if(next.conducted?.midi_bindings)next.conducted.midi_bindings=next.conducted.midi_bindings.filter(b=>b.action==='part'||b.action==='arm'?next.parts.some(p=>p.id===b.target):b.action==='set'?next.conducted!.sets.some(s=>s.id===b.target):true)
   if(next.local_audio_assignments)next.local_audio_assignments=Object.fromEntries(Object.entries(next.local_audio_assignments).filter(([id])=>next.graph.nodes.some(n=>n.id===id&&n.kind==='browser_input')))
   if (!project.value || saving.value) return
   const previous = clone(project.value)
   saving.value = true
-  try { const saved = await api<Project>(`/projects/${next.id}`, 'PUT', next); if (record) undo.value = [...undo.value.slice(-49), previous]; if (project.value?.id === saved.id && saved.revision >= project.value.revision) project.value = saved }
+  try { const saved = await api<Project>(`/projects/${next.id}`, 'PUT', next, fields?{'X-Pr0former-Fields':JSON.stringify(fields).replace(/[^\x20-\x7e]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0'))}:{}); if (record) undo.value = [...undo.value.slice(-49), previous]; if (project.value?.id === saved.id && saved.revision >= project.value.revision) project.value = saved }
   catch (e) { saveRequested.value = null; report(e); const latest = await api<{ project: Project }>(`/projects/${next.id}`); if (project.value?.id === latest.project.id && latest.project.revision >= project.value.revision) project.value = latest.project }
   finally { saving.value = false }
 }
@@ -703,7 +750,7 @@ function updateSampleChoices(choices: import('./types').SampleChoice[]) {
   if (!project.value || !selected.value || !graphEditable.value) return
   const next = clone(project.value)
   next.graph.nodes.find(n => n.id === selected.value!.id)!.sample_choices = choices
-  void task(() => saveProject(next))
+  void task(() => saveProject(next, true, {[selected.value!.id]:["sample_choices"]}))
 }
 // Granular Field slot edits save the list and the per-slot settings together, and drop cables into slots that no longer exist.
 function updateGranularSources(choices: import('./types').SampleChoice[], parameters: Record<string, number>) {
@@ -713,13 +760,13 @@ function updateGranularSources(choices: import('./types').SampleChoice[], parame
   for (const [key, value] of Object.entries(parameters)) node.parameters[key] = value
   for (const key of Object.keys(node.parameters)) if (/^(sample|source)_\d+/.test(key) && !(key in parameters) && Number(key.split('_')[1]) > node.sample_choices.length) delete node.parameters[key]
   next.graph.edges = pruneGranularEdges(next.graph.edges, node.id, node.sample_choices.length)
-  void task(() => saveProject(next))
+  void task(() => saveProject(next,true,{[node.id]:['sample_choices',...Object.keys({...selected.value!.parameters,...parameters}).filter(k=>/^(sample|source)_/.test(k)).map(k=>`parameters.${k}`)]}))
 }
-function assignSample(sample:SampleEntry){if(!project.value||!selected.value)return;const next=clone(project.value),node=next.graph.nodes.find(n=>n.id===selected.value!.id)!;node.parameters.asset=sample.asset!;if(node.kind!=='convolution_reverb')node.channels=sample.channels;void task(()=>saveProject(next))}
+function assignSample(sample:SampleEntry){if(!project.value||!selected.value)return;const next=clone(project.value),node=next.graph.nodes.find(n=>n.id===selected.value!.id)!;node.parameters.asset=sample.asset!;if(node.kind!=='convolution_reverb')node.channels=sample.channels;void task(()=>saveProject(next,true,{[node.id]:['parameters.asset','channels']}))}
 function assignNodeIo(io: IoConfig) {
   if (!project.value || !selected.value || !graphEditable.value) return
   const next = clone(project.value), node = next.graph.nodes.find(n => n.id === selected.value!.id)
-  if (node) { node.io = io; void task(() => saveProject(next)) }
+  if (node) { node.io = io; void task(() => saveProject(next, true, {[selected.value!.id]:["io"]})) }
 }
 function assignNodePart(id: string) {
   if (!project.value || !selected.value || !graphEditable.value) return
@@ -862,7 +909,7 @@ function editParameter(key: string, value: number) {
       const mode=node.parameters.mode??2,min=node.parameters.min??-100000,max=node.parameters.max??100000
       node.control_value=mode===4?(typeof node.control_value==='string'?node.control_value:''):mode===0?0:Math.max(min,Math.min(max,mode===1?Math.round(Number(node.control_value)||0):Number(node.control_value)||0))
     }
-    void task(() => saveProject(next))
+    void task(() => saveProject(next, true, {[node.id]:[`parameters.${key}`,...(node.kind==='control_input'?['control_value']:[])]}))
     return
   }
   queueNodeParameter(selected.value.id,key,value)
@@ -909,7 +956,7 @@ function removeEdges(ids: string[], nodeIds: string[] = []) {
   void task(() => saveProject(next))
 }
 function disconnect(edge: GraphEdge) { removeEdges([edge.id]) }
-async function uploadSample(file: File) { if (!project.value || !selected.value) return; const form = new FormData(); form.append('sample', file); const response = await fetch(`/api/projects/${project.value.id}/samples`, { method: 'POST', headers: { 'X-Pr0former': '1' }, body: form }); const result = await response.json(); if (!response.ok) throw new Error(result.error); const next = clone(project.value); const node = next.graph.nodes.find(n => n.id === selected.value!.id)!; node.parameters.asset = result.asset; node.channels = result.channels; await saveProject(next);await samplePanel.value?.refresh() }
+async function uploadSample(file: File) { if (!project.value || !selected.value) return; const form = new FormData(); form.append('sample', file); const response = await fetch(`/api/projects/${project.value.id}/samples`, { method: 'POST', headers: { 'X-Pr0former': '1' }, body: form }); const result = await response.json(); if (!response.ok) throw new Error(result.error); const next = clone(project.value); const node = next.graph.nodes.find(n => n.id === selected.value!.id)!; node.parameters.asset = result.asset; node.channels = result.channels; await saveProject(next,true,{[node.id]:['parameters.asset','channels']});await samplePanel.value?.refresh() }
 const pendingControls=new Map<string,number|string>()
 let controlsBusy=false
 function graphControl(id:string,value:number|string){if(!editable.value)return;pendingControls.set(id,value);void flushControls()}
@@ -1019,12 +1066,12 @@ async function bangControl(node:string){
     await api(`/projects/${id}/control`,'PUT',{node,revision:project.value.revision})
   })
 }
-function controlValue(value:number|string){if(selected.value && ['toggle','control_input'].includes(selected.value.kind)){graphControl(selected.value.id,value);return}if(!project.value||!selected.value||!graphEditable.value)return;const next=clone(project.value);next.graph.nodes.find(n=>n.id===selected.value!.id)!.control_value=value;void task(()=>saveProject(next))}
+function controlValue(value:number|string){if(selected.value && ['toggle','control_input'].includes(selected.value.kind)){graphControl(selected.value.id,value);return}if(!project.value||!selected.value||!graphEditable.value)return;const next=clone(project.value);next.graph.nodes.find(n=>n.id===selected.value!.id)!.control_value=value;void task(()=>saveProject(next, true, {[selected.value!.id]:["control_value"]}))}
 function editCurve(parameters: Record<string, number>) {
   if (!project.value || !selected.value || !graphEditable.value) return
   const next = clone(project.value)
   Object.assign(next.graph.nodes.find(n => n.id === selected.value!.id)!.parameters, parameters)
-  void task(() => saveProject(next))
+  void task(() => saveProject(next,true,{[selected.value!.id]:Object.keys(parameters).map(k=>`parameters.${k}`)}))
 }
 function nodeChannels(width: number) {
   if (!project.value || !selected.value || !graphEditable.value) return
@@ -1032,12 +1079,12 @@ function nodeChannels(width: number) {
   node.channels = width
   // A narrower meter loses its upper level outputs, so drop their cables too.
   if (node.kind === 'meter') next.graph.edges = next.graph.edges.filter(e => e.source !== node.id || !/^level_[1-8]$/.test(e.source_port) || Number(e.source_port.slice(6)) <= width)
-  void task(() => saveProject(next))
+  void task(() => saveProject(next, true, {[selected.value!.id]:["channels"]}))
 }
 function renameNode(label: string) {
   if (!project.value || !selected.value || !graphEditable.value || !label.trim()) return
   const next = clone(project.value); next.graph.nodes.find(n=>n.id===selected.value!.id)!.label = label.trim()
-  void task(()=>saveProject(next))
+  void task(()=>saveProject(next, true, {[selected.value!.id]:["label"]}))
 }
 async function duplicateNode(id: string) {
   if (!project.value || !graphEditable.value) return
@@ -1047,6 +1094,11 @@ async function duplicateNode(id: string) {
   const next = clone(project.value), copy = duplicateNodes(next.graph.nodes, next.graph.edges, ids)
   next.graph.nodes.push(...copy.nodes); next.graph.edges.push(...copy.edges)
   await saveProject(next); await nextTick()
+  // Newly inserted Vue Flow nodes are hidden until measured. Keep keyboard
+  // selection on the copy while that measurement completes, then restore focus.
+  removeSelectedNodes(getSelectedNodes.value)
+  const copied=findNode(copy.id);if(copied)addSelectedNodes([copied])
+  await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())))
   document.querySelector<HTMLElement>(`.vue-flow__node[data-id="${copy.id}"] .patch-node`)?.focus()
 }
 function deleteNode(id: string) { nodeMenu.value = null; removeEdges([], [id]) }
@@ -1239,7 +1291,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize',phoneLayoutChanged);
       <StageView v-else-if="project && stage" :project="project" :user-id="user?.id||''" :beats="scoreBeats" :part="part" :playback="partPlayback" :playback-all="telemetry?.parts||[]" :global-beat="beat" :beat="partBeat" :meter-beat="meterBeat" :position="scorePosition" :bpm="active && telemetry ? telemetry.bpm : project.bpm" :active="active" :stale="stale" :running="running" :status="partStatus" :can-launch="canLaunchPart" :monitor-open="stageMonitor" @select="selectedPart = $event" @launch="playing => task(() => launchPart(playing))" @midi="performanceMidi" @fullscreen="task(toggleFullscreen)" @monitor="stageMonitor = !stageMonitor" />
       <div v-else-if="project && tab === 'graph'" class="graph-workspace" :class="{ 'graph-light': graphLight }">
         <aside v-if="library" class="node-library"><div class="library-heading"><button class="library-accordion-title" :aria-expanded="nodeLibraryOpen" aria-controls="node-library-content" @click="sampleLibraryOpen=false;nodeLibraryOpen=!nodeLibraryOpen"><ChevronDown :size="14" :class="{collapsed:!nodeLibraryOpen}" /> Node library</button><button class="icon-button" aria-label="Hide node library" @click="library = false"><LayoutGrid :size="15" /></button></div><div :class="{expanded:nodeLibraryOpen}" :inert="!nodeLibraryOpen" :aria-hidden="!nodeLibraryOpen" id="node-library-content" class="node-library-content"><label class="search-box"><Search :size="15" /><input v-model="search" placeholder="Find a node…" aria-label="Search nodes"><kbd>/</kbd></label><select v-model="category" aria-label="Node category"><option v-for="c in categories" :key="c">{{ c }}</option></select><div class="library-list"><button v-for="d in catalog" :key="d.kind" class="library-node" :disabled="!graphEditable" :title="d.description" :draggable="graphEditable" @dragstart="libraryDrag($event,d.kind)" @touchstart.prevent @pointerdown="libraryTouchStart($event,{kind:d.kind},d.label)" @click="addNode(d)"><span class="library-glyph" :class="d.outputs[0]?.signal || 'audio'">{{ d.symbol }}</span><span>{{ d.label }}<small>{{ d.category }}</small></span><Plus :size="13" class="add-sign" /></button></div></div><SubgraphLibrary :open="!nodeLibraryOpen&&!sampleLibraryOpen" @toggle="nodeLibraryOpen=sampleLibraryOpen?false:!nodeLibraryOpen;sampleLibraryOpen=false" ref="libraryPanel" :editable="graphEditable" @touch-insert="libraryTouchStart" @insert="(id,version)=>task(()=>importSubgraph(id,version))" /><SampleLibrary @touch="(event,sample)=>libraryTouchStart(event,{sample:sample.id},sample.name)" ref="samplePanel" :key="project.id" :project-id="project.id" :open="sampleLibraryOpen" :editable="graphEditable" @toggle="sampleLibraryOpen=!sampleLibraryOpen;nodeLibraryOpen=false" @entries="projectSamples=$event" @use="addSampleNode" /></aside>
-        <div v-if="libraryTouchPreview" class="library-touch-preview" :style="{left:`${libraryTouchPreview.x + 16}px`,top:`${libraryTouchPreview.y - 24}px`}" aria-hidden="true">＋ {{ libraryTouchPreview.label }}</div><div ref="graphCanvas" class="graph-canvas" @dragover.prevent @drop.prevent="libraryDrop"><VueFlow :key="graphParent || 'root'" :nodes="flowNodes" :edges="flowEdges" :node-types="nodeTypes" :edge-types="edgeTypes" :min-zoom="0.2" :max-zoom="2" :nodes-connectable="graphEditable" :connect-on-click="false" :delete-key-code="null" :pan-activation-key-code="null" :selection-key-code="true" :multi-selection-key-code="['Control','Meta']" :selection-mode="SelectionMode.Partial" :pan-on-drag="[1,2]" :fit-view-options="{maxZoom:phoneCompact ? 0.5 : 1}" :fit-view-on-init="!graphView" :default-viewport="graphView || { x: 0, y: 0, zoom: 1 }" @selection-start="selectionGesture=true" @selection-end="finishSelection" @connect="onConnect" @node-drag-stop="nodeDrag" @selection-drag-stop="nodeDrag" @selection-context-menu="groupMenu" @edge-click="({ edge }) => selectedEdges = [edge.id]" @node-click="selectedEdges = []" @pane-click="selectedEdges = []"><Background :gap="24" :size="1" pattern-color="#394043" /><Controls position="bottom-left" :show-interactive="false" /></VueFlow><div class="canvas-top"><button v-if="!library" class="button small" @click="library = true"><LayoutGrid :size="14" /> Library</button><div class="graph-location"><nav class="graph-breadcrumbs" aria-label="Graph path"><button class="text-button" @click="navigateGraph(null)">Root graph</button><template v-for="n in breadcrumbs" :key="n.id"><span> / </span><button class="text-button" @click="navigateGraph(n.id)">{{n.label}}</button></template></nav><span class="canvas-caption">{{ visibleNodes.length }} NODES <span>/</span> {{ visibleEdges.length }} CONNECTIONS</span></div><div class="canvas-tools"><button class="icon-button" :disabled="!undo.length || !graphEditable" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" @click="task(undoEdit)"><Undo2 :size="16" /></button><button class="icon-button" :aria-label="graphLight ? 'Dark graph theme' : 'Light graph theme'" :aria-pressed="graphLight" :title="graphLight ? 'Switch the graph and library to the dark theme' : 'Switch the graph and library to the light theme'" @click="graphLight = !graphLight"><Sun v-if="!graphLight" :size="16" /><Moon v-else :size="16" /></button></div></div><svg v-if="inputDrag.preview.value" style="position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;z-index:50" aria-hidden="true"><path v-for="(origin,index) in inputDrag.preview.value.origins" :key="index" :d="`M ${origin.x} ${origin.y} C ${origin.x+70} ${origin.y}, ${inputDrag.preview.value.x-70} ${inputDrag.preview.value.y}, ${inputDrag.preview.value.x} ${inputDrag.preview.value.y}`" fill="none" :stroke="origin.color" stroke-width="1.5" stroke-dasharray="6 5" /></svg><div v-if="inputDrag.preview.value" class="connection-hint">Move {{inputDrag.preview.value.ids.length}} connections to an input · Drop elsewhere to disconnect · Esc to cancel</div><div v-else-if="pendingPort" class="connection-hint">Choose a {{ pendingPort.direction === 'source' ? 'target input' : 'source output' }} · Esc to cancel</div></div>
+        <div v-if="libraryTouchPreview" class="library-touch-preview" :style="{left:`${libraryTouchPreview.x + 16}px`,top:`${libraryTouchPreview.y - 24}px`}" aria-hidden="true">＋ {{ libraryTouchPreview.label }}</div><div ref="graphCanvas" class="graph-canvas" @dragover.prevent @drop.prevent="libraryDrop"><VueFlow :key="graphParent || 'root'" :nodes="flowNodes" :edges="flowEdges" :node-types="nodeTypes" :edge-types="edgeTypes" :min-zoom="0.2" :max-zoom="2" :nodes-connectable="graphEditable" :connect-on-click="false" :delete-key-code="null" :pan-activation-key-code="null" :selection-key-code="true" :multi-selection-key-code="['Control','Meta']" :selection-mode="SelectionMode.Partial" :pan-on-drag="[1,2]" :fit-view-options="{maxZoom:phoneCompact ? 0.5 : 1}" :fit-view-on-init="!graphView" :default-viewport="graphView || { x: 0, y: 0, zoom: 1 }" @selection-start="selectionGesture=true" @selection-end="finishSelection" @connect="onConnect" @node-drag-stop="nodeDrag" @selection-drag-stop="nodeDrag" @selection-context-menu="groupMenu" @edge-click="({ edge }) => selectedEdges = [edge.id]" @node-click="selectedEdges = []" @pane-click="selectedEdges = []"><Background :gap="24" :size="1" pattern-color="#394043" /><Controls position="bottom-left" :show-interactive="false" /></VueFlow><div class="canvas-top"><button v-if="!library" class="button small" @click="library = true"><LayoutGrid :size="14" /> Library</button><div class="graph-location"><nav class="graph-breadcrumbs" aria-label="Graph path"><button class="text-button" @click="navigateGraph(null)">Root graph</button><template v-for="n in breadcrumbs" :key="n.id"><span> / </span><button class="text-button" @click="navigateGraph(n.id)">{{n.label}}</button></template></nav><span class="canvas-caption">{{ visibleNodes.length }} NODES <template v-if="!graphParent"><span>/</span> {{ visibleEdges.length }} CONNECTIONS</template><template v-else><button class="button small" :disabled="!graphEditable||stateBusy" @click="manageState('save')">Save state</button><button class="button small" @click="managingStates=true">Manage states</button></template></span></div><div class="canvas-tools"><button class="icon-button" :disabled="!undo.length || !graphEditable" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" @click="task(undoEdit)"><Undo2 :size="16" /></button><button class="icon-button" :aria-label="graphLight ? 'Dark graph theme' : 'Light graph theme'" :aria-pressed="graphLight" :title="graphLight ? 'Switch the graph and library to the dark theme' : 'Switch the graph and library to the light theme'" @click="graphLight = !graphLight"><Sun v-if="!graphLight" :size="16" /><Moon v-else :size="16" /></button></div></div><svg v-if="inputDrag.preview.value" style="position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;z-index:50" aria-hidden="true"><path v-for="(origin,index) in inputDrag.preview.value.origins" :key="index" :d="`M ${origin.x} ${origin.y} C ${origin.x+70} ${origin.y}, ${inputDrag.preview.value.x-70} ${inputDrag.preview.value.y}, ${inputDrag.preview.value.x} ${inputDrag.preview.value.y}`" fill="none" :stroke="origin.color" stroke-width="1.5" stroke-dasharray="6 5" /></svg><div v-if="inputDrag.preview.value" class="connection-hint">Move {{inputDrag.preview.value.ids.length}} connections to an input · Drop elsewhere to disconnect · Esc to cancel</div><div v-else-if="pendingPort" class="connection-hint">Choose a {{ pendingPort.direction === 'source' ? 'target input' : 'source output' }} · Esc to cancel</div></div>
       </div>
       <div v-else-if="project && tab === 'score'" class="content-pane score-content"><ScoreWorkspace ref="scoreWorkspace" :key="project.id" :project="project" :user-id="user?.id||''" :members="members" :beats="scoreBeats" :editable="editable&&!stage" :playing="active && (!!telemetry?.running || countingIn)" :saving="saving" :save="saveScoreProject" :draft-session="scoreDraft || undefined" @focus="selectedPart=$event" @seek="seekScore" @audition="(part,note,pitch)=>task(()=>auditionScore(part,note,pitch))" ><template #tools><button aria-label="MusicXML" title="Export MusicXML" @click="task(downloadXML)"><Download :size="15" /></button><label class="score-import" role="button" tabindex="0" title="Import MusicXML" aria-label="Import MusicXML" @keydown.enter.prevent="($event.currentTarget as HTMLElement).querySelector('input')?.click()" @keydown.space.prevent="($event.currentTarget as HTMLElement).querySelector('input')?.click()"><Upload :size="15" /><input type="file" accept=".xml,.musicxml" style="display:none" :disabled="!editable || running || countingIn" @change="task(() => uploadXML($event))"></label></template><template #footer><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(true))">Launch part</button><button v-if="project.mode !== 'structured'" class="button small" :disabled="!active || stale || !canLaunchPart" @click="task(() => launchPart(false))">Stop part</button><output class="mode-pill" aria-label="Part playback status">{{ partStatus }}</output><span v-if="notice" role="status">{{notice}}</span></template></ScoreWorkspace></div>
       <ConductorWorkspace v-else-if="project && tab === 'conductor'" :project="project" :members="members" :playback="telemetry?.parts||[]" :can-bind="canBindConductorMidi" :local-owner="suppliesConductorMidi" :can-cue="conductor || (!performanceLocked && role==='editor')" :editable="editable" :active="active" :stale="stale" @save="next=>task(()=>saveProject(next))" @cue="request=>task(()=>cueParts(request))" @midi="performanceMidi" @enter="task(enterStage)" />
@@ -1270,7 +1322,8 @@ onBeforeUnmount(() => { window.removeEventListener('resize',phoneLayoutChanged);
     <TaskProgress v-if="progress" :title="progress" />
     <ProjectSettings v-if="settingsOpen && project" :key="project.id" :project="project" :active="active" :editable="editable" @close="settingsOpen = false" @saved="settingsSaved" />
     <PartPlaybackDialog v-if="project && previewNode" :key="`${project.id}/${previewNode.id}/${previewNode.part_id}`" :project="project" :part="project.parts.find(p=>p.id===previewNode?.part_id)" :values="telemetry?.values[previewNode.id]" :stale="stale || !graphActive" @close="partPlayerPreview=null" />
-    <NodeModal :apply-script="applyScript" :script-status="telemetry?.scripts?.[selectedNode!]" :osc-message="telemetry?.osc_messages?.[selectedNode!]" :route-targets="telemetry?.route_targets" :route-target="telemetry?.route_targets?.[selected?.id??'']" :samples="projectSamples" :library-samples="librarySamples" :attach-sample="ensureProjectSample" @sample="assignSample" @sample-choices="updateSampleChoices" @sources="updateGranularSources" :input-error="telemetry?.midi_input_error" :io-status="telemetry?.node_io" @io="assignNodeIo" :parts="project?.parts" @part="assignNodePart" :project-id="project?.id" v-if="selected && selectedDescriptor && project" :visualization="telemetry?.visualizations?.[selected.id]" :sample-rate="audioSettings.sample_rate" :block-size="audioSettings.block_size" :interfaces="audioSettings.interfaces.filter(i=>i.enabled).map(i=>({...i,name:devices?.interfaces?.find((d:any)=>d.id===i.id)?.label||i.name}))" :node="selected" :descriptor="selectedDescriptor" :nodes="project.graph.nodes" :edges="project.graph.edges" :values="telemetry?.values[selected.id]" :stale="stale" :editable="editable" :active="graphActive" :saving="saving" @rename="renameNode" @expand="navigateGraph(selected!.id)" @close="selectedNode = null" @change="editParameter" @disconnect="disconnect" @source="id => selectedNode = id" @undo="task(undoEdit)" @remove="removeNode" @upload="file => task(() => withProgress('Importing and converting clip', () => uploadSample(file)))" @channels="nodeChannels" @control="controlValue" @curve="editCurve" />
+    <StateManager v-if="managingStates&&graphParent" :bank="stateBank" :editable="graphEditable" :can-recall="canRecallState" :active="graphActive" :busy="stateBusy" :status="stateStatus" :error="stateError" @close="managingStates=false" @rename="(slot,name)=>manageState('rename',slot,name)" @remove="slot=>manageState('delete',slot)" @load="loadState" />
+    <NodeModal :apply-script="applyScript" :script-status="telemetry?.scripts?.[selectedNode!]" :osc-message="telemetry?.osc_messages?.[selectedNode!]" :route-targets="telemetry?.route_targets" :route-target="telemetry?.route_targets?.[selected?.id??'']" :samples="projectSamples" :library-samples="librarySamples" :attach-sample="ensureProjectSample" @sample="assignSample" @sample-choices="updateSampleChoices" @sources="updateGranularSources" :input-error="telemetry?.midi_input_error" :io-status="telemetry?.node_io" @io="assignNodeIo" :parts="project?.parts" @part="assignNodePart" :project-id="project?.id" v-if="selected && selectedDescriptor && project" :visualization="telemetry?.visualizations?.[selected.id]" :sample-rate="audioSettings.sample_rate" :block-size="audioSettings.block_size" :interfaces="audioSettings.interfaces.filter(i=>i.enabled).map(i=>({...i,name:devices?.interfaces?.find((d:any)=>d.id===i.id)?.label||i.name}))" :node="selected" :descriptor="selectedDescriptor" :nodes="effectiveNodes" :edges="project.graph.edges" :values="telemetry?.values[selected.id]" :stale="stale" :editable="editable" :active="graphActive" :saving="saving" @rename="renameNode" @expand="navigateGraph(selected!.id)" @close="selectedNode = null" @change="editParameter" @disconnect="disconnect" @source="id => selectedNode = id" @undo="task(undoEdit)" @remove="removeNode" @upload="file => task(() => withProgress('Importing and converting clip', () => uploadSample(file)))" @channels="nodeChannels" @control="controlValue" @curve="editCurve" />
     <div v-if="creating" class="overlay"><form class="dialog-card" @submit.prevent="createProject"><header><div><div class="eyebrow">START SOMETHING</div><h2>New performance</h2></div><button type="button" class="icon-button" aria-label="Close" @click="creating = false"><X :size="20" /></button></header><label>Project name<input v-model="newName" maxlength="120" required autofocus></label><label>Performance mode</label><label v-for="m in [{ id: 'structured', title: 'Structured', text: 'A repeatable score and a shared timeline.' }, { id: 'conducted', title: 'Conducted', text: 'One conductor, an evolving performance.' }, { id: 'freeform', title: 'Freeform', text: 'Independent players, a common pulse.' }]" :key="m.id" class="mode-choice" :class="{ chosen: newMode === m.id }"><input v-model="newMode" type="radio" :value="m.id"><div><strong>{{ m.title }}</strong><p>{{ m.text }}</p></div></label><HelpNote>Structured mode follows the shared score. Conducted and freeform modes also support individual part launching.</HelpNote><button class="button primary wide" :disabled="busy">{{ busy ? 'Creating…' : 'Create performance' }}<Plus :size="16" /></button></form></div>
 
     <div v-if="revisionsOpen" class="overlay" @click.self="revisionsOpen=false"><section class="dialog-card revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revisions-title"><header><div><div class="eyebrow">PROJECT HISTORY</div><h2 id="revisions-title">Revisions</h2></div><button type="button" class="icon-button" aria-label="Close" @click="revisionsOpen=false"><X :size="20" /></button></header><HelpNote>Select a revision to load it. Editing an older revision creates a new revision at the end of the history.</HelpNote><ol class="revision-list"><li v-for="entry in revisions" :key="entry.revision" :class="{ current: entry.current, loaded: loadedRevision === entry.revision }"><span class="revision-line" aria-hidden="true"></span><button class="revision-entry" @click="loadRevision(entry.revision)"><strong>Revision {{ entry.revision }}</strong><small v-if="entry.current">Current working copy</small><small v-else-if="loadedRevision === entry.revision">Loaded source · next save branches here</small><small v-else>Saved snapshot</small></button></li></ol></section></div>

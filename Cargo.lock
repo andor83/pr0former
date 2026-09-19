@@ -2292,6 +2292,7 @@ dependencies = [
  "pr0-core",
  "rtrb",
  "rustfft",
+ "serde_json",
 ]
 
 [[package]]

@@ -80,6 +80,39 @@ MIDI timing remains unverified.
 
 pr0former is a development alpha. Software validation does not establish physical audio latency, deadline reliability, iPad compatibility, or readiness for a 32-player performance.
 
+## Subgraph saved states (2026-09-18)
+
+Implemented numbered/named state banks with up to 64 slots, descendant option
+capture, runtime-only recall and transient node feedback. Inside subgraphs, Save
+state and Manage states replace the connection count; the root toolbar remains
+unchanged. Management supports offline saves, names, deletion and revision/role
+checks. Load requires the engine and remains available under the performance lock.
+The State input accepts integer slots or exact text names, consumes explicit
+repeated events and suppresses held selectors.
+
+Recalls prepare while the graph renders and install between blocks, with generation
+checks to discard superseded work. Surviving nodes restore by ID and kind; missing,
+moved-out and different-kind nodes are skipped. Compatible DSP histories and
+musical clocks survive; Value republishes and Smooth change retains its ongoing
+transition, including when smoothing settings change. Authoritative online capture,
+field-wise reconciliation after edits, saved-only sample bundling/remapping and a
+bounded failure diagnostic history are implemented. Successful installation events
+alone cause the 650 ms cyan glow; reduced motion uses a static outline, and navigation
+or reconnect does not replay feedback. These runtime values/events do not change
+saved options, revisions or undo history.
+
+Validation: 402 workspace unit/integration tests and one documentation test passed
+(one opt-in benchmark ignored), including the render/recall allocation guards;
+142 frontend tests and the production build passed. Six affected browser cases
+passed across saved states, subgraph nesting/duplication/undo and control routing.
+New coverage includes offline management, numbering/naming bounds, authorization,
+stale revisions and installs, latest-pending replacement, runtime/authored separation,
+saved-only library samples, numeric/text graph selectors, repeated events,
+unchanged-node feedback, skipped/new-node scope, navigation/reload, reduced motion,
+both graph themes and centered Open subgraph placement. Browser tests use disabled
+native devices; no hardware test was performed. This is block-boundary recall,
+not sample-accurate recall or verified hardware performance.
+
 ## Clock-locked LFO (2026-09-16)
 
 `lfo` no longer starts its cycle when the node is created. Its phase is a function
